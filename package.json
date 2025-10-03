@@ -1,0 +1,31 @@
+{
+  "name": "avito-tg-bot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/apps/bot-api/main.js",
+    "start:dev": "NODE_ENV=development ts-node -r tsconfig-paths/register apps/bot-api/src/main.ts",
+    "inst-deps": "yarn install"
+  },
+  "dependencies": {
+    "@nestjs/common": "^10.2.7",
+    "@nestjs/config": "^3.0.1",
+    "@nestjs/core": "^10.2.7",
+    "@nestjs/platform-express": "^10.2.7",
+    "nestjs-telegraf": "^2.9.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "telegraf": "^4.12.2",
+    "@nestjs/axios": "^3.0.1",
+    "axios": "^1.12.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.4.5"
+  },
+  "packageManager": "yarn@1.22.22"
+}
