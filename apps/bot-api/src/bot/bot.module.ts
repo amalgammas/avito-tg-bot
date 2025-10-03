@@ -1,8 +1,11 @@
 import { Module } from '@nestjs/common';
 
+import { OzonModule } from '../config/ozon.module';
 import { BotUpdate } from './bot.update';
+import { UserCredentialsStore } from './user-credentials.store';
 
 @Module({
-  providers: [BotUpdate],
+  imports: [OzonModule],
+  providers: [BotUpdate, UserCredentialsStore],
 })
 export class BotModule {}

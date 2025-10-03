@@ -8,10 +8,9 @@ export interface AppConfig {
     webhookDomain?: string;
     webhookPath?: string;
   };
-  avito: {
+  ozon: {
     clientId: string;
-    clientSecret: string;
-    authUrl: string;
+    apiKey: string;
     apiBaseUrl: string;
   };
 }
@@ -26,10 +25,9 @@ export const configuration = (): AppConfig => ({
     webhookDomain: process.env.WEBHOOK_DOMAIN,
     webhookPath: process.env.WEBHOOK_PATH,
   },
-  avito: {
-    clientId: process.env.AVITO_CLIENT_ID ?? '',
-    clientSecret: process.env.AVITO_CLIENT_SECRET ?? '',
-    authUrl: process.env.AVITO_AUTH_URL ?? 'https://api.avito.ru/token',
-    apiBaseUrl: process.env.AVITO_API_BASE_URL ?? 'https://api.avito.ru',
+  ozon: {
+    clientId: process.env.OZON_CLIENT_ID ?? '',
+    apiKey: process.env.OZON_API_KEY ?? '',
+    apiBaseUrl: process.env.OZON_API_BASE_URL ?? 'https://api-seller.ozon.ru',
   },
 });
