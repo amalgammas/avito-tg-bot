@@ -9,17 +9,17 @@ export class BotUpdate {
   private readonly helpMessage = [
     'Привет! Я бот, который помогает автоматизировать поставки Ozon.',
     'Доступные команды:',
-    ' /start — приветствие и быстрые кнопки',
-    ' /help — показать подсказку',
-    ' /ping — проверка доступности',
+    ' /start — приветствие и главное меню',
+    ' /help — показать эту подсказку',
+    ' /ping — проверка доступности (кнопка «Проверить связь»)',
     ' /id — показать chat_id и user_id',
-    ' /time — текущее время сервера',
     ' /ozon_auth <CLIENT_ID> <API_KEY> — проверить ключи и сохранить их',
-    ' /ozon_whoami — показать информацию о продавце по сохранённым ключам',
+    ' /ozon_whoami — информация о продавце по сохранённым ключам',
     ' /ozon_clear — удалить сохранённые ключи',
     ' /ozon_me — профиль по ключам из .env',
+    ' Пользователь Дима — проверка ключей из .env',
     '',
-    'Напиши "привет" — и я отвечу 👋',
+    'Если ключей нет — нажми «Ввести ключи» в меню.',
   ].join('\n');
 
   constructor(
@@ -29,13 +29,16 @@ export class BotUpdate {
 
   @Start()
   async onStart(@Ctx() ctx: Context): Promise<void> {
-    await ctx.reply('Добро пожаловать! Вот что я умею:', {
+    const chatId = this.extractChatId(ctx);
+    const hasCredentials = chatId ? this.credentialsStore.has(chatId) : false;
+
+    const intro = hasCredentials
+      ? 'Ключи найдены. Выберите действие:'
+      : 'Сначала введите Client ID и API Key Ozon — используйте кнопку ниже или команду /ozon_auth.';
+
+    await ctx.reply(intro, {
       reply_markup: {
-        inline_keyboard: [
-          [{ text: 'Мой ID', callback_data: 'action:id' }],
-          [{ text: 'Время', callback_data: 'action:time' }],
-          [{ text: 'Помощь', callback_data: 'action:help' }],
-        ],
+        inline_keyboard: this.buildMenu(hasCredentials),
       },
     });
   }
@@ -55,11 +58,6 @@ export class BotUpdate {
     const chatId = (ctx.chat as any)?.id;
     const userId = (ctx.from as any)?.id;
     await ctx.reply(`chat_id: ${chatId}\nuser_id: ${userId}`);
-  }
-
-  @Command('time')
-  async onTime(@Ctx() ctx: Context): Promise<void> {
-    await ctx.reply(`Время сервера: ${new Date().toISOString()}`);
   }
 
   @Command('ozon_auth')
@@ -102,28 +100,7 @@ export class BotUpdate {
 
   @Command('ozon_whoami')
   async onOzonWhoAmI(@Ctx() ctx: Context): Promise<void> {
-    const chatId = this.extractChatId(ctx);
-    if (!chatId) {
-      await ctx.reply('Не удалось определить чат. Используйте приватный диалог с ботом.');
-      return;
-    }
-
-    const creds = this.credentialsStore.get(chatId);
-    if (!creds) {
-      await ctx.reply('Ключи не найдены. Используйте /ozon_auth <CLIENT_ID> <API_KEY>.');
-      return;
-    }
-
-    await ctx.reply('Запрашиваю профиль продавца в Ozon...');
-
-    try {
-      const profile = await this.ozon.getSellerInfo(creds);
-      await ctx.reply('```\n' + JSON.stringify(profile, null, 2) + '\n```', {
-        parse_mode: 'Markdown',
-      });
-    } catch (error) {
-      await ctx.reply(`❌ Ошибка при запросе профиля: ${this.formatError(error)}`);
-    }
+    await this.handleOzonWhoAmI(ctx);
   }
 
   @Command('ozon_clear')
@@ -160,32 +137,45 @@ export class BotUpdate {
     const data = (ctx.callbackQuery as any)?.data as string | undefined;
     if (!data) return;
 
-    if (data === 'action:id') {
-      const chatId = (ctx.chat as any)?.id;
-      const userId = (ctx.from as any)?.id;
-      await ctx.answerCbQuery();
-      await ctx.reply(`chat_id: ${chatId}\nuser_id: ${userId}`);
-      return;
+    switch (data) {
+      case 'action:enter_creds':
+        await ctx.answerCbQuery();
+        await ctx.reply(
+          'Отправьте команду `/ozon_auth <CLIENT_ID> <API_KEY>`\n' +
+            'Пример: `/ozon_auth 123456 abcdef...`',
+          { parse_mode: 'Markdown' },
+        );
+        break;
+      case 'action:dima':
+        await ctx.answerCbQuery();
+        await this.handleEnvProfile(ctx, 'Проверка пользователя Дима...');
+        break;
+      case 'action:ping':
+        await ctx.answerCbQuery('pong 🏓');
+        await ctx.reply('pong 🏓');
+        break;
+      case 'action:help':
+        await ctx.answerCbQuery();
+        await this.onHelp(ctx);
+        break;
+      case 'action:whoami':
+        await ctx.answerCbQuery();
+        await this.handleOzonWhoAmI(ctx);
+        break;
+      default:
+        await ctx.answerCbQuery('Неизвестное действие');
+        break;
     }
-
-    if (data === 'action:time') {
-      await ctx.answerCbQuery();
-      await ctx.reply(`Время сервера: ${new Date().toISOString()}`);
-      return;
-    }
-
-    if (data === 'action:help') {
-      await ctx.answerCbQuery();
-      await this.onHelp(ctx);
-      return;
-    }
-
-    await ctx.answerCbQuery('Неизвестное действие');
   }
 
   @Hears(/^привет$/i)
   async onHello(@Ctx() ctx: Context): Promise<void> {
     await ctx.reply('И тебе привет! 👋');
+  }
+
+  @Hears(/^пользователь дима$/i)
+  async onUserDima(@Ctx() ctx: Context): Promise<void> {
+    await this.handleEnvProfile(ctx, 'Проверяю пользователя Дима по ключам .env...');
   }
 
   @On('text')
@@ -229,5 +219,64 @@ export class BotUpdate {
       }
     }
     return asAny?.message ?? 'Ошибка без описания';
+  }
+
+  private buildMenu(hasCredentials: boolean) {
+    if (!hasCredentials) {
+      return [
+        [{ text: 'Пользователь Дима', callback_data: 'action:dima' }],
+        [{ text: 'Ввести ключи', callback_data: 'action:enter_creds' }],
+        [{ text: 'Проверить связь', callback_data: 'action:ping' }],
+        [{ text: 'Помощь', callback_data: 'action:help' }],
+      ];
+    }
+
+    return [
+      [{ text: 'Пользователь Дима', callback_data: 'action:dima' }],
+      [{ text: 'Профиль Ozon', callback_data: 'action:whoami' }],
+      [{ text: 'Проверить связь', callback_data: 'action:ping' }],
+      [{ text: 'Обновить ключи', callback_data: 'action:enter_creds' }],
+      [{ text: 'Помощь', callback_data: 'action:help' }],
+    ];
+  }
+
+  private async handleOzonWhoAmI(ctx: Context): Promise<void> {
+    const chatId = this.extractChatId(ctx);
+    if (!chatId) {
+      await ctx.reply('Не удалось определить чат. Используйте приватный диалог с ботом.');
+      return;
+    }
+
+    const creds = this.credentialsStore.get(chatId);
+    if (!creds) {
+      await ctx.reply('Ключи не найдены. Используйте /ozon_auth <CLIENT_ID> <API_KEY>.');
+      return;
+    }
+
+    await ctx.reply('Запрашиваю профиль продавца в Ozon...');
+
+    try {
+      const profile = await this.ozon.getSellerInfo(creds);
+      await ctx.reply('```\n' + JSON.stringify(profile, null, 2) + '\n```', {
+        parse_mode: 'Markdown',
+      });
+    } catch (error) {
+      await ctx.reply(`❌ Ошибка при запросе профиля: ${this.formatError(error)}`);
+    }
+  }
+
+  private async handleEnvProfile(ctx: Context, intro?: string): Promise<void> {
+    if (intro) {
+      await ctx.reply(intro);
+    }
+
+    try {
+      const profile = await this.ozon.getSellerInfo();
+      await ctx.reply('```\n' + JSON.stringify(profile, null, 2) + '\n```', {
+        parse_mode: 'Markdown',
+      });
+    } catch (error) {
+      await ctx.reply(`❌ Ошибка при проверке ключей из .env: ${this.formatError(error)}`);
+    }
   }
 }
