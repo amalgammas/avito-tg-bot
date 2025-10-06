@@ -13,6 +13,11 @@ export interface AppConfig {
     apiKey: string;
     apiBaseUrl: string;
   };
+  ozonSupply: {
+    spreadsheetId: string;
+    dropOffPointWarehouseId: string;
+    pollIntervalMs: number;
+  };
 }
 
 export const configuration = (): AppConfig => ({
@@ -29,5 +34,10 @@ export const configuration = (): AppConfig => ({
     clientId: process.env.OZON_CLIENT_ID ?? '',
     apiKey: process.env.OZON_API_KEY ?? '',
     apiBaseUrl: process.env.OZON_API_BASE_URL ?? 'https://api-seller.ozon.ru',
+  },
+  ozonSupply: {
+    spreadsheetId: process.env.OZON_SUPPLY_SPREADSHEET_ID ?? '',
+    dropOffPointWarehouseId: process.env.OZON_SUPPLY_DROP_OFF_ID ?? '',
+    pollIntervalMs: Number(process.env.OZON_SUPPLY_POLL_INTERVAL_MS ?? 30_000),
   },
 });

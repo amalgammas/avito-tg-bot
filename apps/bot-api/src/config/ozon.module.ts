@@ -6,6 +6,8 @@ import { Agent as HttpAgent } from 'http';
 import { Agent as HttpsAgent } from 'https';
 
 import { OzonApiService } from './ozon-api.service';
+import { OzonSheetService } from '../ozon/ozon-sheet.service';
+import { OzonSupplyService } from '../ozon/ozon-supply.service';
 
 @Module({
     imports: [
@@ -32,7 +34,7 @@ import { OzonApiService } from './ozon-api.service';
             },
         }),
     ],
-    providers: [OzonApiService],
-    exports: [OzonApiService],
+    providers: [OzonApiService, OzonSheetService, OzonSupplyService],
+    exports: [OzonApiService, OzonSheetService, OzonSupplyService],
 })
 export class OzonModule {}

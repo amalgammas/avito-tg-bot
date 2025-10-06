@@ -13,6 +13,37 @@ export interface OzonCredentials {
   apiKey: string;
 }
 
+export interface OzonCluster {
+  id: number;
+  name: string;
+  logistic_clusters?: Array<{
+    warehouses?: Array<{
+      warehouse_id?: number;
+      name?: string;
+    }>;
+  }>;
+}
+
+export interface OzonDraftStatus {
+  status?: string;
+  code?: number;
+  draft_id?: number;
+  errors?: Array<{ code?: number; message?: string }>;
+}
+
+export interface OzonDraftTimeslot {
+  from_in_timezone: string;
+  to_in_timezone: string;
+}
+
+export interface OzonTimeslotResponse {
+  drop_off_warehouse_timeslots?: Array<{
+    days?: Array<{
+      timeslots?: OzonDraftTimeslot[];
+    }>;
+  }>;
+}
+
 @Injectable()
 export class OzonApiService {
   private readonly logger = new Logger(OzonApiService.name);
@@ -130,6 +161,151 @@ export class OzonApiService {
   async listWarehouses(credentials?: OzonCredentials): Promise<unknown> {
     const response = await this.post('/v1/warehouse/fbo/list', {}, undefined, credentials);
     return response.data;
+  }
+
+  /** Получить список кластеров и складов. */
+  async listClusters(
+    payload: {
+      clusterIds?: number[];
+      clusterType?: string;
+    } = {},
+    credentials?: OzonCredentials,
+  ): Promise<OzonCluster[]> {
+    const body = {
+      cluster_ids: payload.clusterIds ?? [],
+      cluster_type: payload.clusterType ?? 'CLUSTER_TYPE_OZON',
+    };
+    const response = await this.post<{ clusters?: OzonCluster[] }>(
+      '/v1/cluster/list',
+      body,
+      undefined,
+      credentials,
+    );
+    return response.data?.clusters ?? [];
+  }
+
+  /** Найти ID кластера по имени (без учёта регистров и пробелов). */
+  findClusterIdByName(targetName: string, clusters: OzonCluster[]): number | undefined {
+    const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, '').toLowerCase();
+    const want = normalize(targetName);
+
+    for (const cluster of clusters) {
+      if (normalize(cluster.name) === want) {
+        return cluster.id;
+      }
+    }
+    return undefined;
+  }
+
+  /** Найти ID склада внутри кластера по названию. */
+  findWarehouseId(
+    clusterName: string,
+    warehouseName: string,
+    clusters: OzonCluster[],
+  ): number | undefined {
+    const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, '').toLowerCase();
+    const wantCluster = normalize(clusterName);
+    const wantWarehouse = normalize(warehouseName);
+
+    for (const cluster of clusters) {
+      if (normalize(cluster.name) !== wantCluster) continue;
+      for (const logisticCluster of cluster.logistic_clusters ?? []) {
+        for (const warehouse of logisticCluster.warehouses ?? []) {
+          if (normalize(warehouse.name) === wantWarehouse) {
+            return warehouse.warehouse_id;
+          }
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  /** Создать черновик поставки. Возвращает operation_id. */
+  async createDraft(
+    payload: {
+      clusterIds: Array<number | string>;
+      dropOffPointWarehouseId: number | string;
+      items: Array<{ sku: number; quantity: number }>;
+      type: 'CREATE_TYPE_DIRECT' | 'CREATE_TYPE_CROSSDOCK';
+    },
+    credentials?: OzonCredentials,
+  ): Promise<string | undefined> {
+    const response = await this.post<{ operation_id?: string }>(
+      '/v1/draft/create',
+      {
+        cluster_ids: payload.clusterIds,
+        drop_off_point_warehouse_id: payload.dropOffPointWarehouseId,
+        items: payload.items,
+        type: payload.type,
+      },
+      undefined,
+      credentials,
+    );
+
+    return response.data?.operation_id;
+  }
+
+  /** Получить статус черновика по operation_id. */
+  async getDraftInfo(
+    operationId: string,
+    credentials?: OzonCredentials,
+  ): Promise<OzonDraftStatus> {
+    const response = await this.post<OzonDraftStatus>(
+      '/v1/draft/create/info',
+      { operation_id: operationId },
+      undefined,
+      credentials,
+    );
+    return response.data;
+  }
+
+  /** Запросить таймслоты для черновика. */
+  async getDraftTimeslots(
+    payload: {
+      draftId: number | string;
+      warehouseIds: Array<number | string>;
+      dateFrom: string;
+      dateTo: string;
+    },
+    credentials?: OzonCredentials,
+  ): Promise<OzonTimeslotResponse> {
+    const response = await this.post<OzonTimeslotResponse>(
+      '/v1/draft/timeslot/info',
+      {
+        draft_id: payload.draftId,
+        date_from: payload.dateFrom,
+        date_to: payload.dateTo,
+        warehouse_ids: payload.warehouseIds.map(String),
+      },
+      undefined,
+      credentials,
+    );
+
+    return response.data;
+  }
+
+  /** Создать поставку на основе черновика. Возвращает operation_id. */
+  async createSupply(
+    payload: {
+      draftId: number | string;
+      warehouseId: number | string;
+      timeslot: OzonDraftTimeslot;
+    },
+    credentials?: OzonCredentials,
+  ): Promise<string | undefined> {
+    const response = await this.post<{ operation_id?: string }>(
+      '/v1/draft/supply/create',
+      {
+        draft_id: payload.draftId,
+        warehouse_id: payload.warehouseId,
+        timeslot: payload.timeslot,
+      },
+      undefined,
+      credentials,
+    );
+
+    return response.data?.operation_id;
   }
 
   private resolveUrl(baseUrl: string, url?: string): string | undefined {
