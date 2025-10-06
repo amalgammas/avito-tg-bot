@@ -5,6 +5,7 @@ import { Context } from 'telegraf';
 import { OzonApiService, OzonCredentials, OzonCluster } from '../config/ozon-api.service';
 import { OzonSupplyService } from '../ozon/ozon-supply.service';
 import { OzonSupplyProcessResult, OzonSupplyTask } from '../ozon/ozon-supply.types';
+import { BotSessionStore, ClusterOption, FlowState } from './bot-session.store';
 import { UserCredentialsStore } from './user-credentials.store';
 
 @Update()
@@ -20,6 +21,7 @@ export class BotUpdate {
     ' /ozon_auth <CLIENT_ID> <API_KEY> — сохранить ключи',
     ' /ozon_clear — удалить сохранённые ключи',
     ' /ozon_run [ссылка] — запуск цикла поиска таймслотов и создание поставок (можно указать ссылку на конкретный файл)',
+    ' /ozon_load <ссылка> — загрузить шаблон, выбрать кластеры и запустить обработку',
     ' /ozon_preview <ссылка> — показать задачи и товары из таблицы',
     ' /ozon_keys — показать сохранённые ключи (значения маскированы)',
     ' /ozon_clusters — вывести список доступных кластеров и складов',
@@ -31,6 +33,7 @@ export class BotUpdate {
     private readonly ozon: OzonApiService,
     private readonly supplyService: OzonSupplyService,
     private readonly credentialsStore: UserCredentialsStore,
+    private readonly sessionStore: BotSessionStore,
   ) {}
 
   @Start()
@@ -232,11 +235,82 @@ export class BotUpdate {
       await this.supplyService.processTasks(tasks, {
         credentials,
         onEvent: async (result) => this.sendSupplyEvent(ctx, result),
+        delayBetweenCallsMs: this.supplyService.getPollIntervalMs(),
       });
 
       await ctx.reply('✅ Все задачи обработаны.');
     } catch (error) {
       await ctx.reply(`❌ Ошибка при запуске обработки: ${this.formatError(error)}`);
+      await this.safeSendErrorPayload(ctx, error);
+    }
+  }
+
+  @Command('ozon_load')
+  async onOzonLoad(@Ctx() ctx: Context): Promise<void> {
+    const chatId = this.extractChatId(ctx);
+    if (!chatId) {
+      await ctx.reply('Не удалось определить чат. Используйте приватный диалог с ботом.');
+      return;
+    }
+
+    const args = this.parseCommandArgs(ctx);
+    if (!args.length) {
+      await ctx.reply('Использование: /ozon_load <ссылка или ID Google Sheets>');
+      return;
+    }
+
+    const spreadsheet = args[0];
+    const storedCreds = this.credentialsStore.get(chatId);
+    const hasEnv = await this.hasEnvCredentials();
+
+    if (!storedCreds && !hasEnv) {
+      await ctx.reply(
+        '🔐 Сначала сохраните ключи через /ozon_auth <CLIENT_ID> <API_KEY> или задайте переменные .env.',
+      );
+      return;
+    }
+
+    await ctx.reply('Загружаю шаблон, подождите пару секунд...');
+
+    try {
+      const tasks = await this.supplyService.prepareTasks({
+        credentials: storedCreds ?? undefined,
+        spreadsheet,
+      });
+
+      const { validTasks, clusterOptions, missingCluster, missingWarehouse } = this.prepareFlowFromTasks(
+        tasks,
+        this.supplyService.getCachedClusters(),
+      );
+
+      if (!validTasks.length) {
+        await ctx.reply(
+          'В таблице нет задач с определёнными кластером и складом. Проверьте заполнение колонок city и warehouse_name.',
+        );
+        return;
+      }
+
+      const state = this.sessionStore.setFlowState(chatId, {
+        spreadsheet,
+        tasks: this.cloneTasks(validTasks),
+        clusterOptions,
+        selectedClusterIds: new Set<number>(),
+        selectionMessageId: undefined,
+      });
+
+      const view = this.buildClusterSelectionView(state);
+      const sent = await ctx.reply(view.text, {
+        reply_markup: { inline_keyboard: view.keyboard },
+      });
+
+      this.sessionStore.updateFlowState(chatId, (current) => {
+        if (!current) return undefined;
+        return { ...current, selectionMessageId: (sent as any)?.message_id ?? current.selectionMessageId };
+      });
+
+      await this.reportSkippedTasks(ctx, missingCluster, missingWarehouse);
+    } catch (error) {
+      await ctx.reply(`❌ Ошибка при загрузке шаблона: ${this.formatError(error)}`);
       await this.safeSendErrorPayload(ctx, error);
     }
   }
@@ -302,6 +376,11 @@ export class BotUpdate {
     const data = (ctx.callbackQuery as any)?.data as string | undefined;
     if (!data) return;
 
+    if (data.startsWith('flow:')) {
+      await this.handleFlowCallback(ctx, data);
+      return;
+    }
+
     switch (data) {
       case 'action:enter_creds':
         await ctx.answerCbQuery();
@@ -327,6 +406,13 @@ export class BotUpdate {
         await ctx.answerCbQuery();
         await this.onOzonClusters(ctx);
         break;
+      case 'action:load':
+        await ctx.answerCbQuery();
+        await ctx.reply(
+          'Отправьте ссылку на Google Sheets командой `/ozon_load <ссылка>` — бот загрузит шаблон и предложит выбрать кластеры.',
+          { parse_mode: 'Markdown' },
+        );
+        break;
       case 'action:ping':
         await ctx.answerCbQuery('pong 🏓');
         await ctx.reply('pong 🏓');
@@ -339,6 +425,419 @@ export class BotUpdate {
         await ctx.answerCbQuery('Неизвестное действие');
         break;
     }
+  }
+
+  private async handleFlowCallback(ctx: Context, rawData: string): Promise<void> {
+    const chatId = this.extractChatId(ctx);
+    if (!chatId) {
+      await ctx.answerCbQuery('Не удалось определить чат');
+      return;
+    }
+
+    const messageId = (ctx.callbackQuery as any)?.message?.message_id;
+    const action = rawData.split(':')[1];
+    if (!action) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+
+    switch (action) {
+      case 'cluster': {
+        const payload = rawData.split(':')[2];
+        const clusterId = Number(payload);
+        if (!payload || Number.isNaN(clusterId)) {
+          await ctx.answerCbQuery('Некорректный кластер');
+          return;
+        }
+
+        const updated = this.sessionStore.updateFlowState(chatId, (current) => {
+          if (!current) return undefined;
+          const selected = new Set<number>(current.selectedClusterIds);
+          if (selected.has(clusterId)) {
+            selected.delete(clusterId);
+          } else {
+            selected.add(clusterId);
+          }
+          return { ...current, selectedClusterIds: selected, selectionMessageId: messageId ?? current.selectionMessageId };
+        });
+
+        if (!updated) {
+          await ctx.answerCbQuery('Сессия устарела');
+          return;
+        }
+
+        await this.refreshClusterSelectionMessage(ctx, chatId, updated, messageId);
+        await ctx.answerCbQuery(
+          updated.selectedClusterIds.has(clusterId) ? 'Кластер добавлен' : 'Кластер исключён',
+        );
+        return;
+      }
+      case 'select_all': {
+        const updated = this.sessionStore.updateFlowState(chatId, (current) => {
+          if (!current) return undefined;
+          const all = current.clusterOptions.map((option) => option.id);
+          return {
+            ...current,
+            selectedClusterIds: new Set<number>(all),
+            selectionMessageId: messageId ?? current.selectionMessageId,
+          };
+        });
+
+        if (!updated) {
+          await ctx.answerCbQuery('Сессия устарела');
+          return;
+        }
+
+        await this.refreshClusterSelectionMessage(ctx, chatId, updated, messageId);
+        await ctx.answerCbQuery('Выбраны все кластеры');
+        return;
+      }
+      case 'clear': {
+        const updated = this.sessionStore.updateFlowState(chatId, (current) => {
+          if (!current) return undefined;
+          return {
+            ...current,
+            selectedClusterIds: new Set<number>(),
+            selectionMessageId: messageId ?? current.selectionMessageId,
+          };
+        });
+
+        if (!updated) {
+          await ctx.answerCbQuery('Сессия устарела');
+          return;
+        }
+
+        await this.refreshClusterSelectionMessage(ctx, chatId, updated, messageId);
+        await ctx.answerCbQuery('Выбор очищен');
+        return;
+      }
+      case 'preview':
+        await this.sendFlowPreview(ctx, chatId);
+        return;
+      case 'start':
+        await this.startFlowProcessing(ctx, chatId);
+        return;
+      case 'cancel': {
+        this.sessionStore.clearFlowState(chatId);
+        await ctx.answerCbQuery('Выбор отменён');
+        if (messageId) {
+          try {
+            const rawChatId = (ctx.callbackQuery as any)?.message?.chat?.id ?? chatId;
+            await ctx.telegram.editMessageText(rawChatId, messageId, undefined, 'Выбор кластеров отменён.');
+          } catch (error) {
+            this.logger.warn(`Не удалось обновить сообщение после отмены: ${this.formatError(error)}`);
+          }
+        }
+        return;
+      }
+      default:
+        await ctx.answerCbQuery('Неизвестное действие');
+        return;
+    }
+  }
+
+  private async refreshClusterSelectionMessage(
+    ctx: Context,
+    chatId: string,
+    state: FlowState,
+    messageId?: number,
+  ): Promise<void> {
+    const view = this.buildClusterSelectionView(state);
+    const targetMessageId = messageId ?? state.selectionMessageId;
+    const rawChatId = (ctx.callbackQuery as any)?.message?.chat?.id ?? chatId;
+    if (!targetMessageId) {
+      return;
+    }
+
+    try {
+      await ctx.telegram.editMessageText(rawChatId, targetMessageId, undefined, view.text, {
+        reply_markup: { inline_keyboard: view.keyboard },
+      });
+    } catch (error) {
+      this.logger.warn(`Не удалось обновить выбор кластеров: ${this.formatError(error)}`);
+    }
+  }
+
+  private async startFlowProcessing(ctx: Context, chatId: string): Promise<void> {
+    const state = this.sessionStore.getFlowState(chatId);
+    if (!state) {
+      await ctx.answerCbQuery('Сессия устарела');
+      return;
+    }
+
+    if (!state.selectedClusterIds.size) {
+      await ctx.answerCbQuery('Сначала выберите кластер');
+      await ctx.reply('Выберите минимум один кластер и повторите запуск.');
+      return;
+    }
+
+    const selectedOptions = state.clusterOptions.filter((option) =>
+      state.selectedClusterIds.has(option.id),
+    );
+    const tasksToRun = state.tasks.filter(
+      (task) => task.clusterId && state.selectedClusterIds.has(task.clusterId),
+    );
+
+    if (!tasksToRun.length) {
+      await ctx.answerCbQuery('Нет задач для выбранных кластеров');
+      await ctx.reply('Для выбранных кластеров не нашлось задач. Попробуйте выбрать другие.');
+      return;
+    }
+
+    const messageId = (ctx.callbackQuery as any)?.message?.message_id ?? state.selectionMessageId;
+    if (messageId) {
+      try {
+        const rawChatId = (ctx.callbackQuery as any)?.message?.chat?.id ?? chatId;
+        await ctx.telegram.editMessageText(
+          rawChatId,
+          messageId,
+          undefined,
+          '🚀 Запускаю обработку выбранных кластеров...',
+        );
+      } catch (error) {
+        this.logger.warn(`Не удалось обновить сообщение перед запуском: ${this.formatError(error)}`);
+      }
+    }
+
+    await ctx.answerCbQuery('Запускаю обработку');
+    this.sessionStore.clearFlowState(chatId);
+    await this.runSelectedTasks(ctx, chatId, selectedOptions, tasksToRun, state.spreadsheet);
+  }
+
+  private async runSelectedTasks(
+    ctx: Context,
+    chatId: string,
+    selectedOptions: ClusterOption[],
+    tasks: OzonSupplyTask[],
+    spreadsheet: string,
+  ): Promise<void> {
+    const storedCreds = this.credentialsStore.get(chatId);
+    const hasEnv = await this.hasEnvCredentials();
+
+    if (!storedCreds && !hasEnv) {
+      await ctx.reply('🔐 Ключи не найдены. Введите их через /ozon_auth и запустите снова.');
+      return;
+    }
+
+    const summaryLines = selectedOptions.map(
+      (option) => `• ${option.name} — задач: ${option.taskCount}`,
+    );
+
+    await ctx.reply(
+      [
+        'Запускаю обработку выбранных кластеров.',
+        `Источник: ${this.describeSpreadsheet(spreadsheet)}`,
+        '',
+        'Кластеры:',
+        ...summaryLines,
+        '',
+        `Всего задач: ${tasks.length}`,
+      ].join('\n'),
+    );
+
+    const taskMap = new Map<string, OzonSupplyTask>();
+    for (const task of this.cloneTasks(tasks)) {
+      taskMap.set(task.taskId, task);
+    }
+
+    try {
+      await this.supplyService.processTasks(taskMap, {
+        credentials: storedCreds ?? undefined,
+        onEvent: async (result) => this.sendSupplyEvent(ctx, result),
+        delayBetweenCallsMs: this.supplyService.getPollIntervalMs(),
+      });
+      await ctx.reply('✅ Все выбранные задачи обработаны.');
+    } catch (error) {
+      await ctx.reply(`❌ Ошибка при обработке выбранных задач: ${this.formatError(error)}`);
+      await this.safeSendErrorPayload(ctx, error);
+    }
+  }
+
+  private async sendFlowPreview(ctx: Context, chatId: string): Promise<void> {
+    const state = this.sessionStore.getFlowState(chatId);
+    if (!state) {
+      await ctx.answerCbQuery('Сессия устарела');
+      return;
+    }
+
+    if (!state.tasks.length) {
+      await ctx.answerCbQuery('Черновик пуст');
+      await ctx.reply('В текущем черновике нет задач.');
+      return;
+    }
+
+    const taskMap = new Map<string, OzonSupplyTask>();
+    for (const task of this.cloneTasks(state.tasks)) {
+      taskMap.set(task.taskId, task);
+    }
+
+    const clusterLines = this.supplyService.getClustersOverview(taskMap);
+    const previewMessages = this.formatTasksPreview(taskMap, clusterLines);
+
+    if (!previewMessages.length) {
+      await ctx.answerCbQuery('Нечего показывать');
+      await ctx.reply('Не удалось сформировать предпросмотр. Попробуйте загрузить шаблон заново.');
+      return;
+    }
+
+    await ctx.answerCbQuery('Черновик отправлен');
+    await ctx.reply(`Черновик содержит задач: ${state.tasks.length}. Ниже список.`);
+    for (const message of previewMessages) {
+      await ctx.reply(message, { parse_mode: 'Markdown' });
+    }
+  }
+
+  private buildClusterSelectionView(state: FlowState): {
+    text: string;
+    keyboard: Array<Array<{ text: string; callback_data: string }>>;
+  } {
+    const selected = state.clusterOptions.filter((option) =>
+      state.selectedClusterIds.has(option.id),
+    );
+    const selectedLines = selected.length
+      ? selected.map((option) => `• ${option.name} — задач: ${option.taskCount}`)
+      : ['— пока ничего не выбрано —'];
+
+    const lines = [
+      'Шаблон загружен.',
+      `Источник: ${this.describeSpreadsheet(state.spreadsheet)}`,
+      `Задач с доступными кластерами: ${state.tasks.length}`,
+      '',
+      'Выберите кластеры для запуска (нажмите, чтобы переключить):',
+      'Нужно свериться с содержимым? Нажми «Просмотр черновика».',
+      '',
+      'Выбраны:',
+      ...selectedLines,
+    ];
+
+    const clusterButtons = state.clusterOptions.map((option) => [
+      {
+        text: `${state.selectedClusterIds.has(option.id) ? '✅' : '⬜️'} ${option.name} (${option.taskCount})`,
+        callback_data: `flow:cluster:${option.id}`,
+      },
+    ]);
+
+    const controls: Array<Array<{ text: string; callback_data: string }>> = [];
+    if (state.clusterOptions.length > 1) {
+      controls.push([
+        { text: 'Выбрать все', callback_data: 'flow:select_all' },
+        { text: 'Очистить', callback_data: 'flow:clear' },
+      ]);
+    }
+    controls.push([{ text: 'Просмотр черновика', callback_data: 'flow:preview' }]);
+    controls.push([
+      { text: 'Запустить', callback_data: 'flow:start' },
+      { text: 'Отмена', callback_data: 'flow:cancel' },
+    ]);
+
+    return { text: lines.join('\n'), keyboard: [...clusterButtons, ...controls] };
+  }
+
+  private prepareFlowFromTasks(
+    tasks: Map<string, OzonSupplyTask>,
+    clusters: OzonCluster[],
+  ): {
+    validTasks: OzonSupplyTask[];
+    clusterOptions: ClusterOption[];
+    missingCluster: OzonSupplyTask[];
+    missingWarehouse: OzonSupplyTask[];
+  } {
+    const clusterName = new Map<number, string>();
+    for (const cluster of clusters) {
+      if (typeof cluster.id === 'number') {
+        clusterName.set(cluster.id, cluster.name ?? `Кластер ${cluster.id}`);
+      }
+    }
+
+    const counters = new Map<number, ClusterOption>();
+    const validTasks: OzonSupplyTask[] = [];
+    const missingCluster: OzonSupplyTask[] = [];
+    const missingWarehouse: OzonSupplyTask[] = [];
+
+    for (const task of tasks.values()) {
+      if (!task.clusterId) {
+        missingCluster.push(task);
+        continue;
+      }
+
+      if (!task.warehouseId) {
+        missingWarehouse.push(task);
+        continue;
+      }
+
+      validTasks.push(task);
+
+      const existing = counters.get(task.clusterId);
+      if (existing) {
+        existing.taskCount += 1;
+        continue;
+      }
+
+      counters.set(task.clusterId, {
+        id: task.clusterId,
+        name: clusterName.get(task.clusterId) ?? `Кластер ${task.clusterId}`,
+        taskCount: 1,
+      });
+    }
+
+    const clusterOptions = [...counters.values()].sort((a, b) =>
+      a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }),
+    );
+
+    return { validTasks, clusterOptions, missingCluster, missingWarehouse };
+  }
+
+  private cloneTasks(tasks: Iterable<OzonSupplyTask>): OzonSupplyTask[] {
+    const result: OzonSupplyTask[] = [];
+    for (const task of tasks) {
+      result.push({
+        ...task,
+        items: task.items.map((item) => ({ ...item })),
+      });
+    }
+    return result;
+  }
+
+  private async reportSkippedTasks(
+    ctx: Context,
+    missingCluster: OzonSupplyTask[],
+    missingWarehouse: OzonSupplyTask[],
+  ): Promise<void> {
+    if (!missingCluster.length && !missingWarehouse.length) {
+      return;
+    }
+
+    if (missingCluster.length) {
+      const lines = this.formatTaskRefs(missingCluster, 6);
+      await ctx.reply(
+        ['⚠️ Не удалось определить кластер для задач:', ...lines].join('\n'),
+      );
+    }
+
+    if (missingWarehouse.length) {
+      const lines = this.formatTaskRefs(missingWarehouse, 6);
+      await ctx.reply(
+        ['⚠️ Не удалось определить склад для задач:', ...lines].join('\n'),
+      );
+    }
+  }
+
+  private formatTaskRefs(tasks: OzonSupplyTask[], limit: number): string[] {
+    const rows = tasks.slice(0, limit).map((task) => {
+      const city = task.city ? `, ${task.city}` : '';
+      return `• ${task.taskId}${city}`;
+    });
+    if (tasks.length > limit) {
+      rows.push(`… и ещё ${tasks.length - limit}`);
+    }
+    return rows;
+  }
+
+  private describeSpreadsheet(value: string): string {
+    const trimmed = (value ?? '').trim();
+    if (!trimmed) return '—';
+    if (trimmed.length <= 80) return trimmed;
+    return `${trimmed.slice(0, 40)}…${trimmed.slice(-20)}`;
   }
 
   @Hears(/^привет$/i)
@@ -398,6 +897,7 @@ export class BotUpdate {
       rows.push([{ text: 'Доступные кластеры', callback_data: 'action:clusters' }]);
     }
 
+    rows.push([{ text: 'Загрузить шаблон', callback_data: 'action:load' }]);
     rows.push([{ text: 'Показать ключи', callback_data: 'action:keys' }]);
     rows.push([{ text: 'Запустить поиск', callback_data: 'action:run' }]);
     rows.push([{ text: 'Проверить связь', callback_data: 'action:ping' }]);

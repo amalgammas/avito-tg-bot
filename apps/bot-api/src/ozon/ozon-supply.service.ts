@@ -25,7 +25,7 @@ export class OzonSupplyService {
   private readonly logger = new Logger(OzonSupplyService.name);
   private readonly dropOffPointWarehouseId: string;
   private readonly defaultSpreadsheetId: string;
-  private readonly defaultPollIntervalMs: number;
+  private readonly pollIntervalMs: number;
   private readonly draftTtlMs = 55 * 60 * 1000; // 55 минут
   private readonly draftCache = new Map<
     string,
@@ -42,8 +42,8 @@ export class OzonSupplyService {
       String(this.configService.get('ozonSupply.dropOffPointWarehouseId') ?? '').trim();
     this.defaultSpreadsheetId =
       String(this.configService.get('ozonSupply.spreadsheetId') ?? '').trim();
-    this.defaultPollIntervalMs = Number(
-      this.configService.get('ozonSupply.pollIntervalMs') ?? 30_000,
+    this.pollIntervalMs = Number(
+      this.configService.get('ozonSupply.pollIntervalMs') ?? 3_000,
     );
   }
 
@@ -81,7 +81,7 @@ export class OzonSupplyService {
       return;
     }
 
-    const delayBetweenCalls = options.delayBetweenCallsMs ?? this.defaultPollIntervalMs;
+    const delayBetweenCalls = options.delayBetweenCallsMs ?? this.pollIntervalMs;
     const credentials = options.credentials;
 
     while (taskMap.size) {
@@ -104,6 +104,10 @@ export class OzonSupplyService {
         await this.sleep(delayBetweenCalls);
       }
     }
+  }
+
+  getPollIntervalMs(): number {
+    return this.pollIntervalMs;
   }
 
   getClustersOverview(tasks: Map<string, OzonSupplyTask>): string[] {

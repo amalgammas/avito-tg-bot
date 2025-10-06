@@ -38,6 +38,6 @@ export const configuration = (): AppConfig => ({
   ozonSupply: {
     spreadsheetId: process.env.OZON_SUPPLY_SPREADSHEET_ID ?? '',
     dropOffPointWarehouseId: process.env.OZON_SUPPLY_DROP_OFF_ID ?? '',
-    pollIntervalMs: Number(process.env.OZON_SUPPLY_POLL_INTERVAL_MS ?? 30_000),
+    pollIntervalMs: Number(process.env.OZON_SUPPLY_POLL_INTERVAL_MS ?? 10000),
   },
 });
