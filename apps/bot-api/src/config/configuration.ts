@@ -26,7 +26,7 @@ export const configuration = (): AppConfig => ({
     port: Number(process.env.PORT ?? 3000),
   },
   telegram: {
-    token: process.env.TELEGRAM_BOT_TOKEN ?? '7962972662:AAHYfJa6oasRQULkWwgrbNcpZcp2_opT6NA',
+    token: process.env.TELEGRAM_BOT_TOKEN ?? '',
     webhookDomain: process.env.WEBHOOK_DOMAIN,
     webhookPath: process.env.WEBHOOK_PATH,
   },
