@@ -1,4 +1,3 @@
-// apps/bot-api/src/config/ozon.module.ts
 import { HttpModule } from '@nestjs/axios';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -11,7 +10,6 @@ import { OzonSupplyService } from '../ozon/ozon-supply.service';
 
 @Module({
     imports: [
-        // В корневом AppModule сделай ConfigModule.forRoot({ isGlobal: true })
         ConfigModule,
         HttpModule.registerAsync({
             imports: [ConfigModule],

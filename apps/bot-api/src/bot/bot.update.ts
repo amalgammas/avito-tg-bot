@@ -9,12 +9,14 @@ import { OzonApiService, OzonCredentials } from '../config/ozon-api.service';
 @Update()
 export class BotUpdate {
   private readonly logger = new Logger(BotUpdate.name);
+
   private readonly helpMessage = [
     'Привет! Я помогу оформить поставку на Ozon:',
     ' 1. /ozon_auth <CLIENT_ID> <API_KEY> — сохранить ключи',
     ' 2. /ozon_supply — загрузить Excel (Артикул, Количество) и пройти все этапы',
     ' 3. /ozon_keys — посмотреть сохранённые ключи',
     ' 4. /ozon_clear — удалить ключи из памяти',
+    ' 5. /me — посмотреть пользователя',
     '',
     'Дополнительно:',
     ' /ping — проверить доступность бота',
@@ -32,8 +34,8 @@ export class BotUpdate {
     const chatId = this.extractChatId(ctx);
     const hasCredentials = chatId ? this.credentialsStore.has(chatId) : false;
     const intro = hasCredentials
-      ? 'Ключи найдены. Готов принять Excel-файл — отправьте его или воспользуйтесь /ozon_supply.'
-      : 'Для начала сохраните Client ID и API Key Ozon через /ozon_auth <CLIENT_ID> <API_KEY>.';
+      ? 'Ключи найдены. Готов принять Excel-файл со списком поставки — вставьте файл сюда или пришлите ссылку с GoogleSheet'
+      : 'Вы не авторизованы, отсутствуют Client ID и API Key Ozon, воспользуйтесь “/ozon_auth <CLIENT_ID> <API_KEY>".';
 
     await ctx.reply(intro);
   }
@@ -48,7 +50,7 @@ export class BotUpdate {
     await ctx.reply('pong 🏓');
   }
 
-  @Command('id')
+  @Command('me')
   async onId(@Ctx() ctx: Context): Promise<void> {
     const chatId = (ctx.chat as any)?.id;
     const userId = (ctx.from as any)?.id;
@@ -74,8 +76,7 @@ export class BotUpdate {
 
     await ctx.reply(
       [
-        '✅ Ключи сохранены.',
-        'Теперь отправьте файл через /ozon_supply — я спрошу кластер, склад и дату, а затем создам поставку.',
+        '✅ Ключи сохранены.'
       ].join('\n'),
     );
 

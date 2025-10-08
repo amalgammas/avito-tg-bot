@@ -1,18 +1,22 @@
 export interface AppConfig {
   nodeEnv: string;
+
   http: {
     port: number;
   };
+
   telegram: {
     token: string;
     webhookDomain?: string;
     webhookPath?: string;
   };
+
   ozon: {
     clientId: string;
     apiKey: string;
     apiBaseUrl: string;
   };
+
   ozonSupply: {
     spreadsheetId: string;
     dropOffPointWarehouseId: string;

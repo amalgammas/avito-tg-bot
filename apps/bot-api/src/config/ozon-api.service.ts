@@ -202,7 +202,7 @@ export class OzonApiService {
 
   async listAvailableWarehouses(credentials?: OzonCredentials): Promise<OzonAvailableWarehouse[]> {
     const response = await this.post<{ warehouses?: OzonAvailableWarehouse[] }>(
-      '/v1/clusters/list',
+      '/v1/cluster/list',
       {},
       undefined,
       credentials,
