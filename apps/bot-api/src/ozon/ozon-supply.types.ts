@@ -1,5 +1,6 @@
 export interface OzonSupplyItem {
-  sku: number;
+  article: string;
+  sku?: number;
   quantity: number;
 }
 
@@ -22,6 +23,7 @@ export interface OzonSupplyProcessResult {
   task: OzonSupplyTask;
   event: OzonSupplyEvent;
   message?: string;
+  operationId?: string;
 }
 
 export type OzonSupplyEvent =
@@ -32,6 +34,7 @@ export type OzonSupplyEvent =
   | 'draftError'
   | 'timeslotMissing'
   | 'supplyCreated'
+  | 'supplyStatus'
   | 'noCredentials'
   | 'error';
 
@@ -42,24 +45,5 @@ export interface OzonSupplyProcessOptions {
   };
   delayBetweenCallsMs?: number;
   onEvent?: (result: OzonSupplyProcessResult) => void | Promise<void>;
-}
-
-export interface OzonSupplySheetTaskRow {
-  task_id: string;
-  city: string;
-  warehouse_name: string;
-  lastday: string;
-  draft_id?: number;
-  draft_operation_id?: string;
-  order_flag?: number;
-}
-
-export interface OzonSupplySheetSkuRow {
-  Артикул: string | number;
-  sku: number | string;
-}
-
-export interface OzonSupplySheetItemRow {
-  Артикул: string | number;
-  Количество: number | string;
+  dropOffWarehouseId?: number;
 }

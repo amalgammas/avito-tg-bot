@@ -3,13 +3,7 @@ import * as XLSX from 'xlsx';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
-import {
-  OzonSupplyItem,
-  OzonSupplySheetItemRow,
-  OzonSupplySheetSkuRow,
-  OzonSupplySheetTaskRow,
-  OzonSupplyTask,
-} from './ozon-supply.types';
+import { OzonSupplyItem, OzonSupplyTask } from './ozon-supply.types';
 
 @Injectable()
 export class OzonSheetService {
@@ -20,68 +14,72 @@ export class OzonSheetService {
     this.spreadsheetId = this.configService.get<string>('ozonSupply.spreadsheetId') ?? '';
   }
 
-  async loadTasks(spreadsheet?: string): Promise<OzonSupplyTask[]> {
-    const identifier = (spreadsheet ?? this.spreadsheetId).trim();
-    if (!identifier) {
-      throw new Error('Spreadsheet id or url is not configured');
+  async loadTasks(input: { spreadsheet?: string; buffer?: Buffer } = {}): Promise<OzonSupplyTask[]> {
+    let workbook: XLSX.WorkBook;
+    if (input.buffer) {
+      workbook = this.readWorkbookFromBuffer(input.buffer);
+    } else {
+      const identifier = (input.spreadsheet ?? this.spreadsheetId).trim();
+      if (!identifier) {
+        throw new Error('Spreadsheet id or url is not configured');
+      }
+      workbook = await this.downloadWorkbook(identifier);
     }
 
-    const workbook = await this.downloadWorkbook(identifier);
-    const skuSheet = workbook.Sheets['sku'];
-    const searchSheet = workbook.Sheets['поиск'];
-
-    if (!skuSheet || !searchSheet) {
-      throw new Error('Spreadsheet must contain sheets "sku" and "поиск"');
+    const sheetName = workbook.SheetNames[0];
+    if (!sheetName) {
+      throw new Error('Файл не содержит листов');
     }
 
-    const skuRows = XLSX.utils.sheet_to_json<OzonSupplySheetSkuRow>(skuSheet, {
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
       defval: '',
     });
-    const searchRows = XLSX.utils.sheet_to_json<OzonSupplySheetTaskRow>(searchSheet, {
-      defval: '',
-    });
 
-    const skuMap = new Map<string, number>();
-    for (const row of skuRows) {
-      const article = String(row['Артикул']).trim();
-      const sku = Number(row['sku']);
-      if (!article || Number.isNaN(sku)) {
+    const items: OzonSupplyItem[] = [];
+    const missingSku: string[] = [];
+
+    for (const row of rows) {
+      const articleRaw = this.pickColumn(row, ['артикул', 'sku', 'код', 'product', 'товар']);
+      const quantityRaw = this.pickColumn(row, ['количество', 'quantity', 'qty', 'amount']);
+
+      const article = this.normalizeArticle(articleRaw);
+      const quantity = this.parseQuantity(quantityRaw);
+
+      if (!article) {
+        if (articleRaw !== undefined && articleRaw !== null && articleRaw !== '') {
+          missingSku.push(String(articleRaw).trim());
+        }
         continue;
       }
-      skuMap.set(article, sku);
+
+      if (quantity === undefined || quantity <= 0) {
+        continue;
+      }
+
+      items.push({ article, quantity });
     }
 
-    const tasks: OzonSupplyTask[] = [];
-
-    for (const row of searchRows) {
-      const taskIdRaw = row.task_id;
-      const taskId = String(taskIdRaw ?? '').trim();
-      if (!taskId) {
-        continue;
-      }
-
-      const sheetName = row.task_id;
-      const taskSheet = workbook.Sheets[sheetName];
-      if (!taskSheet) {
-        this.logger.warn(`Sheet for task ${taskId} not found`);
-        continue;
-      }
-
-      const items = this.mapItems(taskSheet, skuMap);
-
-      tasks.push({
-        taskId,
-        city: String(row.city ?? '').trim(),
-        warehouseName: String(row.warehouse_name ?? '').trim(),
-        lastDay: String(row.lastday ?? '').trim(),
-        draftId: Number(row.draft_id ?? 0) || 0,
-        draftOperationId: String(row.draft_operation_id ?? '').trim(),
-        orderFlag: Number(row.order_flag ?? 0) || 0,
-        items,
-      });
+    if (!items.length) {
+      throw new Error('Не удалось найти строки с колонками «Артикул» и «Количество».');
     }
 
-    return tasks;
+    if (missingSku.length) {
+      this.logger.warn(`Пропущены строки без корректного артикула: ${missingSku.slice(0, 5).join(', ')}`);
+    }
+
+    const task: OzonSupplyTask = {
+      taskId: `sheet-${Date.now()}`,
+      city: '',
+      warehouseName: '',
+      lastDay: '',
+      draftId: 0,
+      draftOperationId: '',
+      orderFlag: 0,
+      items,
+    };
+
+    return [task];
   }
 
   private async downloadWorkbook(identifier: string): Promise<XLSX.WorkBook> {
@@ -94,6 +92,10 @@ export class OzonSheetService {
 
     const data = Buffer.from(response.data);
     return XLSX.read(data, { type: 'buffer' });
+  }
+
+  private readWorkbookFromBuffer(buffer: Buffer): XLSX.WorkBook {
+    return XLSX.read(buffer, { type: 'buffer' });
   }
 
   private resolveSpreadsheetUrl(identifier: string): string {
@@ -115,33 +117,46 @@ export class OzonSheetService {
     return `https://docs.google.com/spreadsheets/d/${trimmed}/export?format=xlsx`;
   }
 
-  private mapItems(sheet: XLSX.WorkSheet, skuMap: Map<string, number>): OzonSupplyItem[] {
-    const rows = XLSX.utils.sheet_to_json<OzonSupplySheetItemRow>(sheet, { defval: '' });
-    const items: OzonSupplyItem[] = [];
-    const missingSkus: string[] = [];
-
-    for (const row of rows) {
-      const article = String(row['Артикул']).trim();
-      if (!article) continue;
-
-      const quantity = Number(row['Количество']);
-      if (!quantity || Number.isNaN(quantity)) {
-        continue;
+  private pickColumn(row: Record<string, unknown>, aliases: string[]): unknown {
+    if (!row) return undefined;
+    const normalizedAliases = aliases.map((alias) => alias.trim().toLowerCase());
+    for (const [key, value] of Object.entries(row)) {
+      const normalizedKey = key.trim().toLowerCase();
+      if (normalizedAliases.includes(normalizedKey)) {
+        return typeof value === 'string' ? value.trim() : value;
       }
-
-      const sku = skuMap.get(article);
-      if (sku === undefined) {
-        missingSkus.push(article);
-        continue;
-      }
-
-      items.push({ sku, quantity });
     }
-
-    if (missingSkus.length) {
-      throw new Error(`Не найдены SKU для артикулов: ${missingSkus.join(', ')}`);
-    }
-
-    return items;
+    return undefined;
   }
+
+  private normalizeArticle(value: unknown): string | undefined {
+    if (value === undefined || value === null) {
+      return undefined;
+    }
+
+    const text = String(value).trim();
+    return text ? text : undefined;
+  }
+
+  private parseQuantity(value: unknown): number | undefined {
+    if (value === undefined || value === null) {
+      return undefined;
+    }
+
+    if (typeof value === 'number') {
+      return Number.isFinite(value) ? Math.round(value) : undefined;
+    }
+
+    const normalized = String(value)
+      .trim()
+      .replace(/\s+/g, '')
+      .replace(',', '.');
+    if (!normalized) {
+      return undefined;
+    }
+
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? Math.round(parsed) : undefined;
+  }
+
 }

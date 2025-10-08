@@ -6,18 +6,21 @@ import {
   OzonCredentials,
   OzonDraftTimeslot,
   OzonCluster,
+  OzonAvailableWarehouse,
 } from '../config/ozon-api.service';
 import {
   OzonSupplyProcessOptions,
   OzonSupplyProcessResult,
   OzonSupplyTask,
   OzonSupplyTaskMap,
+  OzonSupplyItem,
 } from './ozon-supply.types';
 import { OzonSheetService } from './ozon-sheet.service';
 
 interface PrepareTasksOptions {
   credentials?: OzonCredentials;
   spreadsheet?: string;
+  buffer?: Buffer;
 }
 
 @Injectable()
@@ -26,12 +29,17 @@ export class OzonSupplyService {
   private readonly dropOffPointWarehouseId: string;
   private readonly defaultSpreadsheetId: string;
   private readonly pollIntervalMs: number;
+  private readonly availableWarehousesTtlMs = 10 * 60 * 1000; // 10 минут
   private readonly draftTtlMs = 55 * 60 * 1000; // 55 минут
   private readonly draftCache = new Map<
     string,
     { operationId: string; draftId?: number; expiresAt: number }
   >();
   private lastClusters: OzonCluster[] = [];
+  private availableWarehousesCache?: {
+    warehouses: OzonAvailableWarehouse[];
+    expiresAt: number;
+  };
 
   constructor(
     private readonly sheetService: OzonSheetService,
@@ -47,9 +55,21 @@ export class OzonSupplyService {
     );
   }
 
+  private getDefaultDropOffId(): number {
+    const trimmed = this.dropOffPointWarehouseId.trim();
+    if (!trimmed) {
+      return 0;
+    }
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }
+
   async prepareTasks(options: PrepareTasksOptions = {}): Promise<OzonSupplyTaskMap> {
     const credentials = options.credentials;
-    const tasks = await this.sheetService.loadTasks(options.spreadsheet);
+    const tasks = await this.sheetService.loadTasks({
+      spreadsheet: options.spreadsheet,
+      buffer: options.buffer,
+    });
     const clusters = await this.ozonApi.listClusters({}, credentials);
     this.lastClusters = clusters;
 
@@ -84,11 +104,21 @@ export class OzonSupplyService {
     const delayBetweenCalls = options.delayBetweenCallsMs ?? this.pollIntervalMs;
     const credentials = options.credentials;
 
+    const dropOffWarehouseId = options.dropOffWarehouseId ?? this.getDefaultDropOffId();
+    if (!dropOffWarehouseId) {
+      throw new Error('Пункт сдачи (drop-off) не задан. Укажите его в мастере или через OZON_SUPPLY_DROP_OFF_ID.');
+    }
+    await this.ensureDropOffWarehouseAvailable(dropOffWarehouseId, credentials);
+
     while (taskMap.size) {
       for (const [taskId, state] of Array.from(taskMap.entries())) {
         try {
-          const result = await this.processSingleTask(state, credentials);
-          await options.onEvent?.({ task: state, event: result.event, message: result.message });
+          const result = await this.processSingleTask(state, credentials, dropOffWarehouseId);
+          await this.emitEvent(options.onEvent, result);
+
+          if (result.event === 'supplyCreated' && result.operationId) {
+            await this.emitSupplyStatus(result.operationId, state, credentials, options.onEvent);
+          }
 
           if (state.orderFlag === 1) {
             this.logger.log(`[${taskId}] Поставка создана, удаляем из очереди`);
@@ -98,7 +128,7 @@ export class OzonSupplyService {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.logger.error(`[${taskId}] Ошибка обработки: ${message}`);
-          await options.onEvent?.({ task: state, event: 'error', message });
+          await this.emitEvent(options.onEvent, { task: state, event: 'error', message });
         }
 
         await this.sleep(delayBetweenCalls);
@@ -108,6 +138,139 @@ export class OzonSupplyService {
 
   getPollIntervalMs(): number {
     return this.pollIntervalMs;
+  }
+
+  async runSingleTask(
+    task: OzonSupplyTask,
+    options: OzonSupplyProcessOptions & { readyInDays: number },
+  ): Promise<void> {
+    const cloned = this.cloneTask(task);
+    cloned.lastDay = this.computeReadyDate(options.readyInDays);
+    cloned.orderFlag = cloned.orderFlag ?? 0;
+
+    const map: OzonSupplyTaskMap = new Map([[cloned.taskId, cloned]]);
+
+    await this.processTasks(map, {
+      ...options,
+      delayBetweenCallsMs: options.delayBetweenCallsMs ?? this.pollIntervalMs,
+    });
+  }
+
+  private async ensureDropOffWarehouseAvailable(
+    dropOffId: number,
+    credentials?: OzonCredentials,
+  ): Promise<void> {
+    if (!dropOffId) {
+      throw new Error('Пункт сдачи не задан. Выберите склад drop-off перед запуском.');
+    }
+
+    const warehouses = await this.getAvailableWarehouses(credentials);
+    const found = warehouses.some(
+      (warehouse) => Number(warehouse.warehouse_id) === dropOffId,
+    );
+
+    if (!found) {
+      const sample = warehouses
+        .slice(0, 5)
+        .map((warehouse) => `${warehouse.warehouse_id}${warehouse.name ? ` (${warehouse.name})` : ''}`)
+        .join(', ');
+      const error = new Error(
+        [
+          `Склад отгрузки ${dropOffId} отсутствует среди доступных складов Ozon.`,
+          'Проверьте переменную OZON_SUPPLY_DROP_OFF_ID или права доступа.',
+          sample ? `Ответ сервиса: ${sample}${warehouses.length > 5 ? ', …' : ''}` : 'Сервис вернул пустой список.',
+        ].join(' '),
+      );
+      (error as any).isExpectedFlowError = true;
+      throw error;
+    }
+  }
+
+  private async getAvailableWarehouses(credentials?: OzonCredentials): Promise<OzonAvailableWarehouse[]> {
+    const now = Date.now();
+    const cached = this.availableWarehousesCache;
+    if (cached && cached.expiresAt > now) {
+      return cached.warehouses;
+    }
+
+    const creds = credentials ?? this.ozonApiDefaultCredentials();
+    if (!creds.clientId || !creds.apiKey) {
+      throw new Error('Не заданы ключи для проверки доступного склада');
+    }
+
+    const warehouses = await this.ozonApi.listAvailableWarehouses(creds);
+    this.availableWarehousesCache = {
+      warehouses,
+      expiresAt: now + this.availableWarehousesTtlMs,
+    };
+    return warehouses;
+  }
+
+  private async emitEvent(
+    handler: OzonSupplyProcessOptions['onEvent'],
+    result: OzonSupplyProcessResult,
+  ): Promise<void> {
+    try {
+      await handler?.(result);
+    } catch (error) {
+      this.logger.warn(`onEvent handler failed: ${String(error)}`);
+    }
+  }
+
+  private async emitSupplyStatus(
+    operationId: string,
+    task: OzonSupplyTask,
+    credentials: OzonCredentials | undefined,
+    handler: OzonSupplyProcessOptions['onEvent'],
+  ): Promise<void> {
+    try {
+      const status = await this.ozonApi.getSupplyCreateStatus(operationId, credentials);
+      const message = this.describeSupplyStatus(status);
+      await this.emitEvent(handler, {
+        task,
+        event: 'supplyStatus',
+        message,
+        operationId,
+      });
+    } catch (error) {
+      this.logger.warn(`Не удалось получить статус поставки ${operationId}: ${String(error)}`);
+      await this.emitEvent(handler, {
+        task,
+        event: 'supplyStatus',
+        message: `Не удалось получить статус поставки ${operationId}: ${this.describeUnknownError(error)}`,
+        operationId,
+      });
+    }
+  }
+
+  private describeSupplyStatus(status: unknown): string {
+    if (!status || typeof status !== 'object') {
+      return 'Статус поставки: ответ без данных';
+    }
+
+    const payload = status as any;
+    const parts: string[] = [];
+    if (payload.state) {
+      parts.push(`state=${payload.state}`);
+    }
+    if (payload.status) {
+      parts.push(`status=${payload.status}`);
+    }
+    if (Array.isArray(payload.errors) && payload.errors.length) {
+      parts.push(
+        'errors=' +
+          payload.errors
+            .map((err: any) => `${err?.code ?? 'n/a'}:${err?.message ?? '—'}`)
+            .join(', '),
+      );
+    }
+    return parts.length ? `Статус поставки: ${parts.join(', ')}` : 'Статус поставки: ответ без статуса';
+  }
+
+  private describeUnknownError(error: unknown): string {
+    if (!error) return 'unknown error';
+    if (error instanceof Error) return error.message;
+    return String(error);
   }
 
   getClustersOverview(tasks: Map<string, OzonSupplyTask>): string[] {
@@ -149,7 +312,8 @@ export class OzonSupplyService {
 
   private async processSingleTask(
     task: OzonSupplyTask,
-    credentials?: OzonCredentials,
+    credentials: OzonCredentials | undefined,
+    dropOffWarehouseId: number,
   ): Promise<OzonSupplyProcessResult> {
     if (!credentials && !this.ozonApiDefaultCredentialsAvailable()) {
       return { task, event: 'noCredentials', message: 'Не заданы ключи Ozon' };
@@ -169,7 +333,7 @@ export class OzonSupplyService {
       return this.handleExistingDraft(task, creds);
     }
 
-    return this.createDraft(task, creds);
+    return this.createDraft(task, creds, dropOffWarehouseId);
   }
 
   hasDefaultSpreadsheet(): boolean {
@@ -206,6 +370,7 @@ export class OzonSupplyService {
           task,
           event: 'supplyCreated',
           message: `Создана поставка, operation_id=${operationId}`,
+          operationId,
         };
       }
 
@@ -236,6 +401,7 @@ export class OzonSupplyService {
   private async createDraft(
     task: OzonSupplyTask,
     credentials: OzonCredentials,
+    dropOffWarehouseId: number,
   ): Promise<OzonSupplyProcessResult> {
     const cacheKey = this.getTaskHash(task);
     const cached = this.draftCache.get(cacheKey);
@@ -249,11 +415,13 @@ export class OzonSupplyService {
       };
     }
 
+    const ozonItems = await this.buildOzonItems(task, credentials);
+
     const operationId = await this.ozonApi.createDraft(
       {
         clusterIds: [task.clusterId!],
-        dropOffPointWarehouseId: this.dropOffPointWarehouseId,
-        items: task.items,
+        dropOffPointWarehouseId: dropOffWarehouseId,
+        items: ozonItems,
         type: 'CREATE_TYPE_CROSSDOCK',
       },
       credentials,
@@ -337,6 +505,21 @@ export class OzonSupplyService {
     return `${trimmed}T23:59:59Z`;
   }
 
+  private computeReadyDate(days: number): string {
+    const safeDays = Number.isFinite(days) ? Math.max(0, Math.floor(days)) : 0;
+    const base = new Date();
+    base.setUTCDate(base.getUTCDate() + safeDays);
+    base.setUTCHours(23, 59, 59, 0);
+    return this.toOzonIso(base);
+  }
+
+  private cloneTask(task: OzonSupplyTask): OzonSupplyTask {
+    return {
+      ...task,
+      items: task.items.map((item) => ({ ...item })),
+    };
+  }
+
   private rememberDraft(task: OzonSupplyTask, draftId?: number) {
     const cacheKey = this.getTaskHash(task);
     const existing = this.draftCache.get(cacheKey);
@@ -355,13 +538,64 @@ export class OzonSupplyService {
   private getTaskHash(task: OzonSupplyTask): string {
     const itemsHash = task.items
       .slice()
-      .sort((a, b) => a.sku - b.sku)
-      .map((item) => `${item.sku}:${item.quantity}`)
+      .sort((a, b) => a.article.localeCompare(b.article, 'ru', { sensitivity: 'base' }))
+      .map((item) => `${item.article}:${item.quantity}`)
       .join('|');
     return `${task.clusterId ?? 'x'}-${task.warehouseId ?? 'x'}-${itemsHash}`;
   }
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async buildOzonItems(
+    task: OzonSupplyTask,
+    credentials: OzonCredentials,
+  ): Promise<Array<{ sku: number; quantity: number }>> {
+    const result: Array<{ sku: number; quantity: number }> = [];
+    const articlesToResolve = new Set<string>();
+
+    for (const item of task.items) {
+      if (!item.article) {
+        throw new Error('В документе есть строки без артикула.');
+      }
+
+      const trimmed = item.article.trim();
+      if (!trimmed) {
+        throw new Error('В документе есть строки с пустым артикулом.');
+      }
+
+      if (!item.sku) {
+        const numericCandidate = Number(trimmed);
+        if (Number.isFinite(numericCandidate) && numericCandidate > 0) {
+          item.sku = Math.round(numericCandidate);
+        } else {
+          articlesToResolve.add(trimmed);
+        }
+      }
+    }
+
+    let resolvedSkus = new Map<string, number>();
+    if (articlesToResolve.size) {
+      resolvedSkus = await this.ozonApi.getProductsByOfferIds(Array.from(articlesToResolve), credentials);
+    }
+
+    for (const item of task.items) {
+      const trimmed = item.article.trim();
+      const skuNumber = item.sku ?? resolvedSkus.get(trimmed);
+      if (!skuNumber) {
+        throw new Error(`Для артикула «${item.article}» не найден SKU в кабинете Ozon.`);
+      }
+
+      if (!Number.isFinite(item.quantity) || item.quantity <= 0) {
+        throw new Error(`Количество должно быть положительным числом (артикул ${item.article}).`);
+      }
+
+      const normalizedSku = Math.round(skuNumber);
+      item.sku = normalizedSku;
+      result.push({ sku: normalizedSku, quantity: Math.round(item.quantity) });
+    }
+
+    return result;
   }
 }

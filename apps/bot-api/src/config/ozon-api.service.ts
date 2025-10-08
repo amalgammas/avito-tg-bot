@@ -44,6 +44,27 @@ export interface OzonTimeslotResponse {
   }>;
 }
 
+export interface OzonAvailableWarehouse {
+  warehouse_id: number;
+  name?: string;
+  is_active?: boolean;
+  is_enabled?: boolean;
+  region?: string;
+}
+
+export interface OzonProductInfo {
+  offer_id?: string;
+  id?: number;
+}
+
+export interface OzonSupplyCreateStatus {
+  operation_id?: string;
+  state?: string;
+  status?: string;
+  result?: unknown;
+  errors?: Array<{ code?: number; message?: string }>;
+}
+
 @Injectable()
 export class OzonApiService {
   private readonly logger = new Logger(OzonApiService.name);
@@ -158,11 +179,6 @@ export class OzonApiService {
     return response.data;
   }
 
-  async listWarehouses(credentials?: OzonCredentials): Promise<unknown> {
-    const response = await this.post('/v1/warehouse/fbo/list', {}, undefined, credentials);
-    return response.data;
-  }
-
   /** Получить список кластеров и складов. */
   async listClusters(
     payload: {
@@ -184,7 +200,57 @@ export class OzonApiService {
     return response.data?.clusters ?? [];
   }
 
-  /** Найти ID кластера по имени (без учёта регистров и пробелов). */
+  async listAvailableWarehouses(credentials?: OzonCredentials): Promise<OzonAvailableWarehouse[]> {
+    const response = await this.post<{ warehouses?: OzonAvailableWarehouse[] }>(
+      '/v1/clusters/list',
+      {},
+      undefined,
+      credentials,
+    );
+    return response.data?.warehouses ?? [];
+  }
+
+  async getProductsByOfferIds(
+    offers: string[],
+    credentials?: OzonCredentials,
+  ): Promise<Map<string, number>> {
+    if (!offers.length) {
+      return new Map();
+    }
+
+    const uniqueOffers = Array.from(new Set(offers.map((value) => value.trim()))).filter(Boolean);
+    if (!uniqueOffers.length) {
+      return new Map();
+    }
+
+    const response = await this.post<{ result?: { items?: Array<{ product_id?: number; offer_id?: string }> } }>(
+      '/v3/product/list',
+      {
+        filter: {
+            offer_id: uniqueOffers,
+          visibility: 'ALL',
+        },
+        last_id: '',
+        limit: 100,
+      },
+      undefined,
+      credentials,
+    );
+
+    const items = response.data?.result?.items ?? [];
+    const map = new Map<string, number>();
+    for (const item of items) {
+      const offerId = item.offer_id?.trim();
+      const productId = item.product_id;
+      if (!offerId || typeof productId !== 'number') {
+        continue;
+      }
+      map.set(offerId, productId);
+    }
+
+    return map;
+  }
+
   findClusterIdByName(targetName: string, clusters: OzonCluster[]): number | undefined {
     const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, '').toLowerCase();
     const want = normalize(targetName);
@@ -197,7 +263,6 @@ export class OzonApiService {
     return undefined;
   }
 
-  /** Найти ID склада внутри кластера по названию. */
   findWarehouseId(
     clusterName: string,
     warehouseName: string,
@@ -221,7 +286,6 @@ export class OzonApiService {
     return undefined;
   }
 
-  /** Создать черновик поставки. Возвращает operation_id. */
   async createDraft(
     payload: {
       clusterIds: Array<number | string>;
@@ -246,7 +310,6 @@ export class OzonApiService {
     return response.data?.operation_id;
   }
 
-  /** Получить статус черновика по operation_id. */
   async getDraftInfo(
     operationId: string,
     credentials?: OzonCredentials,
@@ -260,7 +323,6 @@ export class OzonApiService {
     return response.data;
   }
 
-  /** Запросить таймслоты для черновика. */
   async getDraftTimeslots(
     payload: {
       draftId: number | string;
@@ -285,7 +347,6 @@ export class OzonApiService {
     return response.data;
   }
 
-  /** Создать поставку на основе черновика. Возвращает operation_id. */
   async createSupply(
     payload: {
       draftId: number | string;
@@ -306,6 +367,19 @@ export class OzonApiService {
     );
 
     return response.data?.operation_id;
+  }
+
+  async getSupplyCreateStatus(
+    operationId: string,
+    credentials?: OzonCredentials,
+  ): Promise<OzonSupplyCreateStatus> {
+    const response = await this.post<OzonSupplyCreateStatus>(
+      '/v1/draft/supply/create/status',
+      { operation_id: operationId },
+      undefined,
+      credentials,
+    );
+    return response.data;
   }
 
   private resolveUrl(baseUrl: string, url?: string): string | undefined {
