@@ -70,7 +70,7 @@ export class OzonSupplyService {
       spreadsheet: options.spreadsheet,
       buffer: options.buffer,
     });
-    const clusters = await this.ozonApi.listClusters({}, credentials);
+    const { clusters } = await this.ozonApi.listClusters({}, credentials);
     this.lastClusters = clusters;
 
     for (const task of tasks) {

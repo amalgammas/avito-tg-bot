@@ -2,15 +2,20 @@ import { Injectable } from '@nestjs/common';
 
 import type { OzonSupplyTask } from '../ozon/ozon-supply.types';
 
+export interface SupplyWizardWarehouseOption {
+  warehouse_id: number;
+  name: string;
+  type: number;
+}
+
+export interface SupplyWizardWarehousesOption {
+  warehouses: SupplyWizardWarehouseOption[];
+}
+
 export interface SupplyWizardClusterOption {
   id: number;
   name: string;
-}
-
-export interface SupplyWizardWarehouseOption {
-  id: number;
-  name: string;
-  clusterId: number;
+  logistic_clusters: SupplyWizardWarehousesOption;
 }
 
 export interface SupplyWizardDropOffOption {
@@ -21,6 +26,7 @@ export interface SupplyWizardDropOffOption {
 export type SupplyWizardStage =
   | 'idle'
   | 'awaitSpreadsheet'
+  | 'clusterPrompt'
   | 'clusterSelect'
   | 'warehouseSelect'
   | 'dropOffSelect'
@@ -30,7 +36,7 @@ export type SupplyWizardStage =
 export interface SupplyWizardState {
   stage: SupplyWizardStage;
   clusters: SupplyWizardClusterOption[];
-  warehouses: SupplyWizardWarehouseOption[];
+  warehouses: Record<number, SupplyWizardWarehouseOption[]>;
   dropOffs: SupplyWizardDropOffOption[];
   selectedClusterId?: number;
   selectedClusterName?: string;
@@ -54,15 +60,15 @@ export class SupplyWizardStore {
     chatId: string,
     payload: {
       clusters: SupplyWizardClusterOption[];
-      warehouses: SupplyWizardWarehouseOption[];
+      warehouses: Record<number, SupplyWizardWarehouseOption[]>;
       dropOffs: SupplyWizardDropOffOption[];
     },
   ): SupplyWizardState {
     const state: SupplyWizardState = {
       stage: 'awaitSpreadsheet',
-      clusters: payload.clusters,
-      warehouses: payload.warehouses,
-      dropOffs: payload.dropOffs,
+      clusters: this.cloneClusters(payload.clusters),
+      warehouses: this.cloneWarehouses(payload.warehouses),
+      dropOffs: this.cloneDropOffs(payload.dropOffs),
       createdAt: Date.now(),
       promptMessageId: undefined,
     };
@@ -75,7 +81,13 @@ export class SupplyWizardStore {
     if (!state) {
       return undefined;
     }
-    return { ...state, tasks: state.tasks ? [...state.tasks] : undefined };
+    return {
+      ...state,
+      tasks: state.tasks ? [...state.tasks] : undefined,
+      clusters: this.cloneClusters(state.clusters),
+      warehouses: this.cloneWarehouses(state.warehouses),
+      dropOffs: this.cloneDropOffs(state.dropOffs),
+    };
   }
 
   update(
@@ -83,7 +95,17 @@ export class SupplyWizardStore {
     updater: (state: SupplyWizardState | undefined) => SupplyWizardState | undefined,
   ): SupplyWizardState | undefined {
     const current = this.storage.get(chatId);
-    const next = updater(current ? { ...current, tasks: current.tasks ? [...current.tasks] : undefined } : undefined);
+    const next = updater(
+      current
+        ? {
+            ...current,
+            tasks: current.tasks ? [...current.tasks] : undefined,
+            clusters: this.cloneClusters(current.clusters),
+            warehouses: this.cloneWarehouses(current.warehouses),
+            dropOffs: this.cloneDropOffs(current.dropOffs),
+          }
+        : undefined,
+    );
     if (!next) {
       this.storage.delete(chatId);
       return undefined;
@@ -91,6 +113,9 @@ export class SupplyWizardStore {
     const normalized: SupplyWizardState = {
       ...next,
       tasks: next.tasks ? [...next.tasks] : undefined,
+      clusters: this.cloneClusters(next.clusters),
+      warehouses: this.cloneWarehouses(next.warehouses),
+      dropOffs: this.cloneDropOffs(next.dropOffs),
       createdAt: next.createdAt ?? current?.createdAt ?? Date.now(),
     };
     this.storage.set(chatId, normalized);
@@ -99,5 +124,33 @@ export class SupplyWizardStore {
 
   clear(chatId: string): void {
     this.storage.delete(chatId);
+  }
+
+  private cloneWarehouses(
+    source: Record<number, SupplyWizardWarehouseOption[]> = {},
+  ): Record<number, SupplyWizardWarehouseOption[]> {
+    const entries = Object.entries(source ?? {});
+    return entries.reduce<Record<number, SupplyWizardWarehouseOption[]>>((acc, [key, value]) => {
+      const numericKey = Number(key);
+      if (!Number.isFinite(numericKey)) {
+        return acc;
+      }
+      acc[numericKey] = value ? value.map((item) => ({ ...item })) : [];
+      return acc;
+    }, {});
+  }
+
+  private cloneDropOffs(source: SupplyWizardDropOffOption[] = []): SupplyWizardDropOffOption[] {
+    return source.map((item) => ({ ...item }));
+  }
+
+  private cloneClusters(source: SupplyWizardClusterOption[] = []): SupplyWizardClusterOption[] {
+    return source.map((cluster) => ({
+      id: cluster.id,
+      name: cluster.name,
+      logistic_clusters: {
+        warehouses: (cluster.logistic_clusters?.warehouses ?? []).map((item) => ({ ...item })),
+      },
+    }));
   }
 }

@@ -47,7 +47,7 @@ export class SupplyWizardHandler {
     try {
       const state = this.wizardStore.start(chatId, {
         clusters: [],
-        warehouses: [],
+        warehouses: {},
         dropOffs: [],
       });
       const prompt = await ctx.reply(
@@ -139,7 +139,7 @@ export class SupplyWizardHandler {
 
     const state = this.wizardStore.get(chatId);
     if (!state || state.stage !== 'awaitReadyDays') {
-      await ctx.reply('Сначала загрузите файл и выберите кластер и пункт сдачи.');
+      await ctx.reply('Сначала загрузите файл и выберите склад/пункт сдачи.');
       return;
     }
 
@@ -229,6 +229,9 @@ export class SupplyWizardHandler {
     const [, action, payload] = data.split(':');
 
     switch (action) {
+      case 'clusterStart':
+        await this.onClusterStart(ctx, chatId, state);
+        return;
       case 'cluster':
         await this.onClusterSelect(ctx, chatId, state, payload);
         return;
@@ -277,14 +280,44 @@ export class SupplyWizardHandler {
 
     await this.resolveSkus(clonedTasks[0], credentials);
 
+    const summary = this.formatItemsSummary(clonedTasks[0]);
+
+    let clusters: OzonCluster[] = [];
+    let dropOffRaw: OzonAvailableWarehouse[] = [];
+    try {
+      const response = await this.ozonApi.listClusters({}, credentials);
+      clusters = response.clusters;
+      dropOffRaw = response.warehouses ?? [];
+    } catch (error) {
+      this.logger.error(`listClusters failed: ${this.describeError(error)}`);
+      await ctx.reply('Не удалось получить список кластеров. Попробуйте позже.');
+      return;
+    }
+
+    if (!clusters.length) {
+      await ctx.reply('Ozon вернул пустой список кластеров. Попробуйте позже.');
+      return;
+    }
+
+    const dropOffOptions = this.extractDropOffOptions(dropOffRaw);
+    if (!dropOffOptions.length) {
+      await ctx.reply('Не удалось получить список пунктов сдачи. Проверьте доступы в кабинете Ozon.');
+      return;
+    }
+
+    const options = this.buildOptions(clusters, dropOffOptions);
 
     const updated = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
       return {
         ...current,
+        stage: 'clusterPrompt',
         spreadsheet: source.label,
         tasks: clonedTasks,
         selectedTaskId: clonedTasks[0]?.taskId,
+        clusters: options.clusters,
+        warehouses: options.warehouses,
+        dropOffs: options.dropOffs,
         selectedClusterId: undefined,
         selectedClusterName: undefined,
         selectedWarehouseId: undefined,
@@ -299,8 +332,68 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const summary = this.formatItemsSummary(clonedTasks[0]);
-    await ctx.reply(summary);
+    await ctx.reply(summary, {
+      reply_markup: {
+        inline_keyboard: this.buildClusterStartKeyboard(),
+      } as any,
+    });
+
+    await this.updatePrompt(
+      ctx,
+      chatId,
+      updated,
+      'Файл обработан. Проверьте список товаров и нажмите «Выбрать кластер и склад», чтобы продолжить.',
+      this.withCancel(),
+    );
+  }
+
+  private async onClusterStart(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+  ): Promise<void> {
+    if (state.stage !== 'clusterPrompt') {
+      await ctx.answerCbQuery('Выбор недоступен.');
+      return;
+    }
+
+    const updated = this.wizardStore.update(chatId, (current) => {
+      if (!current) return undefined;
+      return {
+        ...current,
+        stage: 'clusterSelect',
+        selectedClusterId: undefined,
+        selectedClusterName: undefined,
+        selectedWarehouseId: undefined,
+        selectedWarehouseName: undefined,
+        selectedDropOffId: undefined,
+        selectedDropOffName: undefined,
+      };
+    });
+
+    if (!updated) {
+      await ctx.answerCbQuery('Мастер закрыт');
+      return;
+    }
+
+    const message = (ctx.callbackQuery as any)?.message;
+    if (message?.chat?.id && message?.message_id) {
+      try {
+        await ctx.telegram.editMessageReplyMarkup(message.chat.id, message.message_id, undefined, undefined);
+      } catch (error) {
+        this.logger.debug(`editMessageReplyMarkup failed: ${this.describeError(error)}`);
+      }
+    }
+
+    await this.updatePrompt(
+      ctx,
+      chatId,
+      updated,
+      'Выберите кластер, в который планируете вести поставку.',
+      this.buildClusterKeyboard(updated),
+    );
+
+    await ctx.answerCbQuery('Продолжаем');
   }
 
   private async onClusterSelect(
@@ -309,6 +402,7 @@ export class SupplyWizardHandler {
     state: SupplyWizardState,
     payload: string | undefined,
   ): Promise<void> {
+
     if (state.stage !== 'clusterSelect') {
       await ctx.answerCbQuery('Сначала загрузите файл');
       return;
@@ -326,32 +420,21 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const warehouses = state.warehouses.filter((item) => item.clusterId === clusterId);
+    const warehouses = state.warehouses[clusterId] ?? [];
     if (!warehouses.length) {
       await ctx.answerCbQuery('В кластере нет складов');
       return;
     }
 
-    const preferredWarehouseId = state.tasks?.[0]?.warehouseId;
-    const preferredWarehouseName = state.tasks?.[0]?.warehouseName?.trim().toLowerCase();
-
-    let selectedWarehouse = warehouses.find((item) => item.id === preferredWarehouseId);
-    if (!selectedWarehouse && preferredWarehouseName) {
-      selectedWarehouse = warehouses.find(
-        (item) => item.name.trim().toLowerCase() === preferredWarehouseName,
-      );
-    }
-    selectedWarehouse = selectedWarehouse ?? warehouses[0];
-
     const updated = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
       return {
         ...current,
-        stage: 'dropOffSelect',
+        stage: 'warehouseSelect',
         selectedClusterId: cluster.id,
         selectedClusterName: cluster.name,
-        selectedWarehouseId: selectedWarehouse?.id,
-        selectedWarehouseName: selectedWarehouse?.name,
+        selectedWarehouseId: undefined,
+        selectedWarehouseName: undefined,
         selectedDropOffId: undefined,
         selectedDropOffName: undefined,
       };
@@ -362,18 +445,15 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const lines = [`Кластер выбран: ${cluster.name}.`];
-    if (selectedWarehouse) {
-      lines.push(`Склад выбран автоматически: ${selectedWarehouse.name} (${selectedWarehouse.id}).`);
-    }
-    lines.push('Выберите пункт сдачи (drop-off), где оформим поставку.');
-
     await this.updatePrompt(
       ctx,
       chatId,
       updated,
-      lines.join('\n'),
-      this.buildDropOffKeyboard(updated),
+      [
+        `Кластер выбран: ${cluster.name}.`,
+        'Выберите склад обработки заказа (куда везём товар).',
+      ].join('\n'),
+      this.buildWarehouseKeyboard(updated, cluster.id),
     );
 
     await ctx.answerCbQuery('Кластер выбран');
@@ -396,7 +476,15 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const warehouse = state.warehouses.find((item) => item.id === warehouseId);
+    const selectedClusterId = state.selectedClusterId;
+    if (!selectedClusterId) {
+      await ctx.answerCbQuery('Сначала выберите кластер');
+      return;
+    }
+
+    const clusterWarehouses = state.warehouses[selectedClusterId] ?? [];
+    const warehouse = clusterWarehouses.find((item) => item.warehouse_id === warehouseId);
+
     if (!warehouse) {
       await ctx.answerCbQuery('Склад не найден');
       return;
@@ -407,7 +495,7 @@ export class SupplyWizardHandler {
       return {
         ...current,
         stage: 'dropOffSelect',
-        selectedWarehouseId: warehouse.id,
+        selectedWarehouseId: warehouse.warehouse_id,
         selectedWarehouseName: warehouse.name,
         selectedDropOffId: undefined,
         selectedDropOffName: undefined,
@@ -424,7 +512,7 @@ export class SupplyWizardHandler {
       chatId,
       updated,
       [
-        `Склад выбран: ${warehouse.name} (${warehouse.id}).`,
+        `Склад выбран: ${warehouse.name} (${warehouse.warehouse_id}).`,
         'Выберите пункт сдачи (drop-off), где оформим поставку.',
       ].join('\n'),
       this.buildDropOffKeyboard(updated),
@@ -440,7 +528,7 @@ export class SupplyWizardHandler {
     payload: string | undefined,
   ): Promise<void> {
     if (state.stage !== 'dropOffSelect') {
-      await ctx.answerCbQuery('Сначала выберите кластер');
+      await ctx.answerCbQuery('Сначала выберите склад');
       return;
     }
 
@@ -490,53 +578,97 @@ export class SupplyWizardHandler {
     dropOffs: SupplyWizardDropOffOption[],
   ): {
     clusters: SupplyWizardClusterOption[];
-    warehouses: SupplyWizardWarehouseOption[];
+    warehouses: Record<number, SupplyWizardWarehouseOption[]>;
     dropOffs: SupplyWizardDropOffOption[];
   } {
     const clusterOptions: SupplyWizardClusterOption[] = [];
-    const warehouseMap = new Map<number, SupplyWizardWarehouseOption>();
+    const clusterWarehouses = new Map<number, SupplyWizardWarehouseOption[]>();
 
     for (const cluster of clusters) {
       if (typeof cluster.id !== 'number') continue;
-      const clusterName = cluster.name?.trim() || `Кластер ${cluster.id}`;
-      clusterOptions.push({ id: cluster.id, name: clusterName });
+      const clusterId = Number(cluster.id);
+      const clusterName = cluster.name?.trim() || `Кластер ${clusterId}`;
 
+      const rawWarehouses: SupplyWizardWarehouseOption[] = [];
       for (const logistic of cluster.logistic_clusters ?? []) {
         for (const warehouse of logistic.warehouses ?? []) {
-          if (typeof warehouse?.warehouse_id === 'undefined') continue;
-          const id = Number(warehouse.warehouse_id);
-          if (!Number.isFinite(id)) continue;
-          if (warehouseMap.has(id)) continue;
-
-          warehouseMap.set(id, {
-            id,
-            name: warehouse.name?.trim() || `Склад ${id}`,
-            clusterId: cluster.id,
+          if (typeof warehouse?.warehouse_id !== 'number') continue;
+          const warehouseId = Number(warehouse.warehouse_id);
+          if (!Number.isFinite(warehouseId)) continue;
+          const typeValue = Number(warehouse.type);
+          const normalizedType = Number.isFinite(typeValue) ? typeValue : 0;
+          rawWarehouses.push({
+            warehouse_id: warehouseId,
+            name: warehouse.name?.trim() || `Склад ${warehouseId}`,
+            type: normalizedType,
           });
         }
       }
+
+      const uniqueWarehouses = this.deduplicateWarehouseOptions(rawWarehouses);
+      clusterWarehouses.set(clusterId, uniqueWarehouses);
+
+      clusterOptions.push({
+        id: clusterId,
+        name: clusterName,
+        logistic_clusters: {
+          warehouses: uniqueWarehouses.map((item) => ({ ...item })),
+        },
+      });
     }
 
-    const warehouses = [...warehouseMap.values()].sort((a, b) =>
+    const sortedClusters = clusterOptions.sort((a, b) =>
       a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }),
     );
 
+    const sortedDropOffs = [...dropOffs].sort((a, b) =>
+      a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }),
+    );
+
+    const warehousesByCluster = Object.fromEntries(
+      clusterWarehouses.entries(),
+    ) as Record<number, SupplyWizardWarehouseOption[]>;
+
     return {
-      clusters: clusterOptions.sort((a, b) => a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' })),
-      warehouses,
-      dropOffs,
+      clusters: sortedClusters,
+      warehouses: warehousesByCluster,
+      dropOffs: sortedDropOffs,
     };
   }
 
   private extractDropOffOptions(raw: OzonAvailableWarehouse[]): SupplyWizardDropOffOption[] {
-    return raw
-      .filter((warehouse) => typeof warehouse.warehouse_id === 'number')
-      .map((warehouse) => ({
-        id: Number(warehouse.warehouse_id),
-        name: warehouse.name?.trim() || `Drop-off ${warehouse.warehouse_id}`,
-      }))
-      .filter((option) => Number.isFinite(option.id))
-      .sort((a, b) => a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }));
+    const map = new Map<number, SupplyWizardDropOffOption>();
+    for (const warehouse of raw ?? []) {
+      if (typeof warehouse?.warehouse_id !== 'number') continue;
+      const id = Number(warehouse.warehouse_id);
+      if (!Number.isFinite(id)) continue;
+      if (map.has(id)) continue;
+      map.set(id, {
+        id,
+        name: warehouse.name?.trim() || `Drop-off ${id}`,
+      });
+    }
+    return [...map.values()].sort((a, b) =>
+      a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }),
+    );
+  }
+
+  private buildClusterStartKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+    return [[{ text: 'Выбрать кластер и склад', callback_data: 'wizard:clusterStart' }]];
+  }
+
+  private deduplicateWarehouseOptions(
+    options: SupplyWizardWarehouseOption[],
+  ): SupplyWizardWarehouseOption[] {
+    const map = new Map<number, SupplyWizardWarehouseOption>();
+    for (const option of options) {
+      if (!map.has(option.warehouse_id)) {
+        map.set(option.warehouse_id, { ...option });
+      }
+    }
+    return [...map.values()].sort((a, b) =>
+      a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }),
+    );
   }
 
   private buildClusterKeyboard(state: SupplyWizardState): Array<Array<{ text: string; callback_data: string }>> {
@@ -546,6 +678,25 @@ export class SupplyWizardHandler {
         callback_data: `wizard:cluster:${cluster.id}`,
       },
     ]);
+
+    return this.withCancel(rows);
+  }
+
+  private buildWarehouseKeyboard(
+    state: SupplyWizardState,
+    clusterId: number,
+  ): Array<Array<{ text: string; callback_data: string }>> {
+    const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+    const warehouses = state.warehouses[clusterId] ?? [];
+    for (const warehouse of warehouses) {
+      rows.push([
+        {
+          text: `${warehouse.name} (${warehouse.warehouse_id})`,
+          callback_data: `wizard:warehouse:${warehouse.warehouse_id}`,
+        },
+      ]);
+    }
+
     return this.withCancel(rows);
   }
 
@@ -640,10 +791,7 @@ export class SupplyWizardHandler {
   private formatItemsSummary(task: OzonSupplyTask): string {
     const lines = task.items.map((item) => `• ${item.article} → SKU ${item.sku} × ${item.quantity}`);
 
-    return [
-        'Товары из файла:', ...lines, '',
-        'Если всё верно, сообщите, что делать дальше.'
-    ].join('\n');
+    return ['Товары из файла:', ...lines, '', 'Нажмите кнопку ниже, чтобы выбрать кластер и склад.'].join('\n');
   }
 
   private async sendSupplyEvent(ctx: Context, result: { task: OzonSupplyTask; event: string; message?: string }): Promise<void> {

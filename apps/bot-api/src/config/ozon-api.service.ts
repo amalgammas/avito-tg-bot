@@ -20,6 +20,7 @@ export interface OzonCluster {
     warehouses?: Array<{
       warehouse_id?: number;
       name?: string;
+      type?: string | number;
     }>;
   }>;
 }
@@ -186,28 +187,26 @@ export class OzonApiService {
       clusterType?: string;
     } = {},
     credentials?: OzonCredentials,
-  ): Promise<OzonCluster[]> {
+  ): Promise<{ clusters: OzonCluster[]; warehouses: OzonAvailableWarehouse[] }> {
     const body = {
       cluster_ids: payload.clusterIds ?? [],
       cluster_type: payload.clusterType ?? 'CLUSTER_TYPE_OZON',
     };
-    const response = await this.post<{ clusters?: OzonCluster[] }>(
+    const response = await this.post<{ clusters?: OzonCluster[]; warehouses?: OzonAvailableWarehouse[] }>(
       '/v1/cluster/list',
       body,
       undefined,
       credentials,
     );
-    return response.data?.clusters ?? [];
+    return {
+      clusters: response.data?.clusters ?? [],
+      warehouses: response.data?.warehouses ?? [],
+    };
   }
 
   async listAvailableWarehouses(credentials?: OzonCredentials): Promise<OzonAvailableWarehouse[]> {
-    const response = await this.post<{ warehouses?: OzonAvailableWarehouse[] }>(
-      '/v1/cluster/list',
-      {},
-      undefined,
-      credentials,
-    );
-    return response.data?.warehouses ?? [];
+    const { warehouses } = await this.listClusters({}, credentials);
+    return warehouses;
   }
 
   async getProductsByOfferIds(
