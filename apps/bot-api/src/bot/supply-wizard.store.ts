@@ -5,7 +5,7 @@ import type { OzonSupplyTask } from '../ozon/ozon-supply.types';
 export interface SupplyWizardWarehouseOption {
   warehouse_id: number;
   name: string;
-  type: number;
+  type?: string;
 }
 
 export interface SupplyWizardWarehousesOption {

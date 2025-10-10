@@ -14,6 +14,7 @@ import {
   SupplyWizardWarehouseOption,
   SupplyWizardDropOffOption,
 } from './supply-wizard.store';
+import { underline } from "telegraf/format";
 
 @Injectable()
 export class SupplyWizardHandler {
@@ -283,11 +284,9 @@ export class SupplyWizardHandler {
     const summary = this.formatItemsSummary(clonedTasks[0]);
 
     let clusters: OzonCluster[] = [];
-    let dropOffRaw: OzonAvailableWarehouse[] = [];
     try {
       const response = await this.ozonApi.listClusters({}, credentials);
       clusters = response.clusters;
-      dropOffRaw = response.warehouses ?? [];
     } catch (error) {
       this.logger.error(`listClusters failed: ${this.describeError(error)}`);
       await ctx.reply('Не удалось получить список кластеров. Попробуйте позже.');
@@ -299,13 +298,7 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const dropOffOptions = this.extractDropOffOptions(dropOffRaw);
-    if (!dropOffOptions.length) {
-      await ctx.reply('Не удалось получить список пунктов сдачи. Проверьте доступы в кабинете Ozon.');
-      return;
-    }
-
-    const options = this.buildOptions(clusters, dropOffOptions);
+    const options = this.buildOptions(clusters);
 
     const updated = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
@@ -317,7 +310,6 @@ export class SupplyWizardHandler {
         selectedTaskId: clonedTasks[0]?.taskId,
         clusters: options.clusters,
         warehouses: options.warehouses,
-        dropOffs: options.dropOffs,
         selectedClusterId: undefined,
         selectedClusterName: undefined,
         selectedWarehouseId: undefined,
@@ -574,12 +566,10 @@ export class SupplyWizardHandler {
   }
 
   private buildOptions(
-    clusters: OzonCluster[],
-    dropOffs: SupplyWizardDropOffOption[],
+    clusters: OzonCluster[]
   ): {
     clusters: SupplyWizardClusterOption[];
     warehouses: Record<number, SupplyWizardWarehouseOption[]>;
-    dropOffs: SupplyWizardDropOffOption[];
   } {
     const clusterOptions: SupplyWizardClusterOption[] = [];
     const clusterWarehouses = new Map<number, SupplyWizardWarehouseOption[]>();
@@ -595,12 +585,10 @@ export class SupplyWizardHandler {
           if (typeof warehouse?.warehouse_id !== 'number') continue;
           const warehouseId = Number(warehouse.warehouse_id);
           if (!Number.isFinite(warehouseId)) continue;
-          const typeValue = Number(warehouse.type);
-          const normalizedType = Number.isFinite(typeValue) ? typeValue : 0;
+
           rawWarehouses.push({
             warehouse_id: warehouseId,
-            name: warehouse.name?.trim() || `Склад ${warehouseId}`,
-            type: normalizedType,
+            name: warehouse.name?.trim() || `Склад ${warehouseId}`
           });
         }
       }
@@ -621,9 +609,9 @@ export class SupplyWizardHandler {
       a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }),
     );
 
-    const sortedDropOffs = [...dropOffs].sort((a, b) =>
-      a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }),
-    );
+    // const sortedDropOffs = [...dropOffs].sort((a, b) =>
+    //   a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }),
+    // );
 
     const warehousesByCluster = Object.fromEntries(
       clusterWarehouses.entries(),
@@ -631,8 +619,7 @@ export class SupplyWizardHandler {
 
     return {
       clusters: sortedClusters,
-      warehouses: warehousesByCluster,
-      dropOffs: sortedDropOffs,
+      warehouses: warehousesByCluster
     };
   }
 
