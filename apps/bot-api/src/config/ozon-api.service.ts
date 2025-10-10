@@ -53,6 +53,17 @@ export interface OzonAvailableWarehouse {
   region?: string;
 }
 
+export interface OzonFboWarehouseSearchItem {
+  warehouse_id: number;
+  warehouse_type?: string;
+  coordinates?: {
+    latitude?: number;
+    longitude?: number;
+  };
+  address?: string;
+  name?: string;
+}
+
 export interface OzonProductInfo {
   offer_id?: string;
   id?: number;
@@ -207,6 +218,49 @@ export class OzonApiService {
   async listAvailableWarehouses(credentials?: OzonCredentials): Promise<OzonAvailableWarehouse[]> {
     const { warehouses } = await this.listClusters({}, credentials);
     return warehouses;
+  }
+
+  async searchFboWarehouses(
+    payload: { search: string; supplyTypes?: string[] },
+    credentials?: OzonCredentials,
+  ): Promise<OzonFboWarehouseSearchItem[]> {
+    const search = payload.search?.trim();
+    if (!search) {
+      return [];
+    }
+
+    const body = {
+      filter_by_supply_type: (payload.supplyTypes && payload.supplyTypes.length
+        ? payload.supplyTypes
+        : ['CREATE_TYPE_CROSSDOCK']) as string[],
+      search,
+    };
+
+    const response = await this.post<{ search?: OzonFboWarehouseSearchItem[] }>(
+      '/v1/warehouse/fbo/list',
+      body,
+      undefined,
+      credentials,
+    );
+
+    const items = Array.isArray(response.data?.search) ? response.data?.search : [];
+    const results: OzonFboWarehouseSearchItem[] = [];
+
+    for (const raw of items) {
+      if (!raw || typeof raw.warehouse_id !== 'number') {
+        continue;
+      }
+
+      results.push({
+        warehouse_id: raw.warehouse_id,
+        warehouse_type: raw.warehouse_type,
+        coordinates: raw.coordinates,
+        address: raw.address,
+        name: raw.name,
+      });
+    }
+
+    return results;
   }
 
   async getProductsByOfferIds(

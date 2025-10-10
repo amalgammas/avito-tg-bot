@@ -21,11 +21,14 @@ export interface SupplyWizardClusterOption {
 export interface SupplyWizardDropOffOption {
   id: number;
   name: string;
+  address?: string;
+  type?: string;
 }
 
 export type SupplyWizardStage =
   | 'idle'
   | 'awaitSpreadsheet'
+  | 'awaitDropOffQuery'
   | 'clusterPrompt'
   | 'clusterSelect'
   | 'warehouseSelect'
@@ -38,6 +41,7 @@ export interface SupplyWizardState {
   clusters: SupplyWizardClusterOption[];
   warehouses: Record<number, SupplyWizardWarehouseOption[]>;
   dropOffs: SupplyWizardDropOffOption[];
+  dropOffSearchQuery?: string;
   selectedClusterId?: number;
   selectedClusterName?: string;
   selectedWarehouseId?: number;
@@ -69,6 +73,7 @@ export class SupplyWizardStore {
       clusters: this.cloneClusters(payload.clusters),
       warehouses: this.cloneWarehouses(payload.warehouses),
       dropOffs: this.cloneDropOffs(payload.dropOffs),
+      dropOffSearchQuery: undefined,
       createdAt: Date.now(),
       promptMessageId: undefined,
     };
@@ -87,6 +92,7 @@ export class SupplyWizardStore {
       clusters: this.cloneClusters(state.clusters),
       warehouses: this.cloneWarehouses(state.warehouses),
       dropOffs: this.cloneDropOffs(state.dropOffs),
+      dropOffSearchQuery: state.dropOffSearchQuery,
     };
   }
 
@@ -103,6 +109,7 @@ export class SupplyWizardStore {
             clusters: this.cloneClusters(current.clusters),
             warehouses: this.cloneWarehouses(current.warehouses),
             dropOffs: this.cloneDropOffs(current.dropOffs),
+            dropOffSearchQuery: current.dropOffSearchQuery,
           }
         : undefined,
     );
@@ -116,6 +123,7 @@ export class SupplyWizardStore {
       clusters: this.cloneClusters(next.clusters),
       warehouses: this.cloneWarehouses(next.warehouses),
       dropOffs: this.cloneDropOffs(next.dropOffs),
+      dropOffSearchQuery: next.dropOffSearchQuery,
       createdAt: next.createdAt ?? current?.createdAt ?? Date.now(),
     };
     this.storage.set(chatId, normalized);

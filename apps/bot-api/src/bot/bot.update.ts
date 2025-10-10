@@ -149,6 +149,15 @@ export class BotUpdate {
       return;
     }
 
+    if (
+      state.stage === 'awaitDropOffQuery' ||
+      state.stage === 'dropOffSelect' ||
+      state.stage === 'clusterPrompt'
+    ) {
+      await this.wizard.handleDropOffSearch(ctx, text);
+      return;
+    }
+
     if (state.stage === 'awaitReadyDays') {
       await this.wizard.handleReadyDays(ctx, text);
       return;

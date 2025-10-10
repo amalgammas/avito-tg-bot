@@ -2,7 +2,12 @@ import axios from 'axios';
 import { Injectable, Logger } from '@nestjs/common';
 import { Context } from 'telegraf';
 
-import { OzonApiService, OzonCluster, OzonCredentials, OzonAvailableWarehouse } from '../config/ozon-api.service';
+import {
+  OzonApiService,
+  OzonCluster,
+  OzonCredentials,
+  OzonFboWarehouseSearchItem,
+} from '../config/ozon-api.service';
 import { OzonSheetService } from '../ozon/ozon-sheet.service';
 import { OzonSupplyService } from '../ozon/ozon-supply.service';
 import { OzonSupplyTask } from '../ozon/ozon-supply.types';
@@ -14,11 +19,11 @@ import {
   SupplyWizardWarehouseOption,
   SupplyWizardDropOffOption,
 } from './supply-wizard.store';
-import { underline } from "telegraf/format";
 
 @Injectable()
 export class SupplyWizardHandler {
   private readonly logger = new Logger(SupplyWizardHandler.name);
+  private readonly dropOffOptionsLimit = 10;
 
   constructor(
     private readonly credentialsStore: UserCredentialsStore,
@@ -132,6 +137,113 @@ export class SupplyWizardHandler {
       this.logger.error(`handleSpreadsheetLink failed: ${this.describeError(error)}`);
       await ctx.reply(`❌ Не удалось обработать таблицу: ${this.describeError(error)}`);
     }
+  }
+
+  async handleDropOffSearch(ctx: Context, text: string): Promise<void> {
+    const chatId = this.extractChatId(ctx);
+    if (!chatId) return;
+
+    const state = this.wizardStore.get(chatId);
+    if (!state || !['awaitDropOffQuery', 'dropOffSelect', 'clusterPrompt'].includes(state.stage)) {
+      await ctx.reply('Сначала загрузите файл и дождитесь запроса на выбор пункта сдачи.');
+      return;
+    }
+
+    const query = text.trim();
+    if (!query) {
+      await ctx.reply('Введите название города или адрес пункта сдачи.');
+      return;
+    }
+
+    const credentials = this.resolveCredentials(chatId);
+    if (!credentials) {
+      await ctx.reply('🔐 Сначала сохраните ключи через /ozon_auth <CLIENT_ID> <API_KEY>.');
+      return;
+    }
+
+    let warehouses: OzonFboWarehouseSearchItem[] = [];
+    try {
+      warehouses = await this.ozonApi.searchFboWarehouses(
+        { search: query, supplyTypes: ['CREATE_TYPE_CROSSDOCK'] },
+        credentials,
+      );
+    } catch (error) {
+      this.logger.error(`searchFboWarehouses failed: ${this.describeError(error)}`);
+      await ctx.reply(`Не удалось получить пункты сдачи: ${this.describeError(error)}`);
+      return;
+    }
+
+    const options = this.mapDropOffSearchResults(warehouses);
+    if (!options.length) {
+      const hasExistingSelection = Boolean(state.selectedDropOffId);
+      const updated = this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        return {
+          ...current,
+          stage: hasExistingSelection ? 'clusterPrompt' : 'awaitDropOffQuery',
+          dropOffs: [],
+          dropOffSearchQuery: query,
+          ...(hasExistingSelection
+            ? {}
+            : { selectedDropOffId: undefined, selectedDropOffName: undefined }),
+        };
+      });
+
+      const targetState = updated ?? state;
+      await this.updatePrompt(
+        ctx,
+        chatId,
+        targetState,
+        `По запросу «${query}» ничего не найдено. Попробуйте уточнить название города или адреса.`,
+        this.withCancel(),
+      );
+      return;
+    }
+
+    const limited = options.slice(0, this.dropOffOptionsLimit);
+    const truncated = limited.length < options.length;
+
+    const updated = this.wizardStore.update(chatId, (current) => {
+      if (!current) return undefined;
+      return {
+        ...current,
+        stage: 'dropOffSelect',
+        dropOffs: limited,
+        dropOffSearchQuery: query,
+        selectedDropOffId: undefined,
+        selectedDropOffName: undefined,
+      };
+    });
+
+    if (!updated) {
+      await ctx.reply('Мастер закрыт. Запустите /ozon_supply, чтобы начать заново.');
+      return;
+    }
+
+    const lines = limited.map((option, index) => {
+      const address = option.address ? ` — ${option.address}` : '';
+      return `${index + 1}. ${option.name} (${option.id})${address}`;
+    });
+
+    const summaryParts = [
+      `Найдены пункты сдачи по запросу «${query}»:`,
+      ...lines,
+    ];
+    if (truncated) {
+      summaryParts.push(
+        `… Показаны первые ${limited.length} из ${options.length} результатов. Уточните запрос, чтобы сузить список.`,
+      );
+    }
+
+    await ctx.reply(summaryParts.join('\n'));
+
+    await this.updatePrompt(
+      ctx,
+      chatId,
+      updated,
+      'Выберите пункт сдачи кнопкой ниже или введите новый запрос, чтобы найти другой вариант.',
+      this.buildDropOffKeyboard(updated),
+    );
   }
 
   async handleReadyDays(ctx: Context, text: string): Promise<void> {
@@ -304,12 +416,14 @@ export class SupplyWizardHandler {
       if (!current) return undefined;
       return {
         ...current,
-        stage: 'clusterPrompt',
+        stage: 'awaitDropOffQuery',
         spreadsheet: source.label,
         tasks: clonedTasks,
         selectedTaskId: clonedTasks[0]?.taskId,
         clusters: options.clusters,
         warehouses: options.warehouses,
+        dropOffs: [],
+        dropOffSearchQuery: undefined,
         selectedClusterId: undefined,
         selectedClusterName: undefined,
         selectedWarehouseId: undefined,
@@ -324,17 +438,17 @@ export class SupplyWizardHandler {
       return;
     }
 
-    await ctx.reply(summary, {
-      reply_markup: {
-        inline_keyboard: this.buildClusterStartKeyboard(),
-      } as any,
-    });
+    await ctx.reply(summary);
 
     await this.updatePrompt(
       ctx,
       chatId,
       updated,
-      'Файл обработан. Проверьте список товаров и нажмите «Выбрать кластер и склад», чтобы продолжить.',
+      [
+        'Файл обработан. Проверьте список товаров.',
+        'Введите город, адрес или название пункта сдачи, чтобы найти место отгрузки.',
+        'Можно отправить новый запрос в любой момент или отменить мастера кнопкой ниже.',
+      ].join('\n'),
       this.withCancel(),
     );
   }
@@ -358,8 +472,6 @@ export class SupplyWizardHandler {
         selectedClusterName: undefined,
         selectedWarehouseId: undefined,
         selectedWarehouseName: undefined,
-        selectedDropOffId: undefined,
-        selectedDropOffName: undefined,
       };
     });
 
@@ -427,8 +539,6 @@ export class SupplyWizardHandler {
         selectedClusterName: cluster.name,
         selectedWarehouseId: undefined,
         selectedWarehouseName: undefined,
-        selectedDropOffId: undefined,
-        selectedDropOffName: undefined,
       };
     });
 
@@ -482,15 +592,21 @@ export class SupplyWizardHandler {
       return;
     }
 
+    const hasDropOffSelection = Boolean(state.selectedDropOffId);
+
     const updated = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
       return {
         ...current,
-        stage: 'dropOffSelect',
+        stage: hasDropOffSelection ? 'awaitReadyDays' : 'dropOffSelect',
         selectedWarehouseId: warehouse.warehouse_id,
         selectedWarehouseName: warehouse.name,
-        selectedDropOffId: undefined,
-        selectedDropOffName: undefined,
+        ...(hasDropOffSelection
+          ? {}
+          : {
+              selectedDropOffId: undefined,
+              selectedDropOffName: undefined,
+            }),
       };
     });
 
@@ -499,16 +615,34 @@ export class SupplyWizardHandler {
       return;
     }
 
-    await this.updatePrompt(
-      ctx,
-      chatId,
-      updated,
-      [
-        `Склад выбран: ${warehouse.name} (${warehouse.warehouse_id}).`,
-        'Выберите пункт сдачи (drop-off), где оформим поставку.',
-      ].join('\n'),
-      this.buildDropOffKeyboard(updated),
-    );
+    if (hasDropOffSelection) {
+      const dropOffLabel =
+        updated.selectedDropOffName ??
+        (updated.selectedDropOffId ? String(updated.selectedDropOffId) : '—');
+
+      await this.updatePrompt(
+        ctx,
+        chatId,
+        updated,
+        [
+          `Склад выбран: ${warehouse.name} (${warehouse.warehouse_id}).`,
+          `Пункт сдачи: ${dropOffLabel}.`,
+          'Укажите, через сколько дней готовы к отгрузке (число).',
+        ].join('\n'),
+        this.withCancel(),
+      );
+    } else {
+      await this.updatePrompt(
+        ctx,
+        chatId,
+        updated,
+        [
+          `Склад выбран: ${warehouse.name} (${warehouse.warehouse_id}).`,
+          'Выберите пункт сдачи (drop-off), где оформим поставку.',
+        ].join('\n'),
+        this.buildDropOffKeyboard(updated),
+      );
+    }
 
     await ctx.answerCbQuery('Склад выбран');
   }
@@ -536,11 +670,13 @@ export class SupplyWizardHandler {
       return;
     }
 
+    const hasWarehouseSelection = Boolean(state.selectedWarehouseId);
+
     const updated = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
       return {
         ...current,
-        stage: 'awaitReadyDays',
+        stage: hasWarehouseSelection ? 'awaitReadyDays' : 'clusterPrompt',
         selectedDropOffId: option.id,
         selectedDropOffName: option.name,
       };
@@ -551,16 +687,52 @@ export class SupplyWizardHandler {
       return;
     }
 
-    await this.updatePrompt(
-      ctx,
-      chatId,
-      updated,
-      [
+    if (hasWarehouseSelection) {
+      const lines = [
         `Пункт сдачи выбран: ${option.name} (${option.id}).`,
-        'Укажите, через сколько дней готовы к отгрузке (число).',
-      ].join('\n'),
-      this.withCancel(),
-    );
+      ];
+      if (option.address) {
+        lines.push(`Адрес: ${option.address}.`);
+      }
+      if (updated.selectedClusterName || updated.selectedClusterId) {
+        lines.push(
+          `Кластер: ${updated.selectedClusterName ?? updated.selectedClusterId}.`,
+        );
+      }
+      if (updated.selectedWarehouseName || updated.selectedWarehouseId) {
+        lines.push(
+          `Склад: ${updated.selectedWarehouseName ?? updated.selectedWarehouseId}.`,
+        );
+      }
+      lines.push('Укажите, через сколько дней готовы к отгрузке (число).');
+
+      await this.updatePrompt(
+        ctx,
+        chatId,
+        updated,
+        lines.join('\n'),
+        this.withCancel(),
+      );
+    } else {
+      const lines = [
+        `Пункт сдачи выбран: ${option.name} (${option.id}).`,
+      ];
+      if (option.address) {
+        lines.push(`Адрес: ${option.address}.`);
+      }
+      lines.push(
+        'Нажмите «Выбрать кластер и склад», чтобы продолжить.',
+        'При необходимости отправьте новый запрос с городом, чтобы сменить пункт сдачи.',
+      );
+
+      await this.updatePrompt(
+        ctx,
+        chatId,
+        updated,
+        lines.join('\n'),
+        this.withCancel(this.buildClusterStartKeyboard()),
+      );
+    }
 
     await ctx.answerCbQuery('Пункт сдачи выбран');
   }
@@ -623,21 +795,45 @@ export class SupplyWizardHandler {
     };
   }
 
-  private extractDropOffOptions(raw: OzonAvailableWarehouse[]): SupplyWizardDropOffOption[] {
-    const map = new Map<number, SupplyWizardDropOffOption>();
-    for (const warehouse of raw ?? []) {
-      if (typeof warehouse?.warehouse_id !== 'number') continue;
-      const id = Number(warehouse.warehouse_id);
-      if (!Number.isFinite(id)) continue;
-      if (map.has(id)) continue;
-      map.set(id, {
+  private mapDropOffSearchResults(
+    items: OzonFboWarehouseSearchItem[],
+  ): SupplyWizardDropOffOption[] {
+    const seen = new Set<number>();
+    const options: SupplyWizardDropOffOption[] = [];
+
+    for (const item of items ?? []) {
+      if (!item || typeof item.warehouse_id !== 'number') {
+        continue;
+      }
+
+      const id = Number(item.warehouse_id);
+      if (!Number.isFinite(id) || seen.has(id)) {
+        continue;
+      }
+
+      seen.add(id);
+      options.push({
         id,
-        name: warehouse.name?.trim() || `Drop-off ${id}`,
+        name: item.name?.trim() || `Пункт ${id}`,
+        address: item.address?.trim() || undefined,
+        type: item.warehouse_type ?? undefined,
       });
     }
-    return [...map.values()].sort((a, b) =>
-      a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }),
-    );
+
+    return options;
+  }
+
+  private formatDropOffButtonLabel(option: SupplyWizardDropOffOption): string {
+    const base = option.name ?? `Пункт ${option.id}`;
+    const address = option.address ? ` • ${option.address}` : '';
+    return this.truncate(`${base}${address}`, 60);
+  }
+
+  private truncate(value: string, maxLength = 60): string {
+    if (value.length <= maxLength) {
+      return value;
+    }
+    return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
   }
 
   private buildClusterStartKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
@@ -692,7 +888,7 @@ export class SupplyWizardHandler {
   ): Array<Array<{ text: string; callback_data: string }>> {
     const rows = state.dropOffs.map((option) => [
       {
-        text: `${option.name} (${option.id})`,
+        text: this.formatDropOffButtonLabel(option),
         callback_data: `wizard:dropoff:${option.id}`,
       },
     ]);
