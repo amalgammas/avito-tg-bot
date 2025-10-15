@@ -30,6 +30,31 @@ export interface OzonDraftStatus {
   code?: number;
   draft_id?: number;
   errors?: Array<{ code?: number; message?: string }>;
+  clusters?: OzonDraftCluster[];
+}
+
+export interface OzonDraftCluster {
+  cluster_id?: number;
+  cluster_name?: string;
+  warehouses?: OzonDraftWarehouseInfo[];
+}
+
+export interface OzonDraftWarehouseInfo {
+  bundle_ids?: Array<{ bundle_id?: string; is_docless?: boolean }>;
+  supply_warehouse?: {
+    warehouse_id?: number | string;
+    name?: string;
+    address?: string;
+  };
+  status?: {
+    state?: string;
+    invalid_reason?: string;
+    is_available?: boolean;
+  };
+  restricted_bundle_id?: string;
+  travel_time_days?: string | number | null;
+  total_score?: number | string;
+  total_rank?: number | string;
 }
 
 export interface OzonDraftTimeslot {
@@ -39,6 +64,9 @@ export interface OzonDraftTimeslot {
 
 export interface OzonTimeslotResponse {
   drop_off_warehouse_timeslots?: Array<{
+    drop_off_warehouse_id?: number | string;
+    warehouse_timezone?: string;
+    current_time_in_timezone?: string;
     days?: Array<{
       timeslots?: OzonDraftTimeslot[];
     }>;
@@ -67,6 +95,24 @@ export interface OzonFboWarehouseSearchItem {
 export interface OzonProductInfo {
   offer_id?: string;
   id?: number;
+}
+
+export interface OzonProductInfoListSource {
+  sku?: number | string;
+  source?: string;
+}
+
+export interface OzonProductInfoListItem {
+  offer_id?: string;
+  sku?: number;
+  sources?: OzonProductInfoListSource[];
+}
+
+export interface OzonProductInfoListResponse {
+  items?: OzonProductInfoListItem[];
+  result?: {
+    items?: OzonProductInfoListItem[];
+  };
 }
 
 export interface OzonSupplyCreateStatus {
@@ -139,11 +185,12 @@ export class OzonApiService {
     let attempt = 0;
     while (true) {
       const startedAt = Date.now();
+      const requestBodyLog = this.describeBody(finalConfig.data);
       try {
         this.logger.debug(
           `→ [${requestId}] attempt ${attempt + 1}/${this.retryAttempts} headers=${this.describeHeaders(
             finalConfig.headers,
-          )}`,
+          )} body=${requestBodyLog}`,
         );
 
         const response = await this.http.axiosRef.request<T>(finalConfig);
@@ -154,14 +201,14 @@ export class OzonApiService {
         const duration = Date.now() - startedAt;
         const errorSummary = this.describeError(err);
         this.logger.error(
-          `× [${requestId}] failed in ${duration}ms: ${errorSummary}${this.describeErrorPayload(err)}`,
+          `× [${requestId}] failed in ${duration}ms: ${errorSummary} body=${requestBodyLog}${this.describeErrorPayload(err)}`,
         );
 
         const shouldRetry = this.shouldRetry(err) && attempt < this.retryAttempts - 1;
         if (!shouldRetry) throw err;
 
         attempt++;
-        const delay = this.retryBaseDelayMs * 2 ** (attempt - 1);
+        const delay = this.retryBaseDelayMs;
         this.logger.warn(`↻ [${requestId}] retry ${attempt + 1}/${this.retryAttempts} in ~${delay}ms`);
         await this.sleep(delay);
       }
@@ -276,29 +323,33 @@ export class OzonApiService {
       return new Map();
     }
 
-    const response = await this.post<{ result?: { items?: Array<{ product_id?: number; offer_id?: string }> } }>(
-      '/v3/product/list',
-      {
-        filter: {
-            offer_id: uniqueOffers,
+    const map = new Map<string, number>();
+
+    const chunkSize = 100;
+    for (let index = 0; index < uniqueOffers.length; index += chunkSize) {
+      const chunk = uniqueOffers.slice(index, index + chunkSize);
+      const response = await this.post<OzonProductInfoListResponse>(
+        '/v3/product/info/list',
+        {
+          offer_id: chunk,
+          product_id: [],
+          sku: [],
           visibility: 'ALL',
         },
-        last_id: '',
-        limit: 100,
-      },
-      undefined,
-      credentials,
-    );
+        undefined,
+        credentials,
+      );
 
-    const items = response.data?.result?.items ?? [];
-    const map = new Map<string, number>();
-    for (const item of items) {
-      const offerId = item.offer_id?.trim();
-      const productId = item.product_id;
-      if (!offerId || typeof productId !== 'number') {
-        continue;
+      const rawItems = response.data?.items ?? response.data?.result?.items;
+      const items = Array.isArray(rawItems) ? rawItems : [];
+      for (const item of items) {
+        const offerId = item?.offer_id?.trim();
+        const sku = this.resolveSkuFromProduct(item);
+        if (!offerId || !sku) {
+          continue;
+        }
+        map.set(offerId, sku);
       }
-      map.set(offerId, productId);
     }
 
     return map;
@@ -341,7 +392,7 @@ export class OzonApiService {
 
   async createDraft(
     payload: {
-      clusterIds: Array<number | string>;
+      clusterIds: Array<string | number>;
       dropOffPointWarehouseId: number | string;
       items: Array<{ sku: number; quantity: number }>;
       type: 'CREATE_TYPE_DIRECT' | 'CREATE_TYPE_CROSSDOCK';
@@ -360,6 +411,10 @@ export class OzonApiService {
       credentials,
     );
 
+    this.logger.debug(
+      `[OzonApiService] createDraft response: ${this.stringifySafe(response.data) ?? 'empty body'} *** ${payload}`,
+    );
+
     return response.data?.operation_id;
   }
 
@@ -372,6 +427,9 @@ export class OzonApiService {
       { operation_id: operationId },
       undefined,
       credentials,
+    );
+    this.logger.debug(
+      `[OzonApiService] draftInfo response: ${this.stringifySafe(response.data) ?? 'empty body'}`,
     );
     return response.data;
   }
@@ -474,6 +532,27 @@ export class OzonApiService {
     }
   }
 
+  private describeBody(data: AxiosRequestConfig['data']): string {
+    if (data === null || typeof data === 'undefined') {
+      return '<empty>';
+    }
+
+    if (typeof data === 'string') {
+      return data.length > 1000 ? `${data.slice(0, 1000)}…` : data;
+    }
+
+    if (data instanceof URLSearchParams) {
+      return data.toString();
+    }
+
+    if (typeof Buffer !== 'undefined' && Buffer.isBuffer(data)) {
+      return `<buffer ${data.length}b>`;
+    }
+
+    const serialized = this.stringifySafe(data);
+    return serialized ?? '<unserializable>';
+  }
+
   private describeError(err: unknown): string {
     if (isAxiosError(err)) {
       const s = err.response?.status;
@@ -493,6 +572,23 @@ export class OzonApiService {
     return '';
   }
 
+  private stringifySafe(value: unknown): string | undefined {
+    if (value === null || value === undefined) {
+      return undefined;
+    }
+
+    if (typeof value === 'string') {
+      return value.length > 1000 ? `${value.slice(0, 1000)}…` : value;
+    }
+
+    try {
+      const json = JSON.stringify(value, null, 2);
+      return json.length > 1000 ? `${json.slice(0, 1000)}…` : json;
+    } catch (error) {
+      return undefined;
+    }
+  }
+
   private maskClientId(clientId: string): string {
     if (clientId.length <= 4) {
       return `${clientId[0] ?? '*'}***`;
@@ -503,6 +599,25 @@ export class OzonApiService {
   private maskApiKey(apiKey: string): string {
     if (apiKey.length <= 8) return '*'.repeat(apiKey.length);
     return `${apiKey.slice(0, 4)}***${apiKey.slice(-4)}`;
+  }
+
+  private resolveSkuFromProduct(item: OzonProductInfoListItem | undefined): number | undefined {
+    if (!item) {
+      return undefined;
+    }
+
+    if (typeof item.sku === 'number' && Number.isFinite(item.sku) && item.sku > 0) {
+      return Math.round(item.sku);
+    }
+
+    for (const source of item.sources ?? []) {
+      const candidate = typeof source?.sku === 'string' ? Number(source.sku) : source?.sku;
+      if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0) {
+        return Math.round(candidate);
+      }
+    }
+
+    return undefined;
   }
 
   private sleep(ms: number) {

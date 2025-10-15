@@ -445,6 +445,10 @@ export class OzonSupplyService {
     task: OzonSupplyTask,
     credentials: OzonCredentials,
   ): Promise<OzonDraftTimeslot | undefined> {
+    if (task.selectedTimeslot) {
+      return task.selectedTimeslot;
+    }
+
     if (!task.draftId) {
       return undefined;
     }

@@ -1,3 +1,5 @@
+import type { OzonDraftTimeslot } from '../config/ozon-api.service';
+
 export interface OzonSupplyItem {
   article: string;
   sku?: number;
@@ -13,8 +15,9 @@ export interface OzonSupplyTask {
   draftOperationId: string;
   orderFlag: number;
   items: OzonSupplyItem[];
-  clusterId?: number;
+  clusterId?: string | number;
   warehouseId?: number;
+  selectedTimeslot?: OzonDraftTimeslot;
 }
 
 export type OzonSupplyTaskMap = Map<string, OzonSupplyTask>;
