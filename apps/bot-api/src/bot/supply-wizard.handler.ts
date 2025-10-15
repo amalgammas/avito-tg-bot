@@ -37,6 +37,7 @@ export class SupplyWizardHandler {
   private readonly draftLifetimeMs = 30 * 60 * 1000;
   private latestDraftWarehouses: SupplyWizardDraftWarehouseOption[] = [];
   private latestDraftId?: number;
+  private latestDraftOperationId?: string;
 
   constructor(
     private readonly credentialsStore: UserCredentialsStore,
@@ -1785,6 +1786,7 @@ export class SupplyWizardHandler {
     const truncated = limitedOptions.length < warehouseOptions.length;
     this.latestDraftWarehouses = limitedOptions;
     this.latestDraftId = payload.draftId ?? this.latestDraftId;
+    this.latestDraftOperationId = payload.operationId;
 
     const updated = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
@@ -1898,6 +1900,7 @@ export class SupplyWizardHandler {
         })),
       };
     });
+    this.latestDraftOperationId = undefined;
   }
 
   private async safeAnswerCbQuery(ctx: Context, chatId: string, text?: string): Promise<void> {
@@ -1930,9 +1933,36 @@ export class SupplyWizardHandler {
 
     await this.notifyAdmin(ctx, 'wizard.callbackExpired', [`stage: ${state.stage}`]);
 
+    const knownOperationId = this.resolveKnownDraftOperationId(state);
+    const knownDraftId = state.draftId ?? this.latestDraftId;
+
     await ctx.reply('⚠️ Выберите склад доставки');
     this.resetDraftStateForRetry(chatId);
-    const freshState = this.wizardStore.get(chatId);
+    let freshState = this.wizardStore.get(chatId);
+
+    if (freshState && knownOperationId) {
+      this.latestDraftOperationId = knownOperationId;
+      if (knownDraftId) {
+        this.latestDraftId = knownDraftId;
+      }
+
+      const restored = this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        return {
+          ...current,
+          draftOperationId: knownOperationId,
+          draftId: knownDraftId ?? current.draftId,
+          tasks: (current.tasks ?? []).map((task) => ({
+            ...task,
+            draftOperationId: knownOperationId,
+            draftId: knownDraftId ?? task.draftId,
+          })),
+        };
+      });
+
+      freshState = restored ?? this.wizardStore.get(chatId);
+    }
+
     if (freshState) {
       await this.ensureDraftCreated(ctx, chatId, freshState);
     }
@@ -2006,6 +2036,21 @@ export class SupplyWizardHandler {
       return;
     }
 
+    const existingOperationId = this.resolveKnownDraftOperationId(state);
+    if (existingOperationId) {
+      const handled = await this.tryReuseExistingDraft(
+        ctx,
+        chatId,
+        task,
+        existingOperationId,
+        credentials,
+        retryAttempt,
+      );
+      if (handled) {
+        return;
+      }
+    }
+
     let items: Array<{ sku: number; quantity: number }>;
     try {
       items = this.buildDraftItems(task);
@@ -2077,8 +2122,101 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const pollResult = await this.pollDraftStatus(chatId, operationId, credentials);
+    this.latestDraftOperationId = operationId;
 
+    const pollResult = await this.pollDraftStatus(chatId, operationId, credentials);
+    await this.handleDraftPollResult(ctx, chatId, task, operationId, pollResult, retryAttempt);
+  }
+
+  private resolveKnownDraftOperationId(state: SupplyWizardState): string | undefined {
+    const fromState = typeof state.draftOperationId === 'string' ? state.draftOperationId.trim() : '';
+    if (fromState) {
+      return fromState;
+    }
+    return this.latestDraftOperationId?.trim() || undefined;
+  }
+
+  private async tryReuseExistingDraft(
+    ctx: Context,
+    chatId: string,
+    task: OzonSupplyTask,
+    operationId: string,
+    credentials: OzonCredentials,
+    retryAttempt: number,
+  ): Promise<boolean> {
+    const normalizedOperationId = operationId.trim();
+    if (!normalizedOperationId) {
+      return false;
+    }
+
+    try {
+      const info = await this.ozonApi.getDraftInfo(normalizedOperationId, credentials);
+      const status = info?.status;
+
+      if (status === 'CALCULATION_STATUS_SUCCESS') {
+        await this.handleDraftCreationSuccess(ctx, chatId, {
+          operationId: normalizedOperationId,
+          draftId: info?.draft_id,
+          taskId: task.taskId,
+          draftInfo: info,
+        });
+        return true;
+      }
+
+      if (status === 'CALCULATION_STATUS_FAILED' || info?.code === 1) {
+        await this.handleDraftPollResult(
+          ctx,
+          chatId,
+          task,
+          normalizedOperationId,
+          { status: 'failed', errorDetails: this.describeDraftErrors(info), draftInfo: info },
+          retryAttempt,
+        );
+        return true;
+      }
+
+      if (status === 'CALCULATION_STATUS_EXPIRED' || info?.code === 5) {
+        await this.handleDraftPollResult(
+          ctx,
+          chatId,
+          task,
+          normalizedOperationId,
+          { status: 'expired', errorDetails: this.describeDraftErrors(info), draftInfo: info },
+          retryAttempt,
+        );
+        return true;
+      }
+
+      const pollResult = await this.pollDraftStatus(chatId, normalizedOperationId, credentials);
+      await this.handleDraftPollResult(
+        ctx,
+        chatId,
+        task,
+        normalizedOperationId,
+        pollResult,
+        retryAttempt,
+      );
+      return true;
+    } catch (error) {
+      this.logger.warn(
+        `check existing draft ${normalizedOperationId} failed: ${this.describeError(error)}`,
+      );
+      return false;
+    }
+  }
+
+  private async handleDraftPollResult(
+    ctx: Context,
+    chatId: string,
+    task: OzonSupplyTask,
+    operationId: string,
+    pollResult:
+      | { status: 'success'; draftId?: number; errorDetails?: string; draftInfo?: OzonDraftStatus }
+      | { status: 'failed' | 'expired'; errorDetails?: string; draftInfo?: OzonDraftStatus }
+      | { status: 'timeout'; errorDetails?: string; draftInfo?: OzonDraftStatus }
+      | { status: 'error'; message?: string; errorDetails?: string; draftInfo?: OzonDraftStatus },
+    retryAttempt: number,
+  ): Promise<void> {
     const creationAttempt = retryAttempt;
 
     switch (pollResult.status) {
@@ -2203,6 +2341,7 @@ export class SupplyWizardHandler {
       ].join('\n'),
     );
     await this.notifyAdmin(ctx, 'wizard.draftError', [reason]);
+    this.latestDraftOperationId = undefined;
   }
 
   private formatDraftExpiresAt(timestamp: number): string {
