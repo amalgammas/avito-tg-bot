@@ -466,6 +466,12 @@ export class OzonApiService {
     },
     credentials?: OzonCredentials,
   ): Promise<string | undefined> {
+
+
+      console.log(payload.draftId)
+      console.log(payload.warehouseId)
+      console.log(payload.timeslot)
+
     const response = await this.post<{ operation_id?: string }>(
       '/v1/draft/supply/create',
       {

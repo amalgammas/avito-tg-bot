@@ -373,6 +373,7 @@ export class SupplyWizardHandler {
         credentials,
         readyInDays,
         dropOffWarehouseId: updated.selectedDropOffId,
+        skipDropOffValidation: true,
         onEvent: async (result) => this.sendSupplyEvent(ctx, result),
       });
       await this.updatePrompt(ctx, chatId, updated, 'Мастер завершён ✅');
@@ -1893,7 +1894,7 @@ export class SupplyWizardHandler {
       return;
     }
 
-    await ctx.reply('⚠️ Кнопка устарела, создаю новый черновик…');
+    await ctx.reply('⚠️ Выберите склад доставки');
     this.resetDraftStateForRetry(chatId);
     const freshState = this.wizardStore.get(chatId);
     if (freshState) {

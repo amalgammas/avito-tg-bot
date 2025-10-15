@@ -49,4 +49,5 @@ export interface OzonSupplyProcessOptions {
   delayBetweenCallsMs?: number;
   onEvent?: (result: OzonSupplyProcessResult) => void | Promise<void>;
   dropOffWarehouseId?: number;
+  skipDropOffValidation?: boolean;
 }

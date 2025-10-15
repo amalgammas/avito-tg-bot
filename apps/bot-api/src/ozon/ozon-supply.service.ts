@@ -108,12 +108,27 @@ export class OzonSupplyService {
     if (!dropOffWarehouseId) {
       throw new Error('Пункт сдачи (drop-off) не задан. Укажите его в мастере или через OZON_SUPPLY_DROP_OFF_ID.');
     }
-    await this.ensureDropOffWarehouseAvailable(dropOffWarehouseId, credentials);
+    if (!options.skipDropOffValidation) {
+      await this.ensureDropOffWarehouseAvailable(dropOffWarehouseId, credentials);
+    }
+    const seenUnavailableWarehouses = new Set<number>();
 
     while (taskMap.size) {
       for (const [taskId, state] of Array.from(taskMap.entries())) {
         try {
           const result = await this.processSingleTask(state, credentials, dropOffWarehouseId);
+          if (result.event === 'error' && /Склад отгрузки/.test(result.message ?? '')) {
+            const match = /Склад отгрузки (\d+)/.exec(result.message ?? '');
+            const warehouseId = match ? Number(match[1]) : undefined;
+            if (warehouseId && !seenUnavailableWarehouses.has(warehouseId)) {
+              seenUnavailableWarehouses.add(warehouseId);
+              await this.emitEvent(options.onEvent, {
+                task: state,
+                event: 'error',
+                message: `⚠️ Склад ${warehouseId} недоступен по данным Ozon (drop-off ${dropOffWarehouseId}). Выберите склад из списка, предложенного черновиком.`,
+              });
+            }
+          }
           await this.emitEvent(options.onEvent, result);
 
           if (result.event === 'supplyCreated' && result.operationId) {
@@ -334,10 +349,6 @@ export class OzonSupplyService {
     }
 
     return this.createDraft(task, creds, dropOffWarehouseId);
-  }
-
-  hasDefaultSpreadsheet(): boolean {
-    return Boolean(this.defaultSpreadsheetId);
   }
 
   private async handleExistingDraft(
