@@ -8,7 +8,6 @@ import {
   OzonCredentials,
   OzonFboWarehouseSearchItem,
   OzonDraftStatus,
-  OzonTimeslotResponse,
 } from '../config/ozon-api.service';
 import { OzonSheetService } from '../ozon/ozon-sheet.service';
 import { OzonSupplyService } from '../ozon/ozon-supply.service';
@@ -17,20 +16,17 @@ import { UserCredentialsStore } from './user-credentials.store';
 import {
   SupplyWizardStore,
   SupplyWizardState,
-  SupplyWizardClusterOption,
-  SupplyWizardWarehouseOption,
   SupplyWizardDropOffOption,
   SupplyWizardDraftWarehouseOption,
   SupplyWizardTimeslotOption,
 } from './supply-wizard.store';
 import { AdminNotifierService } from './admin-notifier.service';
+import { SupplyWizardViewService } from './supply-wizard/view.service';
 
 @Injectable()
 export class SupplyWizardHandler {
   private readonly logger = new Logger(SupplyWizardHandler.name);
   private readonly dropOffOptionsLimit = 10;
-  private readonly draftWarehouseOptionsLimit = 10;
-  private readonly timeslotOptionsLimit = 10;
   private readonly draftPollIntervalMs = 10_000;
   private readonly draftPollMaxAttempts = 1_000;
   private readonly draftRecreateMaxAttempts = 1_000;
@@ -46,6 +42,7 @@ export class SupplyWizardHandler {
     private readonly ozonApi: OzonApiService,
     private readonly wizardStore: SupplyWizardStore,
     private readonly adminNotifier: AdminNotifierService,
+    private readonly view: SupplyWizardViewService,
   ) {}
 
   getState(chatId: string): SupplyWizardState | undefined {
@@ -220,12 +217,12 @@ export class SupplyWizardHandler {
       });
 
       const targetState = updated ?? state;
-      await this.updatePrompt(
+      await this.view.updatePrompt(
         ctx,
         chatId,
         targetState,
         `По запросу «${query}» ничего не найдено. Попробуйте уточнить название города или адреса.`,
-        this.withCancel(),
+        this.view.withCancel(),
       );
       return;
     }
@@ -282,12 +279,12 @@ export class SupplyWizardHandler {
 
     await ctx.reply(summaryParts.join('\n'));
 
-    await this.updatePrompt(
+    await this.view.updatePrompt(
       ctx,
       chatId,
       updated,
       'Выберите пункт сдачи кнопкой ниже или введите новый запрос, чтобы найти другой вариант.',
-      this.buildDropOffKeyboard(updated),
+      this.view.buildDropOffKeyboard(updated),
     );
   }
 
@@ -378,7 +375,7 @@ export class SupplyWizardHandler {
     }
     summaryLines.push('', 'Создаю поставку...');
 
-    await this.updatePrompt(ctx, chatId, updated, summaryLines.join('\n'));
+    await this.view.updatePrompt(ctx, chatId, updated, summaryLines.join('\n'));
     await this.notifyAdmin(ctx, 'wizard.supplyProcessing', summaryLines);
 
     try {
@@ -389,7 +386,7 @@ export class SupplyWizardHandler {
         skipDropOffValidation: true,
         onEvent: async (result) => this.sendSupplyEvent(ctx, result),
       });
-      await this.updatePrompt(ctx, chatId, updated, 'Мастер завершён ✅');
+      await this.view.updatePrompt(ctx, chatId, updated, 'Мастер завершён ✅');
       await ctx.reply('✅ Поставка создана.');
       await this.notifyAdmin(ctx, 'wizard.supplyDone', [
         `draft: ${clonedTask.draftId ?? '—'}`,
@@ -397,9 +394,9 @@ export class SupplyWizardHandler {
         updated.selectedTimeslot ? `timeslot: ${updated.selectedTimeslot.label}` : undefined,
       ]);
     } catch (error) {
-      await this.updatePrompt(ctx, chatId, updated, 'Мастер завершён с ошибкой ❌');
+      await this.view.updatePrompt(ctx, chatId, updated, 'Мастер завершён с ошибкой ❌');
       await ctx.reply(`❌ Ошибка при обработке: ${this.describeError(error)}`);
-      await this.safeSendErrorDetails(ctx, error);
+      await this.view.sendErrorDetails(ctx, this.extractErrorPayload(error));
       await this.notifyAdmin(ctx, 'wizard.supplyError', [this.describeError(error)]);
     } finally {
       this.wizardStore.clear(chatId);
@@ -440,7 +437,7 @@ export class SupplyWizardHandler {
       case 'cancel':
         this.wizardStore.clear(chatId);
         await this.safeAnswerCbQuery(ctx, chatId, 'Мастер отменён');
-        await this.updatePrompt(ctx, chatId, state, 'Мастер отменён.');
+        await this.view.updatePrompt(ctx, chatId, state, 'Мастер отменён.');
         return;
       default:
         await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
@@ -485,7 +482,7 @@ export class SupplyWizardHandler {
 
     await this.resolveSkus(clonedTasks[0], credentials);
 
-    const summary = this.formatItemsSummary(clonedTasks[0]);
+    const summary = this.view.formatItemsSummary(clonedTasks[0]);
 
     let clusters: OzonCluster[] = [];
     try {
@@ -502,7 +499,7 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const options = this.buildOptions(clusters);
+    const options = this.view.buildOptions(clusters);
 
     const updated = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
@@ -538,7 +535,7 @@ export class SupplyWizardHandler {
 
     await ctx.reply(summary);
 
-    await this.updatePrompt(
+    await this.view.updatePrompt(
       ctx,
       chatId,
       updated,
@@ -547,7 +544,7 @@ export class SupplyWizardHandler {
         'Введите город, адрес или название пункта сдачи, чтобы найти место отгрузки.',
         'Можно отправить новый запрос в любой момент или отменить мастера кнопкой ниже.',
       ].join('\n'),
-      this.withCancel(),
+      this.view.withCancel(),
     );
   }
 
@@ -604,12 +601,12 @@ export class SupplyWizardHandler {
       }
     }
 
-    await this.updatePrompt(
+    await this.view.updatePrompt(
       ctx,
       chatId,
       updated,
       'Выберите кластер, в который планируете вести поставку.',
-      this.buildClusterKeyboard(updated),
+      this.view.buildClusterKeyboard(updated),
     );
 
     await this.safeAnswerCbQuery(ctx, chatId, 'Продолжаем');
@@ -692,7 +689,7 @@ export class SupplyWizardHandler {
         updated.selectedDropOffName ??
         (updated.selectedDropOffId ? String(updated.selectedDropOffId) : '—');
 
-      await this.updatePrompt(
+      await this.view.updatePrompt(
         ctx,
         chatId,
         updated,
@@ -701,12 +698,12 @@ export class SupplyWizardHandler {
           `Пункт сдачи: ${dropOffLabelForPrompt}.`,
           'Получаю рекомендованные склады...',
         ].join('\n'),
-        this.withCancel(),
+        this.view.withCancel(),
       );
 
       await this.ensureDraftCreated(ctx, chatId, updated);
     } else {
-      await this.updatePrompt(
+      await this.view.updatePrompt(
         ctx,
         chatId,
         updated,
@@ -714,7 +711,7 @@ export class SupplyWizardHandler {
           `Кластер выбран: ${cluster.name}.`,
           'Теперь выберите пункт сдачи или отправьте новый запрос с городом.',
         ].join('\n'),
-        this.buildDropOffKeyboard(updated),
+        this.view.buildDropOffKeyboard(updated),
       );
     }
 
@@ -798,7 +795,7 @@ export class SupplyWizardHandler {
         updated.selectedDropOffName ??
         (updated.selectedDropOffId ? String(updated.selectedDropOffId) : '—');
 
-      await this.updatePrompt(
+      await this.view.updatePrompt(
         ctx,
         chatId,
         updated,
@@ -806,10 +803,10 @@ export class SupplyWizardHandler {
           `Склад выбран: ${warehouse.name} (${warehouse.warehouse_id}).`,
           `Пункт сдачи: ${dropOffLabel}.`
         ].join('\n'),
-        this.withCancel(),
+        this.view.withCancel(),
       );
     } else {
-      await this.updatePrompt(
+      await this.view.updatePrompt(
         ctx,
         chatId,
         updated,
@@ -817,7 +814,7 @@ export class SupplyWizardHandler {
           `Склад выбран: ${warehouse.name} (${warehouse.warehouse_id}).`,
           'Выберите пункт сдачи (drop-off), где оформим поставку.',
         ].join('\n'),
-        this.buildDropOffKeyboard(updated),
+        this.view.buildDropOffKeyboard(updated),
       );
     }
 
@@ -912,12 +909,12 @@ export class SupplyWizardHandler {
       }
       lines.push('Получаю рекомендованные склады...');
 
-      await this.updatePrompt(
+      await this.view.updatePrompt(
         ctx,
         chatId,
         updated,
         lines.join('\n'),
-        this.withCancel(),
+        this.view.withCancel(),
       );
 
       await this.ensureDraftCreated(ctx, chatId, updated);
@@ -933,12 +930,12 @@ export class SupplyWizardHandler {
         'При необходимости отправьте новый запрос с городом, чтобы сменить пункт сдачи.',
       );
 
-      await this.updatePrompt(
+      await this.view.updatePrompt(
         ctx,
         chatId,
         updated,
         lines.join('\n'),
-        this.withCancel(this.buildClusterStartKeyboard()),
+        this.view.withCancel(this.view.buildClusterStartKeyboard()),
       );
     }
 
@@ -1017,16 +1014,16 @@ export class SupplyWizardHandler {
     state: SupplyWizardState,
     option: SupplyWizardDraftWarehouseOption,
   ): Promise<void> {
-    const summaryLines = this.describeWarehouseSelection(option, state);
+    const summaryLines = this.view.describeWarehouseSelection(option, state);
 
     await this.notifyAdmin(ctx, 'wizard.warehouseSelected', summaryLines);
 
-    await this.updatePrompt(
+    await this.view.updatePrompt(
       ctx,
       chatId,
       state,
       [...summaryLines, '', 'Получаю доступные таймслоты...'].join('\n'),
-      this.withCancel(),
+      this.view.withCancel(),
     );
 
     const credentials = this.resolveCredentials(chatId);
@@ -1069,19 +1066,18 @@ export class SupplyWizardHandler {
       });
 
       if (rollback) {
-        await this.updatePrompt(
+        await this.view.updatePrompt(
           ctx,
           chatId,
           rollback,
           'Не удалось получить таймслоты. Выберите другой склад или повторите попытку позже.',
-          this.buildDraftWarehouseKeyboard(rollback),
+          this.view.buildDraftWarehouseKeyboard(rollback),
         );
       }
       return;
     }
 
-    const limited = timeslotOptions.slice(0, this.timeslotOptionsLimit);
-    const truncated = limited.length < timeslotOptions.length;
+    const { limited, truncated } = this.view.limitTimeslotOptions(timeslotOptions);
 
     const stored = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
@@ -1114,7 +1110,7 @@ export class SupplyWizardHandler {
     }
 
     if (!limited.length) {
-      await this.updatePrompt(
+      await this.view.updatePrompt(
         ctx,
         chatId,
         stored,
@@ -1124,7 +1120,7 @@ export class SupplyWizardHandler {
           'Свободных таймслотов для этого склада нет.',
           'Выберите другой склад или попробуйте позже.',
         ].join('\n'),
-        this.buildDraftWarehouseKeyboard(stored),
+        this.view.buildDraftWarehouseKeyboard(stored),
       );
       return;
     }
@@ -1133,19 +1129,19 @@ export class SupplyWizardHandler {
       ...summaryLines,
       '',
       'Доступные таймслоты:',
-      ...this.formatTimeslotSummary(limited),
+      ...this.view.formatTimeslotSummary(limited),
     ];
     if (truncated) {
       promptLines.push(`… Показаны первые ${limited.length} из ${timeslotOptions.length} вариантов.`);
     }
     promptLines.push('', 'Выберите таймслот кнопкой ниже.');
 
-    await this.updatePrompt(
+    await this.view.updatePrompt(
       ctx,
       chatId,
       stored,
       promptLines.join('\n'),
-      this.buildTimeslotKeyboard(stored),
+      this.view.buildTimeslotKeyboard(stored),
     );
   }
 
@@ -1198,167 +1194,6 @@ export class SupplyWizardHandler {
     await this.startSupplyProcessing(ctx, chatId, updated, 0);
   }
 
-  private buildOptions(
-    clusters: OzonCluster[]
-  ): {
-    clusters: SupplyWizardClusterOption[];
-    warehouses: Record<number, SupplyWizardWarehouseOption[]>;
-  } {
-    const clusterOptions: SupplyWizardClusterOption[] = [];
-    const clusterWarehouses = new Map<number, SupplyWizardWarehouseOption[]>();
-
-    for (const cluster of clusters) {
-      if (typeof cluster.id !== 'number') continue;
-      const clusterId = Number(cluster.id);
-      const clusterName = cluster.name?.trim() || `Кластер ${clusterId}`;
-
-      const rawWarehouses: SupplyWizardWarehouseOption[] = [];
-      for (const logistic of cluster.logistic_clusters ?? []) {
-        for (const warehouse of logistic.warehouses ?? []) {
-          if (typeof warehouse?.warehouse_id !== 'number') continue;
-          const warehouseId = Number(warehouse.warehouse_id);
-          if (!Number.isFinite(warehouseId)) continue;
-
-          rawWarehouses.push({
-            warehouse_id: warehouseId,
-            name: warehouse.name?.trim() || `Склад ${warehouseId}`
-          });
-        }
-      }
-
-      const uniqueWarehouses = this.deduplicateWarehouseOptions(rawWarehouses);
-      clusterWarehouses.set(clusterId, uniqueWarehouses);
-
-      clusterOptions.push({
-        id: clusterId,
-        name: clusterName,
-        logistic_clusters: {
-          warehouses: uniqueWarehouses.map((item) => ({ ...item })),
-        },
-      });
-    }
-
-    const sortedClusters = clusterOptions.sort((a, b) =>
-      a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }),
-    );
-
-    // const sortedDropOffs = [...dropOffs].sort((a, b) =>
-    //   a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }),
-    // );
-
-    const warehousesByCluster = Object.fromEntries(
-      clusterWarehouses.entries(),
-    ) as Record<number, SupplyWizardWarehouseOption[]>;
-
-    return {
-      clusters: sortedClusters,
-      warehouses: warehousesByCluster
-    };
-  }
-
-  private mapDraftWarehouseOptions(
-    info?: OzonDraftStatus,
-  ): SupplyWizardDraftWarehouseOption[] {
-    if (!info?.clusters?.length) {
-      return [];
-    }
-
-    const byWarehouse = new Map<number, SupplyWizardDraftWarehouseOption>();
-
-    for (const cluster of info.clusters ?? []) {
-      const parsedClusterId = this.parseNumber(cluster?.cluster_id);
-      const clusterId = parsedClusterId ? Math.round(parsedClusterId) : undefined;
-      const clusterName = cluster?.cluster_name?.trim() || undefined;
-
-      for (const warehouseInfo of cluster?.warehouses ?? []) {
-        if (!warehouseInfo) continue;
-        const supplyWarehouse = warehouseInfo.supply_warehouse;
-        const rawId = supplyWarehouse?.warehouse_id;
-        const parsedId = this.parseNumber(rawId);
-        if (!parsedId || parsedId <= 0) continue;
-        const warehouseId = Math.round(parsedId);
-
-        const totalRankRaw = this.parseNumber(warehouseInfo.total_rank);
-        const totalRank = typeof totalRankRaw === 'number' ? totalRankRaw : undefined;
-        const totalScore = this.parseNumber(warehouseInfo.total_score);
-        const travelTimeDays = this.parseNullableNumber(warehouseInfo.travel_time_days);
-        const bundle = warehouseInfo.bundle_ids?.[0];
-
-        const option: SupplyWizardDraftWarehouseOption = {
-          warehouseId,
-          name: supplyWarehouse?.name?.trim() || `Склад ${warehouseId}`,
-          address: supplyWarehouse?.address?.trim() || undefined,
-          clusterId: clusterId,
-          clusterName,
-          totalRank,
-          totalScore,
-          travelTimeDays: typeof travelTimeDays === 'number' ? travelTimeDays : null,
-          isAvailable: warehouseInfo.status?.is_available,
-          statusState: warehouseInfo.status?.state,
-          statusReason: warehouseInfo.status?.invalid_reason,
-          bundleId: bundle?.bundle_id || undefined,
-          restrictedBundleId: warehouseInfo.restricted_bundle_id || undefined,
-        };
-
-        const existing = byWarehouse.get(warehouseId);
-        if (!existing) {
-          byWarehouse.set(warehouseId, option);
-          continue;
-        }
-
-        const existingRank = existing.totalRank ?? Number.POSITIVE_INFINITY;
-        const candidateRank = option.totalRank ?? Number.POSITIVE_INFINITY;
-        if (candidateRank < existingRank) {
-          byWarehouse.set(warehouseId, option);
-        }
-      }
-    }
-
-    return [...byWarehouse.values()].sort((a, b) => {
-      const rankA = a.totalRank ?? Number.POSITIVE_INFINITY;
-      const rankB = b.totalRank ?? Number.POSITIVE_INFINITY;
-      if (rankA !== rankB) return rankA - rankB;
-
-      const scoreA = a.totalScore ?? -Number.POSITIVE_INFINITY;
-      const scoreB = b.totalScore ?? -Number.POSITIVE_INFINITY;
-      if (scoreA !== scoreB) return scoreB - scoreA;
-
-      return (a.name ?? '').localeCompare(b.name ?? '', 'ru', { sensitivity: 'base' });
-    });
-  }
-
-  private formatDraftWarehouseSummary(
-    options: SupplyWizardDraftWarehouseOption[],
-  ): string[] {
-    const lines: string[] = [];
-
-    options.forEach((option, index) => {
-      const rank = option.totalRank ?? index + 1;
-      const icon = option.isAvailable === false ? '⚠️' : option.isAvailable === true ? '✅' : 'ℹ️';
-      const name = option.name ?? `Склад ${option.warehouseId}`;
-      const travelPart =
-        typeof option.travelTimeDays === 'number'
-          ? `, путь ≈ ${option.travelTimeDays} дн.`
-          : '';
-      const scorePart =
-        typeof option.totalScore === 'number'
-          ? `, score ${option.totalScore.toFixed(3)}`
-          : '';
-      const statusPart =
-        option.isAvailable === false && option.statusReason
-          ? ` — ${option.statusReason}`
-          : '';
-
-      lines.push(`${rank}. ${icon} ${name} (${option.warehouseId})${travelPart}${scorePart}${statusPart}`);
-
-      if (option.address) {
-        lines.push(`   Адрес: ${option.address}`);
-      }
-    });
-
-    return lines;
-  }
-
   private async fetchTimeslotsForWarehouse(
     state: SupplyWizardState,
     option: SupplyWizardDraftWarehouseOption,
@@ -1368,7 +1203,7 @@ export class SupplyWizardHandler {
       return [];
     }
 
-    const warehouseIds = this.collectTimeslotWarehouseIds(state, option);
+    const warehouseIds = this.view.collectTimeslotWarehouseIds(state, option);
     if (!warehouseIds.length) {
       return [];
     }
@@ -1384,7 +1219,7 @@ export class SupplyWizardHandler {
       credentials,
     );
 
-    return this.mapTimeslotOptions(response);
+    return this.view.mapTimeslotOptions(response);
   }
 
   private collectTimeslotWarehouseIds(
@@ -1410,155 +1245,6 @@ export class SupplyWizardHandler {
 
   private toOzonIso(date: Date): string {
     return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
-  }
-
-  private mapTimeslotOptions(response?: OzonTimeslotResponse): SupplyWizardTimeslotOption[] {
-    const options: SupplyWizardTimeslotOption[] = [];
-    if (!response?.drop_off_warehouse_timeslots?.length) {
-      return options;
-    }
-
-    const seen = new Set<string>();
-    for (const bucket of response.drop_off_warehouse_timeslots ?? []) {
-      const timezone = bucket?.warehouse_timezone;
-      for (const day of bucket?.days ?? []) {
-        for (const slot of day?.timeslots ?? []) {
-          const from = slot?.from_in_timezone;
-          const to = slot?.to_in_timezone;
-          if (!from || !to) {
-            continue;
-          }
-          const id = this.makeTimeslotId(from, to);
-          if (seen.has(id)) {
-            continue;
-          }
-          seen.add(id);
-          options.push({
-            id,
-            from,
-            to,
-            label: this.formatTimeslotLabel(from, to, timezone),
-            data: {
-              from_in_timezone: from,
-              to_in_timezone: to,
-            },
-          });
-        }
-      }
-    }
-
-    options.sort((a, b) => new Date(a.from).getTime() - new Date(b.from).getTime());
-    return options;
-  }
-
-  private makeTimeslotId(fromIso: string, toIso: string): string {
-    const fromTime = Date.parse(fromIso);
-    const toTime = Date.parse(toIso);
-    if (Number.isFinite(fromTime) && Number.isFinite(toTime)) {
-      return `${fromTime}-${toTime}`;
-    }
-    const base64 = Buffer.from(`${fromIso}|${toIso}`, 'utf8').toString('base64');
-    return base64.replace(/=+$/g, '').replace(/\+/g, '-').replace(/\//g, '_');
-  }
-
-  private formatTimeslotSummary(options: SupplyWizardTimeslotOption[]): string[] {
-    return options.map((option, index) => `${index + 1}. ${option.label}`);
-  }
-
-  private buildTimeslotKeyboard(
-    state: SupplyWizardState,
-  ): Array<Array<{ text: string; callback_data: string }>> {
-    const rows = state.draftTimeslots.map((option, index) => [
-      {
-        text: this.formatTimeslotButtonLabel(option, index),
-        callback_data: `wizard:timeslot:${option.id}`,
-      },
-    ]);
-    return this.withCancel(rows);
-  }
-
-  private formatTimeslotButtonLabel(option: SupplyWizardTimeslotOption, index: number): string {
-    return this.truncate(`${index + 1}. ${option.label}`, 60);
-  }
-
-  private formatTimeslotLabel(fromIso: string, toIso: string, timezone?: string): string {
-    const fromDate = new Date(fromIso);
-    const toDate = new Date(toIso);
-
-    if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
-      return `${fromIso} → ${toIso}${timezone ? ` (${timezone})` : ''}`;
-    }
-
-    const dateFormatter = new Intl.DateTimeFormat('ru-RU', {
-      day: '2-digit',
-      month: '2-digit',
-    });
-    const timeFormatter = new Intl.DateTimeFormat('ru-RU', {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-
-    const datePart = dateFormatter.format(fromDate);
-    const fromPart = timeFormatter.format(fromDate);
-    const toPart = timeFormatter.format(toDate);
-    const timezonePart = timezone ? ` (${timezone})` : '';
-
-    return `${datePart} ${fromPart}–${toPart}${timezonePart}`;
-  }
-
-  private describeWarehouseSelection(
-    option: SupplyWizardDraftWarehouseOption,
-    state: SupplyWizardState,
-  ): string[] {
-    const lines = [`Склад выбран: ${option.name} (${option.warehouseId}).`];
-    if (option.address) {
-      lines.push(`Адрес: ${option.address}.`);
-    }
-
-    const dropOffLabel =
-      state.selectedDropOffName ?? (state.selectedDropOffId ? String(state.selectedDropOffId) : undefined);
-    if (dropOffLabel) {
-      lines.push(`Пункт сдачи: ${dropOffLabel}.`);
-    }
-
-    const clusterLabel =
-      option.clusterName ??
-      state.selectedClusterName ??
-      (state.selectedClusterId ? `Кластер ${state.selectedClusterId}` : undefined);
-    if (clusterLabel) {
-      lines.push(`Кластер: ${clusterLabel}.`);
-    }
-
-    const metaParts: string[] = [];
-    if (typeof option.totalRank === 'number') {
-      metaParts.push(`ранг ${option.totalRank}`);
-    }
-
-    if (typeof option.totalScore === 'number') {
-      metaParts.push(`score ${option.totalScore.toFixed(3)}`);
-    }
-
-    if (option.travelTimeDays !== undefined && option.travelTimeDays !== null) {
-      metaParts.push(`путь ≈ ${option.travelTimeDays} дн.`);
-    }
-
-    if (metaParts.length) {
-      lines.push(`Оценка Ozon: ${metaParts.join(', ')}.`);
-    }
-
-    if (option.restrictedBundleId) {
-      lines.push(`Ограничение: bundle ${option.restrictedBundleId}.`);
-    }
-
-    if (option.isAvailable === false && option.statusReason) {
-      lines.push(`⚠️ Статус Ozon: ${option.statusReason}.`);
-    } else if (option.isAvailable === false) {
-      lines.push('⚠️ Ozon пометил склад как недоступный.');
-    } else if (option.isAvailable === true) {
-      lines.push('✅ Ozon отмечает склад как доступный.');
-    }
-
-    return lines;
   }
 
   private findSelectedDraftWarehouse(
@@ -1596,123 +1282,6 @@ export class SupplyWizardHandler {
     }
 
     return options;
-  }
-
-  private formatDropOffButtonLabel(option: SupplyWizardDropOffOption): string {
-    const base = option.name ?? `Пункт ${option.warehouse_id}`;
-    return this.truncate(`${base}`, 60);
-  }
-
-  private formatDraftWarehouseButtonLabel(
-    option: SupplyWizardDraftWarehouseOption,
-    index: number,
-  ): string {
-    const rank = option.totalRank ?? index + 1;
-    const icon = option.isAvailable === false ? '⚠️' : option.isAvailable === true ? '✅' : 'ℹ️';
-    const base = `${rank}. ${icon} ${option.name ?? option.warehouseId}`;
-    return this.truncate(base, 60);
-  }
-
-  private truncate(value: string, maxLength = 60): string {
-    if (value.length <= maxLength) {
-      return value;
-    }
-    return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
-  }
-
-  private parseNumber(value: unknown): number | undefined {
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return value;
-    }
-    if (typeof value === 'string') {
-      const trimmed = value.trim();
-      if (!trimmed) {
-        return undefined;
-      }
-      const parsed = Number(trimmed);
-      if (Number.isFinite(parsed)) {
-        return parsed;
-      }
-    }
-    return undefined;
-  }
-
-  private parseNullableNumber(value: unknown): number | null | undefined {
-    if (value === null) {
-      return null;
-    }
-    return this.parseNumber(value);
-  }
-
-  private buildClusterStartKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
-    return [[{ text: 'Выбрать кластер', callback_data: 'wizard:clusterStart' }]];
-  }
-
-  private deduplicateWarehouseOptions(
-    options: SupplyWizardWarehouseOption[],
-  ): SupplyWizardWarehouseOption[] {
-    const map = new Map<number, SupplyWizardWarehouseOption>();
-    for (const option of options) {
-      if (!map.has(option.warehouse_id)) {
-        map.set(option.warehouse_id, { ...option });
-      }
-    }
-    return [...map.values()].sort((a, b) =>
-      a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }),
-    );
-  }
-
-  private buildClusterKeyboard(state: SupplyWizardState): Array<Array<{ text: string; callback_data: string }>> {
-    const rows = state.clusters.map((cluster) => [
-      {
-        text: cluster.name,
-        callback_data: `wizard:cluster:${cluster.id}`,
-      },
-    ]);
-
-    return this.withCancel(rows);
-  }
-
-  private buildWarehouseKeyboard(
-    state: SupplyWizardState,
-    clusterId: number,
-  ): Array<Array<{ text: string; callback_data: string }>> {
-    const rows: Array<Array<{ text: string; callback_data: string }>> = [];
-    const warehouses = state.warehouses[clusterId] ?? [];
-    for (const warehouse of warehouses) {
-      rows.push([
-        {
-          text: `${warehouse.name} (${warehouse.warehouse_id})`,
-          callback_data: `wizard:warehouse:${warehouse.warehouse_id}`,
-        },
-      ]);
-    }
-
-    return this.withCancel(rows);
-  }
-
-  private buildDropOffKeyboard(
-    state: SupplyWizardState,
-  ): Array<Array<{ text: string; callback_data: string }>> {
-    const rows = state.dropOffs.map((option) => [
-      {
-        text: this.formatDropOffButtonLabel(option),
-        callback_data: `wizard:dropoff:${option.warehouse_id}`,
-      },
-    ]);
-    return this.withCancel(rows);
-  }
-
-  private buildDraftWarehouseKeyboard(
-    state: SupplyWizardState,
-  ): Array<Array<{ text: string; callback_data: string }>> {
-    const rows = state.draftWarehouses.map((option, index) => [
-      {
-        text: this.formatDraftWarehouseButtonLabel(option, index),
-        callback_data: `wizard:draftWarehouse:${option.warehouseId}`,
-      },
-    ]);
-    return this.withCancel(rows);
   }
 
   private async pollDraftStatus(
@@ -1781,9 +1350,8 @@ export class SupplyWizardHandler {
     chatId: string,
     payload: { operationId: string; draftId?: number; taskId: string; draftInfo?: OzonDraftStatus },
   ): Promise<void> {
-    const warehouseOptions = this.mapDraftWarehouseOptions(payload.draftInfo);
-    const limitedOptions = warehouseOptions.slice(0, this.draftWarehouseOptionsLimit);
-    const truncated = limitedOptions.length < warehouseOptions.length;
+    const warehouseOptions = this.view.mapDraftWarehouseOptions(payload.draftInfo);
+    const { limited: limitedOptions, truncated } = this.view.limitDraftWarehouseOptions(warehouseOptions);
     this.latestDraftWarehouses = limitedOptions;
     this.latestDraftId = payload.draftId ?? this.latestDraftId;
     this.latestDraftOperationId = payload.operationId;
@@ -1850,11 +1418,11 @@ export class SupplyWizardHandler {
         '',
         'Ozon не вернул список складов. Укажите количество дней до готовности, чтобы продолжить.',
       );
-      await this.updatePrompt(ctx, chatId, updated, headerLines.join('\n'), this.withCancel());
+      await this.view.updatePrompt(ctx, chatId, updated, headerLines.join('\n'), this.view.withCancel());
       return;
     }
 
-    const summaryLines = this.formatDraftWarehouseSummary(limitedOptions);
+    const summaryLines = this.view.formatDraftWarehouseSummary(limitedOptions);
     const footerLines = truncated
       ? [`… Показаны первые ${limitedOptions.length} из ${warehouseOptions.length} складов.`]
       : [];
@@ -1869,12 +1437,12 @@ export class SupplyWizardHandler {
       'Выберите склад кнопкой ниже, чтобы перейти к выбору даты готовности.',
     ].join('\n');
 
-    await this.updatePrompt(
+    await this.view.updatePrompt(
       ctx,
       chatId,
       updated,
       promptText,
-      this.buildDraftWarehouseKeyboard(updated),
+      this.view.buildDraftWarehouseKeyboard(updated),
     );
   }
 
@@ -2358,41 +1926,6 @@ export class SupplyWizardHandler {
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private withCancel(
-    rows: Array<Array<{ text: string; callback_data: string }>> = [],
-  ): Array<Array<{ text: string; callback_data: string }>> {
-    return [...rows, [{ text: 'Отмена', callback_data: 'wizard:cancel' }]];
-  }
-
-  private async updatePrompt(
-    ctx: Context,
-    chatId: string,
-    state: SupplyWizardState,
-    text: string,
-    keyboard?: Array<Array<{ text: string; callback_data: string }>>,
-  ): Promise<void> {
-    const rawChatId = (ctx.callbackQuery as any)?.message?.chat?.id ?? chatId;
-    const messageId = state.promptMessageId;
-    const replyMarkup = keyboard ? { inline_keyboard: keyboard } : undefined;
-
-    if (messageId) {
-      try {
-        await ctx.telegram.editMessageText(rawChatId, messageId, undefined, text, {
-          reply_markup: replyMarkup,
-        });
-        return;
-      } catch (error) {
-        this.logger.debug(`editMessageText failed: ${this.describeError(error)}`);
-      }
-    }
-
-    const sent = await ctx.reply(text, { reply_markup: replyMarkup as any });
-    this.wizardStore.update(chatId, (current) => {
-      if (!current) return undefined;
-      return { ...current, promptMessageId: (sent as any)?.message_id ?? current.promptMessageId };
-    });
-  }
-
   private async resolveSkus(task: OzonSupplyTask, credentials: OzonCredentials): Promise<void> {
     const unresolvedOffers: string[] = [];
 
@@ -2434,63 +1967,19 @@ export class SupplyWizardHandler {
     }
   }
 
-  private formatItemsSummary(task: OzonSupplyTask): string {
-    const lines = task.items.map((item) => `• ${item.article} → SKU ${item.sku} × ${item.quantity}`);
-
-    return [
-      'Товары из файла:',
-      ...lines,
-      '',
-      'Введите ниже город, адрес или название пункта сдачи, чтобы найти место отгрузки.',
-    ].join('\n');
-  }
-
   private async sendSupplyEvent(ctx: Context, result: { task: OzonSupplyTask; event: string; message?: string }): Promise<void> {
     const chatId = this.extractChatId(ctx);
     if (!chatId) return;
 
-    const text = this.formatSupplyEvent(result);
+    const text = this.view.formatSupplyEvent({
+      taskId: result.task.taskId,
+      event: result.event,
+      message: result.message,
+    });
     if (!text) return;
 
     await ctx.telegram.sendMessage(chatId, text);
     await this.notifyAdmin(ctx, `wizard.${result.event}`, [text]);
-  }
-
-  private formatSupplyEvent(result: { task: OzonSupplyTask; event: string; message?: string }): string | undefined {
-    const prefix = `[${result.task.taskId}]`;
-    switch (result.event) {
-      case 'draftCreated':
-        return `${prefix} Черновик создан. ${result.message ?? ''}`.trim();
-      case 'draftValid':
-        return `${prefix} Используем существующий черновик. ${result.message ?? ''}`.trim();
-      case 'draftExpired':
-        return `${prefix} Черновик устарел, создаём заново.`;
-      case 'draftInvalid':
-        return `${prefix} Черновик невалидный, пересоздаём.`;
-      case 'draftError':
-        return `${prefix} Ошибка статуса черновика.${result.message ? ` ${result.message}` : ''}`;
-      case 'timeslotMissing':
-        return `${prefix} Свободных таймслотов нет.`;
-      case 'supplyCreated':
-        return `${prefix} ✅ Поставка создана. ${result.message ?? ''}`.trim();
-      case 'supplyStatus':
-        return `${prefix} ${result.message ?? 'Статус поставки обновлён.'}`.trim();
-      case 'noCredentials':
-      case 'error':
-        return `${prefix} ❌ ${result.message ?? 'Ошибка'}`;
-      default:
-        return result.message ? `${prefix} ${result.message}` : undefined;
-    }
-  }
-
-  private async safeSendErrorDetails(ctx: Context, error: unknown): Promise<void> {
-    const payload = this.extractErrorPayload(error);
-    if (!payload) return;
-
-    const lines = Array.isArray(payload) ? payload : payload.split(/\r?\n/);
-    await ctx.reply(['Детали ошибки:', '```', ...lines, '```'].join('\n'), {
-      parse_mode: 'Markdown',
-    });
   }
 
   private extractChatId(ctx: Context): string | undefined {

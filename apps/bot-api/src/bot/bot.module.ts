@@ -6,9 +6,17 @@ import { UserCredentialsStore } from './user-credentials.store';
 import { SupplyWizardStore } from './supply-wizard.store';
 import { SupplyWizardHandler } from './supply-wizard.handler';
 import { AdminNotifierService } from './admin-notifier.service';
+import { SupplyWizardViewService } from './supply-wizard/view.service';
 
 @Module({
   imports: [OzonModule],
-  providers: [BotUpdate, UserCredentialsStore, SupplyWizardStore, SupplyWizardHandler, AdminNotifierService],
+  providers: [
+    BotUpdate,
+    UserCredentialsStore,
+    SupplyWizardStore,
+    SupplyWizardHandler,
+    AdminNotifierService,
+    SupplyWizardViewService,
+  ],
 })
 export class BotModule {}
