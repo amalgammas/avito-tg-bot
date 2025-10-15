@@ -5,6 +5,7 @@ import { Context } from 'telegraf';
 import { SupplyWizardHandler } from './supply-wizard.handler';
 import { UserCredentialsStore } from './user-credentials.store';
 import { OzonApiService, OzonCredentials } from '../config/ozon-api.service';
+import { AdminNotifierService } from './admin-notifier.service';
 
 @Update()
 export class BotUpdate {
@@ -27,6 +28,7 @@ export class BotUpdate {
     private readonly wizard: SupplyWizardHandler,
     private readonly credentialsStore: UserCredentialsStore,
     private readonly ozonApi: OzonApiService,
+    private readonly adminNotifier: AdminNotifierService,
   ) {}
 
   @Start()
@@ -80,6 +82,12 @@ export class BotUpdate {
       ].join('\n'),
     );
 
+    await this.adminNotifier.notifyWizardEvent({
+      ctx,
+      event: 'auth.saved',
+      lines: [`client_id: ${this.maskValue(clientId)}`],
+    });
+
     await this.wizardWarmup(ctx, { clientId, apiKey });
   }
 
@@ -98,6 +106,11 @@ export class BotUpdate {
 
     this.credentialsStore.clear(chatId);
     await ctx.reply('✅ Ключи удалены из памяти бота.');
+
+    await this.adminNotifier.notifyWizardEvent({
+      ctx,
+      event: 'auth.cleared',
+    });
   }
 
   @Command('ozon_keys')

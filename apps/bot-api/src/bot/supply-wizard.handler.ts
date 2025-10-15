@@ -23,6 +23,7 @@ import {
   SupplyWizardDraftWarehouseOption,
   SupplyWizardTimeslotOption,
 } from './supply-wizard.store';
+import { AdminNotifierService } from './admin-notifier.service';
 
 @Injectable()
 export class SupplyWizardHandler {
@@ -43,6 +44,7 @@ export class SupplyWizardHandler {
     private readonly supplyService: OzonSupplyService,
     private readonly ozonApi: OzonApiService,
     private readonly wizardStore: SupplyWizardStore,
+    private readonly adminNotifier: AdminNotifierService,
   ) {}
 
   getState(chatId: string): SupplyWizardState | undefined {
@@ -79,6 +81,8 @@ export class SupplyWizardHandler {
         if (!current) return undefined;
         return { ...state, promptMessageId: (prompt as any)?.message_id ?? state.promptMessageId };
       });
+
+      await this.notifyAdmin(ctx, 'wizard.start', [`stage: ${state.stage}`]);
     } catch (error) {
       this.logger.error(`start wizard failed: ${this.describeError(error)}`);
       await ctx.reply(`❌ Не удалось инициализировать мастер: ${this.describeError(error)}`);
@@ -115,10 +119,15 @@ export class SupplyWizardHandler {
       await ctx.reply('Получаю файл, подождите...');
       const buffer = await this.downloadTelegramFile(ctx, document.file_id);
       await this.processSpreadsheet(ctx, chatId, state, { buffer, label: document.file_name ?? 'файл' });
+      await this.notifyAdmin(ctx, 'wizard.documentUploaded', [
+        `file: ${document.file_name ?? 'unknown'}`,
+        document.file_size ? `size: ${document.file_size} bytes` : undefined,
+      ]);
     } catch (error) {
       this.logger.error(`handleDocument failed: ${this.describeError(error)}`);
       await ctx.reply(`❌ Не удалось обработать файл: ${this.describeError(error)}`);
       await ctx.reply('Пришлите Excel-файл (Артикул, Количество) повторно.');
+      await this.notifyAdmin(ctx, 'wizard.documentError', [this.describeError(error)]);
     }
   }
 
@@ -145,9 +154,11 @@ export class SupplyWizardHandler {
     try {
       await ctx.reply('Загружаю таблицу, подождите...');
       await this.processSpreadsheet(ctx, chatId, state, { spreadsheet: trimmed, label: trimmed });
+      await this.notifyAdmin(ctx, 'wizard.spreadsheetLink', [`link: ${trimmed}`]);
     } catch (error) {
       this.logger.error(`handleSpreadsheetLink failed: ${this.describeError(error)}`);
       await ctx.reply(`❌ Не удалось обработать таблицу: ${this.describeError(error)}`);
+      await this.notifyAdmin(ctx, 'wizard.spreadsheetError', [this.describeError(error)]);
     }
   }
 
@@ -362,11 +373,12 @@ export class SupplyWizardHandler {
     if (readyInDays > 0) {
       summaryLines.push(`Готовность к отгрузке через: ${readyInDays} дн.`);
     } else {
-      summaryLines.push('Готовность фиксируем по выбранному таймслоту.');
+    summaryLines.push('Готовность фиксируем по выбранному таймслоту.');
     }
     summaryLines.push('', 'Создаю поставку...');
 
     await this.updatePrompt(ctx, chatId, updated, summaryLines.join('\n'));
+    await this.notifyAdmin(ctx, 'wizard.supplyProcessing', summaryLines);
 
     try {
       await this.supplyService.runSingleTask(clonedTask, {
@@ -378,10 +390,16 @@ export class SupplyWizardHandler {
       });
       await this.updatePrompt(ctx, chatId, updated, 'Мастер завершён ✅');
       await ctx.reply('✅ Поставка создана.');
+      await this.notifyAdmin(ctx, 'wizard.supplyDone', [
+        `draft: ${clonedTask.draftId ?? '—'}`,
+        `warehouse: ${clonedTask.warehouseName ?? clonedTask.warehouseId ?? '—'}`,
+        updated.selectedTimeslot ? `timeslot: ${updated.selectedTimeslot.label}` : undefined,
+      ]);
     } catch (error) {
       await this.updatePrompt(ctx, chatId, updated, 'Мастер завершён с ошибкой ❌');
       await ctx.reply(`❌ Ошибка при обработке: ${this.describeError(error)}`);
       await this.safeSendErrorDetails(ctx, error);
+      await this.notifyAdmin(ctx, 'wizard.supplyError', [this.describeError(error)]);
     } finally {
       this.wizardStore.clear(chatId);
     }
@@ -661,8 +679,15 @@ export class SupplyWizardHandler {
       return;
     }
 
+    const dropOffLabel = updated.selectedDropOffName ??
+      (updated.selectedDropOffId ? String(updated.selectedDropOffId) : undefined);
+    await this.notifyAdmin(ctx, 'wizard.clusterSelected', [
+      `cluster: ${cluster.name} (${cluster.id})`,
+      dropOffLabel ? `drop-off: ${dropOffLabel}` : undefined,
+    ]);
+
     if (hasDropOffSelection) {
-      const dropOffLabel =
+      const dropOffLabelForPrompt =
         updated.selectedDropOffName ??
         (updated.selectedDropOffId ? String(updated.selectedDropOffId) : '—');
 
@@ -672,7 +697,7 @@ export class SupplyWizardHandler {
         updated,
         [
           `Кластер выбран: ${cluster.name}.`,
-          `Пункт сдачи: ${dropOffLabel}.`,
+          `Пункт сдачи: ${dropOffLabelForPrompt}.`,
           'Получаю рекомендованные склады...',
         ].join('\n'),
         this.withCancel(),
@@ -862,6 +887,11 @@ export class SupplyWizardHandler {
       return;
     }
 
+    await this.notifyAdmin(ctx, 'wizard.dropOffSelected', [
+      `drop-off: ${option.name} (${option.warehouse_id})`,
+      option.address ? `address: ${option.address}` : undefined,
+    ]);
+
     if (hasClusterSelection) {
       const lines = [
         `Пункт сдачи выбран: ${option.name} (${option.warehouse_id}).`,
@@ -987,6 +1017,8 @@ export class SupplyWizardHandler {
     option: SupplyWizardDraftWarehouseOption,
   ): Promise<void> {
     const summaryLines = this.describeWarehouseSelection(option, state);
+
+    await this.notifyAdmin(ctx, 'wizard.warehouseSelected', summaryLines);
 
     await this.updatePrompt(
       ctx,
@@ -1158,6 +1190,8 @@ export class SupplyWizardHandler {
       await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
       return;
     }
+
+    await this.notifyAdmin(ctx, 'wizard.timeslotSelected', [`timeslot: ${option.label}`]);
 
     await this.safeAnswerCbQuery(ctx, chatId, 'Таймслот выбран');
     await this.startSupplyProcessing(ctx, chatId, updated, 0);
@@ -1894,6 +1928,8 @@ export class SupplyWizardHandler {
       return;
     }
 
+    await this.notifyAdmin(ctx, 'wizard.callbackExpired', [`stage: ${state.stage}`]);
+
     await ctx.reply('⚠️ Выберите склад доставки');
     this.resetDraftStateForRetry(chatId);
     const freshState = this.wizardStore.get(chatId);
@@ -2166,6 +2202,7 @@ export class SupplyWizardHandler {
         'Попробуйте выбрать другие параметры или повторите попытку позже.',
       ].join('\n'),
     );
+    await this.notifyAdmin(ctx, 'wizard.draftError', [reason]);
   }
 
   private formatDraftExpiresAt(timestamp: number): string {
@@ -2277,6 +2314,7 @@ export class SupplyWizardHandler {
     if (!text) return;
 
     await ctx.telegram.sendMessage(chatId, text);
+    await this.notifyAdmin(ctx, `wizard.${result.event}`, [text]);
   }
 
   private formatSupplyEvent(result: { task: OzonSupplyTask; event: string; message?: string }): string | undefined {
@@ -2319,6 +2357,19 @@ export class SupplyWizardHandler {
   private extractChatId(ctx: Context): string | undefined {
     const chatId = (ctx.chat as any)?.id;
     return typeof chatId === 'undefined' || chatId === null ? undefined : String(chatId);
+  }
+
+  private async notifyAdmin(ctx: Context, event: string, lines: Array<string | undefined> = []): Promise<void> {
+    if (!this.adminNotifier.isEnabled()) {
+      return;
+    }
+
+    const filtered = lines.filter((value): value is string => Boolean(value && value.trim().length));
+    try {
+      await this.adminNotifier.notifyWizardEvent({ ctx, event, lines: filtered });
+    } catch (error) {
+      this.logger.debug(`Admin notification failed (${event}): ${this.describeError(error)}`);
+    }
   }
 
   private resolveCredentials(chatId: string): OzonCredentials | undefined {

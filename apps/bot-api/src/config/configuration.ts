@@ -9,6 +9,7 @@ export interface AppConfig {
     token: string;
     webhookDomain?: string;
     webhookPath?: string;
+    adminIds: string[];
   };
 
   ozon: {
@@ -33,6 +34,10 @@ export const configuration = (): AppConfig => ({
     token: process.env.TELEGRAM_BOT_TOKEN ?? '',
     webhookDomain: process.env.WEBHOOK_DOMAIN,
     webhookPath: process.env.WEBHOOK_PATH,
+    adminIds: (process.env.TELEGRAM_ADMIN_IDS ?? '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0),
   },
   ozon: {
     clientId: process.env.OZON_CLIENT_ID ?? '',

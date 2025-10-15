@@ -45,6 +45,7 @@ yarn install --frozen-lockfile
    ```
 2. Заполните переменные:
    - `TELEGRAM_BOT_TOKEN` — токен Telegram-бота.
+   - `TELEGRAM_ADMIN_IDS` — (опционально) список chat_id администраторов через запятую для получения служебных уведомлений.
    - `WEBHOOK_DOMAIN`, `WEBHOOK_PATH` — обязательны только в production (для webhook).
    - `OZON_CLIENT_ID`, `OZON_API_KEY` — данные из личного кабинета Ozon.
    - `OZON_SUPPLY_SPREADSHEET_ID`, `OZON_SUPPLY_DROP_OFF_ID`, `OZON_SUPPLY_POLL_INTERVAL_MS` — настройки автоматизации поставок (Google Sheet, точка сдачи, частота проверки). Сейчас бот всегда использует crossdock.
