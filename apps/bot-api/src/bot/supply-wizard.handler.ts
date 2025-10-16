@@ -1081,10 +1081,6 @@ export class SupplyWizardHandler {
 
     const stored = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
-      const tasks = (current.tasks ?? []).map((task) => ({
-        ...task,
-        selectedTimeslot: undefined,
-      }));
 
       if (!limited.length) {
         return {
@@ -1092,16 +1088,24 @@ export class SupplyWizardHandler {
           stage: 'draftWarehouseSelect',
           draftTimeslots: [],
           selectedTimeslot: undefined,
-          tasks,
+          tasks: (current.tasks ?? []).map((task) => ({
+            ...task,
+            selectedTimeslot: undefined,
+          })),
         };
       }
 
+      const [firstTimeslot] = limited;
+
       return {
         ...current,
-        stage: 'timeslotSelect',
+        stage: 'awaitReadyDays',
         draftTimeslots: limited,
-        selectedTimeslot: undefined,
-        tasks,
+        selectedTimeslot: firstTimeslot,
+        tasks: (current.tasks ?? []).map((task) => ({
+          ...task,
+          selectedTimeslot: firstTimeslot.data,
+        })),
       };
     });
 
@@ -1125,6 +1129,8 @@ export class SupplyWizardHandler {
       return;
     }
 
+    const selectedTimeslot = stored.selectedTimeslot;
+
     const promptLines = [
       ...summaryLines,
       '',
@@ -1134,15 +1140,24 @@ export class SupplyWizardHandler {
     if (truncated) {
       promptLines.push(`… Показаны первые ${limited.length} из ${timeslotOptions.length} вариантов.`);
     }
-    promptLines.push('', 'Выберите таймслот кнопкой ниже.');
+    if (selectedTimeslot) {
+      promptLines.push('', `Выбрали первый таймслот: ${selectedTimeslot.label}.`);
+    }
+    promptLines.push('', 'Начинаю оформление поставки...');
 
     await this.view.updatePrompt(
       ctx,
       chatId,
       stored,
       promptLines.join('\n'),
-      this.view.buildTimeslotKeyboard(stored),
+      this.view.withCancel(),
     );
+
+    if (selectedTimeslot) {
+      await this.notifyAdmin(ctx, 'wizard.timeslotSelected', [`timeslot: ${selectedTimeslot.label}`]);
+    }
+
+    await this.startSupplyProcessing(ctx, chatId, stored, 0);
   }
 
   private async onTimeslotSelect(
@@ -1152,7 +1167,7 @@ export class SupplyWizardHandler {
     payload: string | undefined,
   ): Promise<void> {
     if (state.stage !== 'timeslotSelect') {
-      await this.safeAnswerCbQuery(ctx, chatId, 'Дождитесь списка таймслотов');
+      await this.safeAnswerCbQuery(ctx, chatId, 'Таймслоты выбираются автоматически');
       return;
     }
 
