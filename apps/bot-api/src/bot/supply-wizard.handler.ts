@@ -14,6 +14,7 @@ import { OzonSheetService } from '../ozon/ozon-sheet.service';
 import { OzonSupplyService } from '../ozon/ozon-supply.service';
 import { OzonSupplyProcessResult, OzonSupplyTask } from '../ozon/ozon-supply.types';
 import { UserCredentialsStore } from './user-credentials.store';
+import { SupplyOrderStore } from '../storage/supply-order.store';
 import {
   SupplyWizardStore,
   SupplyWizardState,
@@ -37,6 +38,7 @@ export class SupplyWizardHandler {
   private latestDraftWarehouses: SupplyWizardDraftWarehouseOption[] = [];
   private latestDraftId?: number;
   private latestDraftOperationId?: string;
+  private readonly taskAbortControllers = new Map<string, AbortController>();
 
   constructor(
     private readonly credentialsStore: UserCredentialsStore,
@@ -46,6 +48,7 @@ export class SupplyWizardHandler {
     private readonly wizardStore: SupplyWizardStore,
     private readonly adminNotifier: AdminNotifierService,
     private readonly view: SupplyWizardViewService,
+    private readonly orderStore: SupplyOrderStore,
   ) {}
 
   getState(chatId: string): SupplyWizardState | undefined {
@@ -60,7 +63,8 @@ export class SupplyWizardHandler {
     }
 
     const previousState = this.wizardStore.get(chatId);
-    const credentials = this.resolveCredentials(chatId);
+    const persistedOrders = await this.orderStore.list(chatId);
+    const credentials = await this.resolveCredentials(chatId);
     const initialStage = credentials ? 'landing' : 'authWelcome';
 
     try {
@@ -79,11 +83,11 @@ export class SupplyWizardHandler {
           if (!current) return undefined;
           return {
             ...current,
-            orders: previousState?.orders ?? current.orders,
+            orders: persistedOrders,
             pendingApiKey: undefined,
             pendingClientId: undefined,
           };
-        }) ?? baseState;
+        }) ?? { ...baseState, orders: persistedOrders };
 
       if (!credentials) {
         await this.view.updatePrompt(
@@ -213,7 +217,7 @@ export class SupplyWizardHandler {
       return;
     }
 
-    this.credentialsStore.set(chatId, { clientId, apiKey });
+    await this.credentialsStore.set(chatId, { clientId, apiKey });
 
     const updated = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
@@ -299,9 +303,9 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const credentials = this.resolveCredentials(chatId);
+    const credentials = await this.resolveCredentials(chatId);
     if (!credentials) {
-      await ctx.reply('🔐 Сначала сохраните ключи через /start <CLIENT_ID> <API_KEY>.');
+      await ctx.reply('🔐 Сначала сохраните ключи через /start.');
       return;
     }
 
@@ -451,7 +455,7 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const credentials = this.resolveCredentials(chatId);
+    const credentials = await this.resolveCredentials(chatId);
     if (!credentials) {
       await ctx.reply('🔐 Сначала сохраните ключи через /start.');
       return;
@@ -502,6 +506,21 @@ export class SupplyWizardHandler {
     await this.view.updatePrompt(ctx, chatId, updated, summaryLines.join('\n'));
     await this.notifyAdmin(ctx, 'wizard.supplyProcessing', summaryLines);
 
+    await this.orderStore.saveTask(chatId, {
+      task: clonedTask,
+      clusterId: updated.selectedClusterId!,
+      clusterName: updated.selectedClusterName,
+      warehouseId: updated.selectedWarehouseId!,
+      warehouseName: updated.selectedWarehouseName ?? String(updated.selectedWarehouseId),
+      dropOffId: updated.selectedDropOffId!,
+      dropOffName: updated.selectedDropOffName ?? String(updated.selectedDropOffId),
+      readyInDays,
+      timeslotLabel:
+        updated.selectedTimeslot?.label ?? this.describeTimeslot(clonedTask.selectedTimeslot),
+    });
+
+    const abortController = this.registerAbortController(chatId);
+
     let supplyResult: OzonSupplyProcessResult | undefined;
 
     try {
@@ -510,6 +529,7 @@ export class SupplyWizardHandler {
         readyInDays,
         dropOffWarehouseId: updated.selectedDropOffId,
         skipDropOffValidation: true,
+        abortSignal: abortController.signal,
         onEvent: async (result) => {
           if (result.event === 'supplyCreated') {
             supplyResult = result;
@@ -519,10 +539,16 @@ export class SupplyWizardHandler {
       });
       await this.handleSupplySuccess(ctx, chatId, updated, clonedTask, supplyResult);
     } catch (error) {
+      if (this.isAbortError(error)) {
+        this.logger.log(`[${chatId}] обработка поставки отменена пользователем`);
+        return;
+      }
       await this.view.updatePrompt(ctx, chatId, updated, 'Мастер завершён с ошибкой ❌');
       await ctx.reply(`❌ Ошибка при обработке: ${this.describeError(error)}`);
       await this.view.sendErrorDetails(ctx, this.extractErrorPayload(error));
       await this.notifyAdmin(ctx, 'wizard.supplyError', [this.describeError(error)]);
+    } finally {
+      this.clearAbortController(chatId);
     }
   }
 
@@ -567,6 +593,15 @@ export class SupplyWizardHandler {
         await this.onTimeslotSelect(ctx, chatId, state, rest[0]);
         return;
       case 'cancel':
+        this.abortActiveTask(chatId);
+        if (state.tasks?.length) {
+          await Promise.all(
+            state.tasks
+              .map((task) => task?.taskId)
+              .filter((taskId): taskId is string => Boolean(taskId))
+              .map((taskId) => this.orderStore.deleteByTaskId(chatId, taskId)),
+          );
+        }
         this.wizardStore.clear(chatId);
         await this.safeAnswerCbQuery(ctx, chatId, 'Мастер отменён');
         await this.view.updatePrompt(ctx, chatId, state, 'Мастер отменён.');
@@ -922,8 +957,13 @@ export class SupplyWizardHandler {
 
     const entry: SupplyWizardOrderSummary = {
       id: operationId,
+      taskId: task.taskId,
+      operationId,
+      status: 'supply',
       arrival: arrival ?? undefined,
       warehouse: warehouse ?? undefined,
+      dropOffName: state.selectedDropOffName ?? state.selectedDropOffId?.toString(),
+      clusterName: state.selectedClusterName,
       items,
       createdAt: Date.now(),
     };
@@ -950,6 +990,16 @@ export class SupplyWizardHandler {
           spreadsheet: undefined,
         };
       }) ?? state;
+
+    await this.orderStore.completeTask(chatId, {
+      taskId: task.taskId,
+      operationId,
+      arrival: entry.arrival,
+      warehouse: entry.warehouse,
+      dropOffName: entry.dropOffName,
+      items,
+      task,
+    });
 
     const refreshed = this.wizardStore.get(chatId) ?? updated;
     const successText = this.view.renderSupplySuccess(entry);
@@ -996,7 +1046,7 @@ export class SupplyWizardHandler {
     state: SupplyWizardState,
     source: { buffer?: Buffer; spreadsheet?: string; label: string },
   ): Promise<void> {
-    const credentials = this.resolveCredentials(chatId);
+    const credentials = await this.resolveCredentials(chatId);
     if (!credentials) {
       await ctx.reply('🔐 Сначала сохраните ключи через /start.');
       return;
@@ -1564,9 +1614,9 @@ export class SupplyWizardHandler {
       this.view.withCancel(),
     );
 
-    const credentials = this.resolveCredentials(chatId);
+    const credentials = await this.resolveCredentials(chatId);
     if (!credentials) {
-      await ctx.reply('🔐 Сначала сохраните ключи через /start <CLIENT_ID> <API_KEY>.');
+      await ctx.reply('🔐 Сначала сохраните ключи через /start.');
       return;
     }
 
@@ -2085,22 +2135,21 @@ export class SupplyWizardHandler {
 
     if (freshState) {
       await this.ensureDraftCreated(ctx, chatId, freshState);
-      await this.view.updatePrompt(
-        ctx,
-        chatId,
-        freshState,
-        '⚠️ Выберите склад доставки',
-        this.view.withCancel(),
-      );
-    } else {
-      await this.view.updatePrompt(
-        ctx,
-        chatId,
-        state,
-        '⚠️ Выберите склад доставки',
-        this.view.withCancel(),
-      );
     }
+
+    const actualState = this.wizardStore.get(chatId) ?? freshState ?? state;
+    const keyboard =
+      actualState.stage === 'draftWarehouseSelect'
+        ? this.view.buildDraftWarehouseKeyboard(actualState)
+        : this.view.withCancel();
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      actualState,
+      '⚠️ Выберите склад доставки',
+      keyboard,
+    );
   }
 
   private describeDraftErrors(info?: OzonDraftStatus | any): string | undefined {
@@ -2165,7 +2214,7 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const credentials = this.resolveCredentials(chatId);
+    const credentials = await this.resolveCredentials(chatId);
     if (!credentials) {
       await ctx.reply('🔐 Сначала сохраните ключи через /start <CLIENT_ID> <API_KEY>.');
       return;
@@ -2574,8 +2623,8 @@ export class SupplyWizardHandler {
     }
   }
 
-  private resolveCredentials(chatId: string): OzonCredentials | undefined {
-    const stored = this.credentialsStore.get(chatId);
+  private async resolveCredentials(chatId: string): Promise<OzonCredentials | undefined> {
+    const stored = await this.credentialsStore.get(chatId);
     if (stored) {
       return { clientId: stored.clientId, apiKey: stored.apiKey };
     }
@@ -2587,6 +2636,32 @@ export class SupplyWizardHandler {
     }
 
     return undefined;
+  }
+
+  private registerAbortController(chatId: string): AbortController {
+    const existing = this.taskAbortControllers.get(chatId);
+    if (existing) {
+      existing.abort();
+    }
+    const controller = new AbortController();
+    this.taskAbortControllers.set(chatId, controller);
+    return controller;
+  }
+
+  private abortActiveTask(chatId: string): void {
+    const controller = this.taskAbortControllers.get(chatId);
+    if (controller) {
+      controller.abort();
+      this.taskAbortControllers.delete(chatId);
+    }
+  }
+
+  private clearAbortController(chatId: string): void {
+    this.taskAbortControllers.delete(chatId);
+  }
+
+  private isAbortError(error: unknown): boolean {
+    return error instanceof Error && error.name === 'AbortError';
   }
 
   private cloneTask(task: OzonSupplyTask): OzonSupplyTask {

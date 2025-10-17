@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 
 import type { OzonDraftTimeslot } from '../config/ozon-api.service';
 import type { OzonSupplyTask } from '../ozon/ozon-supply.types';
+import type { SupplyOrderStatus } from '../storage/entities/supply-order.entity';
 
 export interface SupplyWizardWarehouseOption {
   warehouse_id: number;
@@ -58,8 +59,13 @@ export interface SupplyWizardSupplyItem {
 
 export interface SupplyWizardOrderSummary {
   id: string;
+  taskId?: string;
+  operationId?: string;
+  status?: SupplyOrderStatus;
   arrival?: string;
   warehouse?: string;
+  dropOffName?: string;
+  clusterName?: string;
   items: SupplyWizardSupplyItem[];
   createdAt: number;
 }

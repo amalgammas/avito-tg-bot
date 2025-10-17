@@ -16,7 +16,6 @@ export class BotUpdate {
     ' 1. /start — запустить мастер',
     ' 2. /ozon_keys — посмотреть сохранённые ключи',
     ' 3. /ozon_clear — удалить ключи из памяти',
-    ' 4. /me — посмотреть пользователя',
     '',
     'Дополнительно:',
     ' /ping — проверить доступность бота',
@@ -45,12 +44,6 @@ export class BotUpdate {
     await ctx.reply('pong 🏓');
   }
 
-  @Command('me')
-  async onId(@Ctx() ctx: Context): Promise<void> {
-    const userId = (ctx.from as any)?.id;
-    await ctx.reply(`user_id: ${userId}`);
-  }
-
   @Command('ozon_auth')
   async onOzonAuth(@Ctx() ctx: Context): Promise<void> {
     const chatId = this.extractChatId(ctx);
@@ -69,7 +62,7 @@ export class BotUpdate {
         await ctx.reply(`client_id: ${ this.maskValue(clientId) }\napi_key: ${ this.maskValue(apiKey) }`);
     }
 
-    this.credentialsStore.set(chatId, { clientId, apiKey });
+    await this.credentialsStore.set(chatId, { clientId, apiKey });
 
     await ctx.reply(
       [
@@ -94,12 +87,12 @@ export class BotUpdate {
       return;
     }
 
-    if (!this.credentialsStore.has(chatId)) {
+    if (!(await this.credentialsStore.has(chatId))) {
       await ctx.reply('Сохранённых ключей нет.');
       return;
     }
 
-    this.credentialsStore.clear(chatId);
+    await this.credentialsStore.clear(chatId);
     await ctx.reply('✅ Ключи удалены из памяти бота.');
 
     await this.adminNotifier.notifyWizardEvent({
@@ -110,7 +103,7 @@ export class BotUpdate {
 
   @Command('ozon_keys')
   async onOzonKeys(@Ctx() ctx: Context): Promise<void> {
-    const entries = this.credentialsStore.entries();
+    const entries = await this.credentialsStore.entries();
     if (!entries.length) {
       await ctx.reply('Хранилище пустое. Пройдите авторизацию через /start.');
       return;

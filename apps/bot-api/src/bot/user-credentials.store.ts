@@ -1,4 +1,8 @@
 import { Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+
+import { UserCredentialsEntity } from '../storage/entities/user-credentials.entity';
 
 export interface UserOzonCredentials {
   clientId: string;
@@ -9,31 +13,59 @@ export interface UserOzonCredentials {
 
 @Injectable()
 export class UserCredentialsStore {
-  private readonly storage = new Map<string, UserOzonCredentials>();
+  constructor(
+    @InjectRepository(UserCredentialsEntity)
+    private readonly repository: Repository<UserCredentialsEntity>,
+  ) {}
 
-  set(chatId: string, credentials: Omit<UserOzonCredentials, 'verifiedAt'>): void {
-    this.storage.set(chatId, { ...credentials, verifiedAt: new Date() });
+  async set(chatId: string, credentials: Omit<UserOzonCredentials, 'verifiedAt'>): Promise<void> {
+    const entity = this.repository.create({
+      chatId,
+      clientId: credentials.clientId,
+      apiKey: credentials.apiKey,
+      verifiedAt: new Date(),
+      clusters: credentials.clusters,
+    });
+
+    await this.repository.save(entity);
   }
 
-  get(chatId: string): UserOzonCredentials | undefined {
-    return this.storage.get(chatId);
+  async get(chatId: string): Promise<UserOzonCredentials | undefined> {
+    const entity = await this.repository.findOne({ where: { chatId } });
+    return entity ? this.mapEntity(entity) : undefined;
   }
 
-  clear(chatId: string): void {
-    this.storage.delete(chatId);
+  async clear(chatId: string): Promise<void> {
+    await this.repository.delete({ chatId });
   }
 
-  has(chatId: string): boolean {
-    return this.storage.has(chatId);
+  async has(chatId: string): Promise<boolean> {
+    const count = await this.repository.count({ where: { chatId } });
+    return count > 0;
   }
 
-  entries(): Array<{ chatId: string; credentials: UserOzonCredentials }> {
-    return [...this.storage.entries()].map(([chatId, credentials]) => ({ chatId, credentials }));
+  async entries(): Promise<Array<{ chatId: string; credentials: UserOzonCredentials }>> {
+    const records = await this.repository.find({ order: { verifiedAt: 'DESC' } });
+    return records.map((record) => ({ chatId: record.chatId, credentials: this.mapEntity(record) }));
   }
 
-  updateClusters(chatId: string, clusters: Array<{ id: number; name?: string }>): void {
-    const existing = this.storage.get(chatId);
-    if (!existing) return;
-    this.storage.set(chatId, { ...existing, clusters, verifiedAt: new Date() });
+  async updateClusters(chatId: string, clusters: Array<{ id: number; name?: string }>): Promise<void> {
+    const entity = await this.repository.findOne({ where: { chatId } });
+    if (!entity) {
+      return;
+    }
+
+    entity.clusters = clusters;
+    entity.verifiedAt = new Date();
+    await this.repository.save(entity);
+  }
+
+  private mapEntity(entity: UserCredentialsEntity): UserOzonCredentials {
+    return {
+      clientId: entity.clientId,
+      apiKey: entity.apiKey,
+      verifiedAt: entity.verifiedAt,
+      clusters: entity.clusters ?? undefined,
+    };
   }
 }

@@ -103,6 +103,9 @@ export class OzonSupplyService {
 
     const delayBetweenCalls = options.delayBetweenCallsMs ?? this.pollIntervalMs;
     const credentials = options.credentials;
+    const abortSignal = options.abortSignal;
+
+    this.ensureNotAborted(abortSignal);
 
     const dropOffWarehouseId = options.dropOffWarehouseId ?? this.getDefaultDropOffId();
     if (!dropOffWarehouseId) {
@@ -114,7 +117,10 @@ export class OzonSupplyService {
     const seenUnavailableWarehouses = new Set<number>();
 
     while (taskMap.size) {
+      this.ensureNotAborted(abortSignal);
+
       for (const [taskId, state] of Array.from(taskMap.entries())) {
+        this.ensureNotAborted(abortSignal);
         try {
           const result = await this.processSingleTask(state, credentials, dropOffWarehouseId);
           if (result.event === 'error' && /Склад отгрузки/.test(result.message ?? '')) {
@@ -146,7 +152,15 @@ export class OzonSupplyService {
           await this.emitEvent(options.onEvent, { task: state, event: 'error', message });
         }
 
-        await this.sleep(delayBetweenCalls);
+        try {
+          await this.sleep(delayBetweenCalls, abortSignal);
+        } catch (error) {
+          if (this.isAbortError(error)) {
+            this.logger.warn('Обработка поставок прервана по сигналу отмены');
+            throw error;
+          }
+          throw error;
+        }
       }
     }
   }
@@ -559,8 +573,45 @@ export class OzonSupplyService {
     return `${task.clusterId ?? 'x'}-${task.warehouseId ?? 'x'}-${itemsHash}`;
   }
 
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  private sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    if (signal.aborted) {
+      return Promise.reject(this.createAbortError());
+    }
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+
+      const onAbort = () => {
+        clearTimeout(timeout);
+        signal.removeEventListener('abort', onAbort);
+        reject(this.createAbortError());
+      };
+
+      signal.addEventListener('abort', onAbort);
+    });
+  }
+
+  private ensureNotAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      throw this.createAbortError();
+    }
+  }
+
+  private createAbortError(): Error {
+    const error = new Error('Processing aborted by signal');
+    error.name = 'AbortError';
+    return error;
+  }
+
+  private isAbortError(error: unknown): boolean {
+    return error instanceof Error && error.name === 'AbortError';
   }
 
   private async buildOzonItems(

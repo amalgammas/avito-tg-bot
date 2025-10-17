@@ -1,12 +1,17 @@
 // apps/bot-api/src/app.module.ts
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { existsSync, mkdirSync } from 'fs';
+import { dirname } from 'path';
 import { TelegrafModule, TelegrafModuleOptions } from 'nestjs-telegraf';
 
 import { BotModule } from './bot/bot.module';
 import { OzonModule } from './config/ozon.module';
 import { configuration } from './config/configuration';
 import { HealthController } from './health/health.controller';
+import { UserCredentialsEntity } from './storage/entities/user-credentials.entity';
+import { SupplyOrderEntity } from './storage/entities/supply-order.entity';
 
 @Module({
     imports: [
@@ -14,6 +19,29 @@ import { HealthController } from './health/health.controller';
             isGlobal: true,
             cache: true,
             load: [configuration],
+        }),
+        TypeOrmModule.forRootAsync({
+            imports: [ConfigModule],
+            inject: [ConfigService],
+            useFactory: (config: ConfigService) => {
+                const databasePath = config.get<string>('database.path') ?? 'data/bot.sqlite';
+                const targetDir = dirname(databasePath);
+                if (targetDir && !existsSync(targetDir)) {
+                    mkdirSync(targetDir, { recursive: true });
+                }
+
+                const nodeEnv = config.get<string>('nodeEnv') ?? 'development';
+                const logging = config.get<boolean>('database.logging') ?? false;
+
+                return {
+                    type: 'sqlite' as const,
+                    database: databasePath,
+                    entities: [UserCredentialsEntity, SupplyOrderEntity],
+                    synchronize: nodeEnv !== 'production',
+                    autoLoadEntities: false,
+                    logging,
+                };
+            },
         }),
         TelegrafModule.forRootAsync({
             imports: [ConfigModule],

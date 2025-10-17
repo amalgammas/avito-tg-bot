@@ -89,7 +89,7 @@ export class SupplyWizardViewService {
       const last = state.orders[state.orders.length - 1];
       lines.push(
         '',
-        `Последняя заявка: №${last.id}${last.arrival ? ` — окно ${last.arrival}` : ''}.`,
+        `Последняя заявка: № ${last.id}${last.arrival ? ` — окно ${last.arrival}` : ''}.`,
         'Можно создать новую или посмотреть список заявок.',
       );
     } else {
@@ -149,7 +149,9 @@ export class SupplyWizardViewService {
 
   renderOrderDetails(order: SupplyWizardOrderSummary): string {
     const lines = [
-      `Заявка №${order.id}`,
+      `Заявка №${order.operationId ?? order.id}`,
+      order.clusterName ? `Кластер: ${order.clusterName}` : undefined,
+      order.dropOffName ? `Пункт сдачи: ${order.dropOffName}` : undefined,
       order.warehouse ? `Склад: ${order.warehouse}` : undefined,
       order.arrival ? `Время отгрузки: ${order.arrival}` : undefined,
       '',
@@ -488,13 +490,17 @@ export class SupplyWizardViewService {
 
     if (messageId) {
       try {
-        await ctx.telegram.editMessageText(rawChatId, messageId, undefined, text, {
-          reply_markup: replyMarkup,
-        });
-        return;
+        await ctx.telegram.deleteMessage(rawChatId, messageId);
       } catch (error) {
-        // fallback to sending new message below
+        // игнорируем ошибку удаления и отправим новое сообщение ниже
       }
+      this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        if (current.promptMessageId !== messageId) {
+          return current;
+        }
+        return { ...current, promptMessageId: undefined };
+      });
     }
 
     const sent = await ctx.reply(text, { reply_markup: replyMarkup as any });

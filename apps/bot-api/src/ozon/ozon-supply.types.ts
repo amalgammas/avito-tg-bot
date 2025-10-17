@@ -50,4 +50,5 @@ export interface OzonSupplyProcessOptions {
   onEvent?: (result: OzonSupplyProcessResult) => void | Promise<void>;
   dropOffWarehouseId?: number;
   skipDropOffValidation?: boolean;
+  abortSignal?: AbortSignal;
 }

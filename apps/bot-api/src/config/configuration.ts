@@ -23,6 +23,11 @@ export interface AppConfig {
     dropOffPointWarehouseId: string;
     pollIntervalMs: number;
   };
+
+  database: {
+    path: string;
+    logging: boolean;
+  };
 }
 
 export const configuration = (): AppConfig => ({
@@ -48,5 +53,9 @@ export const configuration = (): AppConfig => ({
     spreadsheetId: process.env.OZON_SUPPLY_SPREADSHEET_ID ?? '',
     dropOffPointWarehouseId: process.env.OZON_SUPPLY_DROP_OFF_ID ?? '',
     pollIntervalMs: Number(process.env.OZON_SUPPLY_POLL_INTERVAL_MS ?? 10000),
+  },
+  database: {
+    path: process.env.DATABASE_PATH ?? 'data/bot.sqlite',
+    logging: /^true$/i.test(process.env.DATABASE_LOGGING ?? ''),
   },
 });
