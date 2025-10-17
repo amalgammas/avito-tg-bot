@@ -56,6 +56,12 @@ export class SupplyOrderEntity {
   @Column({ type: 'integer', nullable: true })
   readyInDays?: number;
 
+  @Column({ type: 'boolean', default: false })
+  warehouseAutoSelect!: boolean;
+
+  @Column({ type: 'boolean', default: true })
+  timeslotAutoSelect!: boolean;
+
   @Column({ type: 'text', nullable: true })
   timeslotFrom?: string;
 

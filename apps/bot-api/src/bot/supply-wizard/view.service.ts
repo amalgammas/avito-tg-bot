@@ -14,7 +14,7 @@ import {
 
 @Injectable()
 export class SupplyWizardViewService {
-  private readonly draftWarehouseOptionsLimit = 10;
+  private readonly draftWarehouseOptionsLimit = 20;
   private readonly timeslotOptionsLimit = 10;
 
   constructor(private readonly wizardStore: SupplyWizardStore) {}
@@ -149,11 +149,15 @@ export class SupplyWizardViewService {
 
   renderOrderDetails(order: SupplyWizardOrderSummary): string {
     const lines = [
-      `Заявка №${order.operationId ?? order.id}`,
+      `Заявка № ${order.operationId ?? order.id}`,
       order.clusterName ? `Кластер: ${order.clusterName}` : undefined,
-      order.dropOffName ? `Пункт сдачи: ${order.dropOffName}` : undefined,
-      order.warehouse ? `Склад: ${order.warehouse}` : undefined,
-      order.arrival ? `Время отгрузки: ${order.arrival}` : undefined,
+        order.warehouse ? `Склад: ${order.warehouse}` : undefined,
+        order.dropOffName ? `Пункт сдачи: ${order.dropOffName}` : undefined,
+      order.timeslotLabel
+        ? `Таймслот: ${order.timeslotLabel}`
+        : order.arrival
+        ? `Время отгрузки: ${order.arrival}`
+        : undefined,
       '',
       'Товары:',
       ...order.items.map((item) => `• ${item.article} × ${item.quantity}`),
@@ -428,6 +432,34 @@ export class SupplyWizardViewService {
         callback_data: `wizard:draftWarehouse:${option.warehouseId}`,
       },
     ]);
+    return this.withCancel(rows);
+  }
+
+  buildClusterWarehouseKeyboard(
+    state: SupplyWizardState,
+  ): Array<Array<{ text: string; callback_data: string }>> {
+    const clusterId = state.selectedClusterId;
+    if (!clusterId) {
+      return this.withCancel();
+    }
+
+    const warehouses = state.warehouses[clusterId] ?? [];
+    const limited = warehouses.slice(0, this.draftWarehouseOptionsLimit);
+    const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+
+    if (limited.length) {
+      rows.push([{ text: 'Первый доступный 🥇', callback_data: 'wizard:warehouse:auto' }]);
+    }
+
+    limited.forEach((warehouse) => {
+      rows.push([
+        {
+          text: warehouse.name,
+          callback_data: `wizard:warehouse:${warehouse.warehouse_id}`,
+        },
+      ]);
+    });
+
     return this.withCancel(rows);
   }
 

@@ -449,7 +449,11 @@ export class SupplyWizardHandler {
       return;
     }
 
-    if (!state.selectedClusterId || !state.selectedWarehouseId || !state.selectedDropOffId) {
+    if (
+      !state.selectedClusterId ||
+      !state.selectedDropOffId ||
+      (!state.selectedWarehouseId && !state.autoWarehouseSelection)
+    ) {
       await ctx.reply('Должны быть выбраны кластер, склад и пункт сдачи. Запустите мастер заново.');
       this.wizardStore.clear(chatId);
       return;
@@ -461,12 +465,34 @@ export class SupplyWizardHandler {
       return;
     }
 
+    const wasAutoWarehouseSelection = Boolean(state.autoWarehouseSelection);
+    const clonedTask = this.cloneTask(task);
+
+    let workingState = state;
+    if (workingState.autoWarehouseSelection) {
+      const preparedState = await this.prepareAutoWarehouseSelection(
+        ctx,
+        chatId,
+        workingState,
+        clonedTask,
+        credentials,
+      );
+      if (!preparedState) {
+        return;
+      }
+      workingState = preparedState;
+    }
+
+    const refreshedState = this.wizardStore.get(chatId) ?? workingState;
+    const effectiveTask = clonedTask;
+
     const updated = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
       return {
         ...current,
         stage: 'processing',
         readyInDays,
+        autoWarehouseSelection: false,
       };
     });
 
@@ -475,17 +501,16 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const clonedTask = this.cloneTask(task);
-    clonedTask.clusterId = updated.selectedClusterId;
-    clonedTask.city = updated.selectedClusterName ?? '';
-    clonedTask.warehouseId = updated.selectedWarehouseId;
-    clonedTask.warehouseName = updated.selectedWarehouseName ?? '';
-    clonedTask.selectedTimeslot = updated.selectedTimeslot?.data ?? clonedTask.selectedTimeslot;
+    effectiveTask.clusterId = updated.selectedClusterId;
+    effectiveTask.city = updated.selectedClusterName ?? '';
+    effectiveTask.warehouseId = updated.selectedWarehouseId;
+    effectiveTask.warehouseName = updated.selectedWarehouseName ?? '';
+    effectiveTask.selectedTimeslot = updated.selectedTimeslot?.data ?? effectiveTask.selectedTimeslot;
     if (updated.draftOperationId) {
-      clonedTask.draftOperationId = updated.draftOperationId;
+      effectiveTask.draftOperationId = updated.draftOperationId;
     }
     if (typeof updated.draftId === 'number') {
-      clonedTask.draftId = updated.draftId;
+      effectiveTask.draftId = updated.draftId;
     }
 
     const summaryLines = [
@@ -507,7 +532,7 @@ export class SupplyWizardHandler {
     await this.notifyAdmin(ctx, 'wizard.supplyProcessing', summaryLines);
 
     await this.orderStore.saveTask(chatId, {
-      task: clonedTask,
+      task: effectiveTask,
       clusterId: updated.selectedClusterId!,
       clusterName: updated.selectedClusterName,
       warehouseId: updated.selectedWarehouseId!,
@@ -516,7 +541,9 @@ export class SupplyWizardHandler {
       dropOffName: updated.selectedDropOffName ?? String(updated.selectedDropOffId),
       readyInDays,
       timeslotLabel:
-        updated.selectedTimeslot?.label ?? this.describeTimeslot(clonedTask.selectedTimeslot),
+        updated.selectedTimeslot?.label ?? this.describeTimeslot(effectiveTask.selectedTimeslot),
+      warehouseAutoSelect: wasAutoWarehouseSelection,
+      timeslotAutoSelect: true,
     });
 
     const abortController = this.registerAbortController(chatId);
@@ -524,7 +551,7 @@ export class SupplyWizardHandler {
     let supplyResult: OzonSupplyProcessResult | undefined;
 
     try {
-      await this.supplyService.runSingleTask(clonedTask, {
+      await this.supplyService.runSingleTask(effectiveTask, {
         credentials,
         readyInDays,
         dropOffWarehouseId: updated.selectedDropOffId,
@@ -537,7 +564,7 @@ export class SupplyWizardHandler {
           await this.sendSupplyEvent(ctx, result);
         },
       });
-      await this.handleSupplySuccess(ctx, chatId, updated, clonedTask, supplyResult);
+      await this.handleSupplySuccess(ctx, chatId, updated, effectiveTask, supplyResult);
     } catch (error) {
       if (this.isAbortError(error)) {
         this.logger.log(`[${chatId}] обработка поставки отменена пользователем`);
@@ -550,6 +577,116 @@ export class SupplyWizardHandler {
     } finally {
       this.clearAbortController(chatId);
     }
+  }
+
+  private async prepareAutoWarehouseSelection(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    task: OzonSupplyTask,
+    credentials: OzonCredentials,
+  ): Promise<SupplyWizardState | undefined> {
+    if (!state.autoWarehouseSelection) {
+      return state;
+    }
+
+    const clusterId = state.selectedClusterId;
+    const dropOffId = state.selectedDropOffId;
+    if (!clusterId || !dropOffId) {
+      await ctx.reply('Не удалось определить кластер или пункт сдачи для автоматического выбора склада.');
+      return undefined;
+    }
+
+    let items: Array<{ sku: number; quantity: number }>;
+    try {
+      items = this.buildDraftItems(task);
+    } catch (error) {
+      await ctx.reply(`Не удалось подготовить товары для черновика: ${this.describeError(error)}`);
+      return undefined;
+    }
+
+    let operationId = state.draftOperationId?.trim();
+    let draftId = state.draftId;
+
+    if (!operationId) {
+      try {
+        operationId = await this.ozonApi.createDraft(
+          {
+            clusterIds: [clusterId],
+            dropOffPointWarehouseId: dropOffId,
+            items,
+            type: 'CREATE_TYPE_CROSSDOCK',
+          },
+          credentials,
+        );
+      } catch (error) {
+        await ctx.reply(`Не удалось создать черновик для автоматического выбора склада: ${this.describeError(error)}`);
+        return undefined;
+      }
+    }
+
+    if (!operationId) {
+      await ctx.reply('Сервис Ozon вернул пустой operation_id при создании черновика.');
+      return undefined;
+    }
+
+    const pollResult = await this.pollDraftStatus(chatId, operationId, credentials);
+    if (pollResult.status !== 'success' || !pollResult.draftInfo) {
+      await ctx.reply('Не удалось получить данные черновика для автоматического выбора склада.');
+      return undefined;
+    }
+
+    draftId = pollResult.draftId ?? pollResult.draftInfo.draft_id ?? draftId;
+
+    const allOptions = this.view.mapDraftWarehouseOptions(pollResult.draftInfo);
+    const { limited } = this.view.limitDraftWarehouseOptions(allOptions);
+    const chosen = limited[0] ?? allOptions[0];
+
+    if (!chosen) {
+      await ctx.reply('Ozon не вернул доступных складов для выбранного кластера. Попробуйте выбрать склад вручную.');
+      return undefined;
+    }
+
+    task.warehouseId = chosen.warehouseId;
+    task.warehouseName = chosen.name ?? task.warehouseName;
+    task.draftOperationId = operationId;
+    task.draftId = draftId ?? task.draftId;
+
+    this.latestDraftWarehouses = limited;
+    this.latestDraftOperationId = operationId;
+    this.latestDraftId = draftId;
+
+    const updatedState =
+      this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        return {
+          ...current,
+          selectedWarehouseId: chosen.warehouseId,
+          selectedWarehouseName: chosen.name ?? String(chosen.warehouseId),
+          draftOperationId: operationId,
+          draftId: draftId,
+          draftStatus: 'success',
+          draftWarehouses: limited,
+          draftTimeslots: [],
+          selectedTimeslot: undefined,
+          autoWarehouseSelection: false,
+          tasks: (current.tasks ?? []).map((task) => ({
+            ...task,
+            warehouseId: chosen.warehouseId,
+            warehouseName: chosen.name ?? task.warehouseName,
+            draftOperationId: operationId,
+            draftId: draftId ?? task.draftId,
+            selectedTimeslot: undefined,
+          })),
+        };
+      }) ?? this.wizardStore.get(chatId) ?? state;
+
+    await this.notifyAdmin(ctx, 'wizard.autoWarehouseSelected', [
+      `warehouse: ${chosen.name ?? chosen.warehouseId}`,
+      `operation: ${operationId}`,
+    ]);
+
+    return updatedState;
   }
 
   async handleCallback(ctx: Context, data: string): Promise<void> {
@@ -964,6 +1101,7 @@ export class SupplyWizardHandler {
       warehouse: warehouse ?? undefined,
       dropOffName: state.selectedDropOffName ?? state.selectedDropOffId?.toString(),
       clusterName: state.selectedClusterName,
+      timeslotLabel: arrival ?? undefined,
       items,
       createdAt: Date.now(),
     };
@@ -1232,29 +1370,24 @@ export class SupplyWizardHandler {
       if (!current) return undefined;
       return {
         ...current,
-        stage: hasDropOffSelection ? 'draftWarehouseSelect' : 'dropOffSelect',
+        stage: hasDropOffSelection ? 'warehouseSelect' : 'dropOffSelect',
         selectedClusterId: cluster.id,
         selectedClusterName: cluster.name,
-        selectedWarehouseId: hasDropOffSelection ? current.selectedWarehouseId : undefined,
-        selectedWarehouseName: hasDropOffSelection ? current.selectedWarehouseName : undefined,
-        draftWarehouses: hasDropOffSelection ? current.draftWarehouses : [],
-        draftTimeslots: hasDropOffSelection ? current.draftTimeslots : [],
-        selectedTimeslot: hasDropOffSelection ? current.selectedTimeslot : undefined,
+        selectedWarehouseId: undefined,
+        selectedWarehouseName: undefined,
+        draftWarehouses: [],
+        draftTimeslots: [],
+        selectedTimeslot: undefined,
         draftStatus: 'idle',
         draftOperationId: undefined,
         draftId: undefined,
         draftCreatedAt: undefined,
         draftExpiresAt: undefined,
         draftError: undefined,
+        autoWarehouseSelection: false,
         tasks: (current.tasks ?? []).map((task) => ({
           ...task,
           clusterId: cluster.id,
-          warehouseId: hasDropOffSelection
-            ? (current.selectedWarehouseId ?? task.warehouseId ?? 0)
-            : task.warehouseId,
-          warehouseName: hasDropOffSelection
-            ? (current.selectedWarehouseName ?? current.selectedDropOffName ?? task.warehouseName ?? `Пункт ${task.taskId}`)
-            : task.warehouseName,
           draftOperationId: '',
           draftId: 0,
           selectedTimeslot: undefined,
@@ -1286,12 +1419,10 @@ export class SupplyWizardHandler {
         [
           `Кластер выбран: ${cluster.name}.`,
           `Пункт сдачи: ${dropOffLabelForPrompt}.`,
-          'Получаю рекомендованные склады...',
+          'Выберите склад отгрузки или оставьте «Первый доступный».',
         ].join('\n'),
-        this.view.withCancel(),
+        this.view.buildClusterWarehouseKeyboard(updated),
       );
-
-      await this.ensureDraftCreated(ctx, chatId, updated);
     } else {
       await this.view.updatePrompt(
         ctx,
@@ -1315,13 +1446,7 @@ export class SupplyWizardHandler {
     payload: string | undefined,
   ): Promise<void> {
     if (state.stage !== 'warehouseSelect') {
-      await this.safeAnswerCbQuery(ctx, chatId, 'Используйте список складов из черновика ниже');
-      return;
-    }
-
-    const warehouseId = Number(payload);
-    if (!Number.isFinite(warehouseId)) {
-      await this.safeAnswerCbQuery(ctx, chatId, 'Некорректный склад');
+      await this.safeAnswerCbQuery(ctx, chatId, 'Сначала выберите кластер и пункт сдачи');
       return;
     }
 
@@ -1332,9 +1457,14 @@ export class SupplyWizardHandler {
     }
 
     const clusterWarehouses = state.warehouses[selectedClusterId] ?? [];
-    const warehouse = clusterWarehouses.find((item) => item.warehouse_id === warehouseId);
+    const requestedAuto = payload === 'auto';
+    const warehouseId = requestedAuto ? clusterWarehouses[0]?.warehouse_id : Number(payload);
 
-    if (!warehouse) {
+    const warehouse = requestedAuto
+      ? clusterWarehouses[0]
+      : clusterWarehouses.find((item) => item.warehouse_id === warehouseId);
+
+    if (!warehouse || !Number.isFinite(warehouse.warehouse_id)) {
       await this.safeAnswerCbQuery(ctx, chatId, 'Склад не найден');
       return;
     }
@@ -1343,18 +1473,15 @@ export class SupplyWizardHandler {
 
     const updated = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
+      const selectedWarehouseId = requestedAuto ? undefined : warehouse.warehouse_id;
+      const selectedWarehouseName = requestedAuto ? undefined : warehouse.name;
       return {
         ...current,
-        stage: hasDropOffSelection ? 'draftWarehouseSelect' : 'dropOffSelect',
-        selectedWarehouseId: warehouse.warehouse_id,
-        selectedWarehouseName: warehouse.name,
-        ...(hasDropOffSelection
-          ? {}
-          : {
-              selectedDropOffId: undefined,
-              selectedDropOffName: undefined,
-            }),
-        draftWarehouses: current.draftWarehouses,
+        stage: hasDropOffSelection ? 'awaitReadyDays' : 'dropOffSelect',
+        selectedWarehouseId,
+        selectedWarehouseName,
+        readyInDays: undefined,
+        draftWarehouses: [],
         draftTimeslots: [],
         selectedTimeslot: undefined,
         draftStatus: 'idle',
@@ -1363,11 +1490,12 @@ export class SupplyWizardHandler {
         draftCreatedAt: undefined,
         draftExpiresAt: undefined,
         draftError: undefined,
+        autoWarehouseSelection: requestedAuto,
         tasks: (current.tasks ?? []).map((task) => ({
           ...task,
-          clusterId: (current.selectedClusterId ?? task.clusterId) ?? undefined,
-          warehouseId: warehouse.warehouse_id,
-          warehouseName: warehouse.name ?? task.warehouseName,
+          clusterId: current.selectedClusterId ?? task.clusterId,
+          warehouseId: selectedWarehouseId ?? undefined,
+          warehouseName: selectedWarehouseName ?? task.warehouseName,
           draftOperationId: '',
           draftId: 0,
           selectedTimeslot: undefined,
@@ -1381,36 +1509,24 @@ export class SupplyWizardHandler {
     }
 
     if (hasDropOffSelection) {
-      const dropOffLabel =
-        updated.selectedDropOffName ??
-        (updated.selectedDropOffId ? String(updated.selectedDropOffId) : '—');
-
-      await this.view.updatePrompt(
-        ctx,
-        chatId,
-        updated,
-        [
-          `Склад выбран: ${warehouse.name} (${warehouse.warehouse_id}).`,
-          `Пункт сдачи: ${dropOffLabel}.`
-        ].join('\n'),
-        this.view.withCancel(),
-      );
-    } else {
-      await this.view.updatePrompt(
-        ctx,
-        chatId,
-        updated,
-        [
-          `Склад выбран: ${warehouse.name} (${warehouse.warehouse_id}).`,
-          'Выберите пункт сдачи (drop-off), где оформим поставку.',
-        ].join('\n'),
-        this.view.buildDropOffKeyboard(updated),
-      );
+      await this.safeAnswerCbQuery(ctx, chatId, 'Склад выбран');
+      await this.startSupplyProcessing(ctx, chatId, updated, 0);
+      return;
     }
 
-    if (updated.stage === 'draftWarehouseSelect' || updated.stage === 'awaitReadyDays') {
-      await this.ensureDraftCreated(ctx, chatId, updated);
-    }
+    const lines: string[] = [
+      `Склад выбран: ${warehouse.name} (${warehouse.warehouse_id}).`,
+      '',
+      'Теперь выберите пункт сдачи (drop-off).',
+    ];
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      updated,
+      lines.join('\n'),
+      this.view.buildDropOffKeyboard(updated),
+    );
 
     await this.safeAnswerCbQuery(ctx, chatId, 'Склад выбран');
   }
@@ -1444,25 +1560,24 @@ export class SupplyWizardHandler {
       if (!current) return undefined;
       return {
         ...current,
-        stage: hasClusterSelection ? 'draftWarehouseSelect' : 'clusterPrompt',
+        stage: hasClusterSelection ? 'warehouseSelect' : 'clusterPrompt',
         selectedDropOffId: option.warehouse_id,
         selectedDropOffName: option.name,
-        selectedWarehouseId: option.warehouse_id,
-        selectedWarehouseName: option.name,
-        draftWarehouses: hasClusterSelection ? current.draftWarehouses : [],
-        draftTimeslots: hasClusterSelection ? current.draftTimeslots : [],
-        selectedTimeslot: hasClusterSelection ? current.selectedTimeslot : undefined,
+        selectedWarehouseId: undefined,
+        selectedWarehouseName: undefined,
+        draftWarehouses: [],
+        draftTimeslots: [],
+        selectedTimeslot: undefined,
         draftStatus: 'idle',
         draftOperationId: undefined,
         draftId: undefined,
         draftCreatedAt: undefined,
         draftExpiresAt: undefined,
         draftError: undefined,
+        autoWarehouseSelection: false,
         tasks: (current.tasks ?? []).map((task) => ({
           ...task,
           clusterId: current.selectedClusterId ?? task.clusterId,
-          warehouseId: option.warehouse_id,
-          warehouseName: option.name ?? task.warehouseName ?? `Пункт ${option.warehouse_id}`,
           draftOperationId: '',
           draftId: 0,
           selectedTimeslot: undefined,
@@ -1480,41 +1595,29 @@ export class SupplyWizardHandler {
       option.address ? `address: ${option.address}` : undefined,
     ]);
 
+    const lines: string[] = [
+      `Пункт сдачи выбран: ${option.name} (${option.warehouse_id}).`,
+    ];
+    if (option.address) {
+      lines.push(`Адрес: ${option.address}.`);
+    }
+    if (hasClusterSelection && (updated.selectedClusterName || updated.selectedClusterId)) {
+      lines.push(
+        `Кластер: ${updated.selectedClusterName ?? updated.selectedClusterId}.`,
+      );
+    }
+
     if (hasClusterSelection) {
-      const lines = [
-        `Пункт сдачи выбран: ${option.name} (${option.warehouse_id}).`,
-      ];
-      if (option.address) {
-        lines.push(`Адрес: ${option.address}.`);
-      }
-      if (updated.selectedClusterName || updated.selectedClusterId) {
-        lines.push(
-          `Кластер: ${updated.selectedClusterName ?? updated.selectedClusterId}.`,
-        );
-      }
-      if (updated.selectedWarehouseName || updated.selectedWarehouseId) {
-        lines.push(
-          `Склад: ${updated.selectedWarehouseName ?? updated.selectedWarehouseId}.`,
-        );
-      }
-      lines.push('Получаю рекомендованные склады...');
+      lines.push('Выберите склад отгрузки или оставьте «Первый доступный».');
 
       await this.view.updatePrompt(
         ctx,
         chatId,
         updated,
         lines.join('\n'),
-        this.view.withCancel(),
+        this.view.buildClusterWarehouseKeyboard(updated),
       );
-
-      await this.ensureDraftCreated(ctx, chatId, updated);
     } else {
-      const lines = [
-        `Пункт сдачи выбран: ${option.name} (${option.warehouse_id}).`,
-      ];
-      if (option.address) {
-        lines.push(`Адрес: ${option.address}.`);
-      }
       lines.push(
         'Нажмите «Выбрать кластер», чтобы продолжить.',
         'При необходимости отправьте новый запрос с городом, чтобы сменить пункт сдачи.',
@@ -2097,56 +2200,22 @@ export class SupplyWizardHandler {
   }
 
   private async handleExpiredCallback(ctx: Context, chatId: string): Promise<void> {
-    const state = this.wizardStore.get(chatId);
-    if (!state) {
+    const current = this.wizardStore.get(chatId);
+    if (!current) {
       return;
     }
 
-    await this.notifyAdmin(ctx, 'wizard.callbackExpired', [`stage: ${state.stage}`]);
+    await this.notifyAdmin(ctx, 'wizard.callbackExpired', [`stage: ${current.stage}`]);
 
-    const knownOperationId = this.resolveKnownDraftOperationId(state);
-    const knownDraftId = state.draftId ?? this.latestDraftId;
-
-    this.resetDraftStateForRetry(chatId);
-    let freshState = this.wizardStore.get(chatId);
-
-    if (freshState && knownOperationId) {
-      this.latestDraftOperationId = knownOperationId;
-      if (knownDraftId) {
-        this.latestDraftId = knownDraftId;
-      }
-
-      const restored = this.wizardStore.update(chatId, (current) => {
-        if (!current) return undefined;
-        return {
-          ...current,
-          draftOperationId: knownOperationId,
-          draftId: knownDraftId ?? current.draftId,
-          tasks: (current.tasks ?? []).map((task) => ({
-            ...task,
-            draftOperationId: knownOperationId,
-            draftId: knownDraftId ?? task.draftId,
-          })),
-        };
-      });
-
-      freshState = restored ?? this.wizardStore.get(chatId);
-    }
-
-    if (freshState) {
-      await this.ensureDraftCreated(ctx, chatId, freshState);
-    }
-
-    const actualState = this.wizardStore.get(chatId) ?? freshState ?? state;
     const keyboard =
-      actualState.stage === 'draftWarehouseSelect'
-        ? this.view.buildDraftWarehouseKeyboard(actualState)
+      current.stage === 'warehouseSelect'
+        ? this.view.buildClusterWarehouseKeyboard(current)
         : this.view.withCancel();
 
     await this.view.updatePrompt(
       ctx,
       chatId,
-      actualState,
+      current,
       '⚠️ Выберите склад доставки',
       keyboard,
     );

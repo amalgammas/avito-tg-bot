@@ -16,6 +16,8 @@ export interface SupplyOrderTaskPayload {
   dropOffName?: string;
   readyInDays: number;
   timeslotLabel?: string;
+  warehouseAutoSelect?: boolean;
+  timeslotAutoSelect?: boolean;
 }
 
 export interface SupplyOrderCompletionPayload {
@@ -90,6 +92,11 @@ export class SupplyOrderStore {
     entity.timeslotTo = payload.task.selectedTimeslot?.to_in_timezone;
     entity.updatedAt = now;
     entity.completedAt = undefined;
+    entity.warehouseAutoSelect = payload.warehouseAutoSelect ?? false;
+    entity.timeslotAutoSelect = payload.timeslotAutoSelect ?? true;
+    entity.arrival = payload.timeslotAutoSelect
+      ? payload.timeslotLabel ?? entity.arrival
+      : entity.arrival;
 
     await this.repository.save(entity);
     return entity;
@@ -152,6 +159,7 @@ export class SupplyOrderStore {
       status: record.status ?? 'supply',
       arrival: record.arrival ?? undefined,
       warehouse: record.warehouse ?? record.warehouseName ?? undefined,
+      timeslotLabel: record.arrival ?? undefined,
       dropOffName: record.dropOffName ?? undefined,
       clusterName: record.clusterName ?? undefined,
       items,

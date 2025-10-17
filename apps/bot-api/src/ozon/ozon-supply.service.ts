@@ -535,7 +535,8 @@ export class OzonSupplyService {
   }
 
   private computeReadyDate(days: number): string {
-    const safeDays = Number.isFinite(days) ? Math.max(0, Math.floor(days)) : 0;
+    const defaultDays = 28;
+    const safeDays = Number.isFinite(days) && Math.floor(days) > 0 ? Math.floor(days) : defaultDays;
     const base = new Date();
     base.setUTCDate(base.getUTCDate() + safeDays);
     base.setUTCHours(23, 59, 59, 0);

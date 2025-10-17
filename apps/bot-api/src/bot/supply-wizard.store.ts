@@ -64,6 +64,7 @@ export interface SupplyWizardOrderSummary {
   status?: SupplyOrderStatus;
   arrival?: string;
   warehouse?: string;
+  timeslotLabel?: string;
   dropOffName?: string;
   clusterName?: string;
   items: SupplyWizardSupplyItem[];
@@ -122,6 +123,7 @@ export interface SupplyWizardState {
   orders: SupplyWizardOrderSummary[];
   activeOrderId?: string;
   createdAt: number;
+  autoWarehouseSelection?: boolean;
 }
 
 @Injectable()
@@ -158,6 +160,7 @@ export class SupplyWizardStore {
       activeOrderId: undefined,
       createdAt: Date.now(),
       promptMessageId: undefined,
+      autoWarehouseSelection: false,
     };
     this.storage.set(chatId, state);
     return state;
