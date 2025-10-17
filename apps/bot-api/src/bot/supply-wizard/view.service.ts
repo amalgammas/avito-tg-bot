@@ -5,6 +5,7 @@ import {
   SupplyWizardClusterOption,
   SupplyWizardDraftWarehouseOption,
   SupplyWizardDropOffOption,
+  SupplyWizardOrderSummary,
   SupplyWizardState,
   SupplyWizardTimeslotOption,
   SupplyWizardWarehouseOption,
@@ -17,6 +18,163 @@ export class SupplyWizardViewService {
   private readonly timeslotOptionsLimit = 10;
 
   constructor(private readonly wizardStore: SupplyWizardStore) {}
+
+  renderAuthWelcome(): string {
+    return [
+      'Привет! Я Smart Supply Bot 🤖',
+      'Помогу оформить поставку на Ozon за несколько шагов.',
+      '',
+      'Сначала авторизуйтесь или откройте инструкцию, чтобы понять, какие данные потребуются.',
+    ].join('\n');
+  }
+
+  renderAuthInstruction(): string {
+    return [
+      '🔐 Чтобы авторизоваться, подготовьте Client ID и API Key из кабинета продавца Ozon.',
+      '',
+      'Client ID — это идентификатор интеграции, а API Key — секретный ключ доступа.',
+      'Создайте пару ключей в разделе Инструменты → API и сохраните их в безопасном месте.',
+      '',
+      'Когда будете готовы, нажмите «Авторизоваться».',
+    ].join('\n');
+  }
+
+  buildAuthWelcomeKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+    const rows = [
+      [{ text: 'Авторизоваться', callback_data: 'wizard:auth:login' }],
+      [{ text: 'Инструкция', callback_data: 'wizard:auth:info' }],
+    ];
+    return this.withNavigation(rows);
+  }
+
+  buildAuthInstructionKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+    return this.withNavigation([], { back: 'wizard:auth:back:welcome' });
+  }
+
+  renderAuthApiKeyPrompt(): string {
+    return [
+      'Введите API Key Ozon одним сообщением.',
+      '',
+      'Я сохраню ключ только в памяти сессии — после перезапуска бота понадобится ввести заново.',
+    ].join('\n');
+  }
+
+  buildAuthApiKeyKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+    return this.withNavigation([], { back: 'wizard:auth:back:welcome' });
+  }
+
+  renderAuthClientIdPrompt(maskedApiKey?: string): string {
+    const lines = [
+      'Отлично! Теперь отправьте Client ID.',
+    ];
+    if (maskedApiKey) {
+      lines.push(`API Key: ${maskedApiKey}`);
+    }
+    lines.push(
+      '',
+      'Теперь я жду Client ID',
+    );
+    return lines.join('\n');
+  }
+
+  buildAuthClientIdKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+    return this.withNavigation([], { back: 'wizard:auth:back:apiKey' });
+  }
+
+  renderLanding(state: SupplyWizardState): string {
+    const lines = [
+      '✅ Авторизация сохранена. Готовы оформить поставку.',
+    ];
+    if (state.orders.length) {
+      const last = state.orders[state.orders.length - 1];
+      lines.push(
+        '',
+        `Последняя заявка: №${last.id}${last.arrival ? ` — окно ${last.arrival}` : ''}.`,
+        'Можно создать новую или посмотреть список заявок.',
+      );
+    } else {
+      lines.push('', 'Нажмите «Создать поставку», чтобы загрузить файл с товарами.');
+    }
+    return lines.join('\n');
+  }
+
+  buildLandingKeyboard(state: SupplyWizardState): Array<Array<{ text: string; callback_data: string }>> {
+    const rows: Array<Array<{ text: string; callback_data: string }>> = [
+      [{ text: 'Создать поставку', callback_data: 'wizard:landing:start' }],
+    ];
+    if (state.orders.length) {
+      rows.push([{ text: 'Мои заявки 🔁', callback_data: 'wizard:orders:list' }]);
+    }
+    return this.withCancel(rows);
+  }
+
+  renderUploadPrompt(): string {
+    return [
+      '📦 Загрузите Excel-файл или пришлите ссылку на Google Sheets с товарами.',
+      'Формат: первый лист, столбцы «Артикул» и «Количество».',
+      '',
+      'После загрузки покажу количество позиций и перейдём к адресу.',
+    ].join('\n');
+  }
+
+  buildUploadKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+    return this.withNavigation([], { back: 'wizard:landing:back' });
+  }
+
+  renderOrdersList(state: SupplyWizardState): string {
+    if (!state.orders.length) {
+      return 'Список заявок пуст. Создайте новую поставку.';
+    }
+
+    const lines = ['Мои заявки:'];
+    state.orders.forEach((order, index) => {
+      const arrival = order.arrival ? ` — ${order.arrival}` : '';
+      lines.push(`${index + 1}. №${order.id}${arrival}`);
+    });
+    lines.push('', 'Выберите заявку, чтобы посмотреть детали.');
+    return lines.join('\n');
+  }
+
+  buildOrdersListKeyboard(state: SupplyWizardState): Array<Array<{ text: string; callback_data: string }>> {
+    const rows = state.orders.map((order) => [
+      {
+        text: `№${order.id}${order.arrival ? ` • ${order.arrival}` : ''}`,
+        callback_data: `wizard:orders:details:${order.id}`,
+      },
+    ]);
+
+    rows.push([{ text: 'Создать новую', callback_data: 'wizard:landing:start' }]);
+    return this.withNavigation(rows, { back: 'wizard:orders:back' });
+  }
+
+  renderOrderDetails(order: SupplyWizardOrderSummary): string {
+    const lines = [
+      `Заявка №${order.id}`,
+      order.warehouse ? `Склад: ${order.warehouse}` : undefined,
+      order.arrival ? `Время отгрузки: ${order.arrival}` : undefined,
+      '',
+      'Товары:',
+      ...order.items.map((item) => `• ${item.article} × ${item.quantity}`),
+    ].filter((value): value is string => Boolean(value));
+    return lines.join('\n');
+  }
+
+  buildOrderDetailsKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+    const rows = [
+      [{ text: 'Отменить поставку', callback_data: 'wizard:orders:cancel' }],
+    ];
+    return this.withNavigation(rows, { back: 'wizard:orders:list' });
+  }
+
+  renderSupplySuccess(order: SupplyWizardOrderSummary): string {
+    const lines = [
+      'Поставка создана ✅',
+      `ID: ${order.id}`,
+      order.arrival ? `Время отгрузки: ${order.arrival}` : undefined,
+      order.warehouse ? `Склад: ${order.warehouse}` : undefined,
+    ].filter((value): value is string => Boolean(value));
+    return lines.join('\n');
+  }
 
   buildOptions(
     clusters: OzonClusterLike[],
@@ -302,7 +460,19 @@ export class SupplyWizardViewService {
   withCancel(
     rows: Array<Array<{ text: string; callback_data: string }>> = [],
   ): Array<Array<{ text: string; callback_data: string }>> {
-    return [...rows, [{ text: 'Отмена', callback_data: 'wizard:cancel' }]];
+    return this.withNavigation(rows);
+  }
+
+  withNavigation(
+    rows: Array<Array<{ text: string; callback_data: string }>> = [],
+    options: { back?: string } = {},
+  ): Array<Array<{ text: string; callback_data: string }>> {
+    const keyboard = [...rows];
+    if (options.back) {
+      keyboard.push([{ text: 'Назад', callback_data: options.back }]);
+    }
+    keyboard.push([{ text: 'Отмена', callback_data: 'wizard:cancel' }]);
+    return keyboard;
   }
 
   async updatePrompt(

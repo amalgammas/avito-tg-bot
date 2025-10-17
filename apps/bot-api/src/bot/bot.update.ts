@@ -13,11 +13,10 @@ export class BotUpdate {
 
   private readonly helpMessage = [
     'Привет! Я помогу оформить поставку на Ozon:',
-    ' 1. /ozon_auth <CLIENT_ID> <API_KEY> — сохранить ключи',
-    ' 2. /ozon_supply — загрузить Excel (Артикул, Количество) и пройти все этапы',
-    ' 3. /ozon_keys — посмотреть сохранённые ключи',
-    ' 4. /ozon_clear — удалить ключи из памяти',
-    ' 5. /me — посмотреть пользователя',
+    ' 1. /start — запустить мастер',
+    ' 2. /ozon_keys — посмотреть сохранённые ключи',
+    ' 3. /ozon_clear — удалить ключи из памяти',
+    ' 4. /me — посмотреть пользователя',
     '',
     'Дополнительно:',
     ' /ping — проверить доступность бота',
@@ -33,13 +32,7 @@ export class BotUpdate {
 
   @Start()
   async onStart(@Ctx() ctx: Context): Promise<void> {
-    const chatId = this.extractChatId(ctx);
-    const hasCredentials = chatId ? this.credentialsStore.has(chatId) : false;
-    const intro = hasCredentials
-      ? 'Ключи найдены. Готов принять Excel-файл со списком поставки — вставьте файл сюда или пришлите ссылку с GoogleSheet'
-      : 'Вы не авторизованы, отсутствуют Client ID и API Key Ozon, воспользуйтесь “/ozon_auth <CLIENT_ID> <API_KEY>".';
-
-    await ctx.reply(intro);
+    await this.wizard.start(ctx);
   }
 
   @Help()
@@ -54,9 +47,8 @@ export class BotUpdate {
 
   @Command('me')
   async onId(@Ctx() ctx: Context): Promise<void> {
-    const chatId = (ctx.chat as any)?.id;
     const userId = (ctx.from as any)?.id;
-    await ctx.reply(`chat_id: ${chatId}\nuser_id: ${userId}`);
+    await ctx.reply(`user_id: ${userId}`);
   }
 
   @Command('ozon_auth')
@@ -68,12 +60,15 @@ export class BotUpdate {
     }
 
     const args = this.parseCommandArgs(ctx);
+    const [clientId, apiKey] = args;
+
     if (args.length < 2) {
-      await ctx.reply('Использование: /ozon_auth <CLIENT_ID> <API_KEY>');
+      await ctx.reply(`Пройдите авторизацию через /start`);
       return;
+    } else {
+        await ctx.reply(`client_id: ${ this.maskValue(clientId) }\napi_key: ${ this.maskValue(apiKey) }`);
     }
 
-    const [clientId, apiKey] = args;
     this.credentialsStore.set(chatId, { clientId, apiKey });
 
     await ctx.reply(
@@ -117,7 +112,7 @@ export class BotUpdate {
   async onOzonKeys(@Ctx() ctx: Context): Promise<void> {
     const entries = this.credentialsStore.entries();
     if (!entries.length) {
-      await ctx.reply('Хранилище пустое. Добавьте ключи через /ozon_auth.');
+      await ctx.reply('Хранилище пустое. Пройдите авторизацию через /start.');
       return;
     }
 
@@ -127,11 +122,6 @@ export class BotUpdate {
     });
 
     await ctx.reply(['Сохранённые ключи (маскированы):', ...lines].join('\n'));
-  }
-
-  @Command('ozon_supply')
-  async onOzonSupply(@Ctx() ctx: Context): Promise<void> {
-    await this.wizard.start(ctx);
   }
 
   @On('document')
@@ -153,7 +143,17 @@ export class BotUpdate {
 
     const state = this.wizardState(chatId);
     if (!state) {
-      await ctx.reply('Используйте /ozon_supply, чтобы начать оформление поставки.');
+      await ctx.reply('Используйте /start, чтобы начать оформление поставки.');
+      return;
+    }
+
+    if (state.stage === 'authApiKey') {
+      await this.wizard.handleAuthApiKeyInput(ctx, chatId, state, text);
+      return;
+    }
+
+    if (state.stage === 'authClientId') {
+      await this.wizard.handleAuthClientIdInput(ctx, chatId, state, text);
       return;
     }
 
@@ -176,7 +176,7 @@ export class BotUpdate {
       return;
     }
 
-    await ctx.reply('Команда не распознана. Если хотите загрузить файл, отправьте его или используйте /ozon_supply.');
+    await ctx.reply('Команда не распознана. Если хотите загрузить файл, отправьте его или используйте /start.');
   }
 
   @On('callback_query')

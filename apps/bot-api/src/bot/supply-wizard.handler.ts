@@ -8,10 +8,11 @@ import {
   OzonCredentials,
   OzonFboWarehouseSearchItem,
   OzonDraftStatus,
+  OzonDraftTimeslot,
 } from '../config/ozon-api.service';
 import { OzonSheetService } from '../ozon/ozon-sheet.service';
 import { OzonSupplyService } from '../ozon/ozon-supply.service';
-import { OzonSupplyTask } from '../ozon/ozon-supply.types';
+import { OzonSupplyProcessResult, OzonSupplyTask } from '../ozon/ozon-supply.types';
 import { UserCredentialsStore } from './user-credentials.store';
 import {
   SupplyWizardStore,
@@ -19,6 +20,8 @@ import {
   SupplyWizardDropOffOption,
   SupplyWizardDraftWarehouseOption,
   SupplyWizardTimeslotOption,
+  SupplyWizardOrderSummary,
+  SupplyWizardSupplyItem,
 } from './supply-wizard.store';
 import { AdminNotifierService } from './admin-notifier.service';
 import { SupplyWizardViewService } from './supply-wizard/view.service';
@@ -56,30 +59,51 @@ export class SupplyWizardHandler {
       return;
     }
 
+    const previousState = this.wizardStore.get(chatId);
     const credentials = this.resolveCredentials(chatId);
-    if (!credentials) {
-      await ctx.reply('🔐 Сначала сохраните ключи через /ozon_auth <CLIENT_ID> <API_KEY>.');
-      return;
-    }
+    const initialStage = credentials ? 'landing' : 'authWelcome';
 
     try {
-      const state = this.wizardStore.start(chatId, {
-        clusters: [],
-        warehouses: {},
-        dropOffs: [],
-      });
-      const prompt = await ctx.reply(
-        [
-          'Пришлите Excel-файл или ссылку на Google Sheets со списком позиций.',
-          'Формат: первый лист, колонки «Артикул» и «Количество».',
-        ].join('\n'),
+      const baseState = this.wizardStore.start(
+        chatId,
+        {
+          clusters: previousState?.clusters ?? [],
+          warehouses: previousState?.warehouses ?? {},
+          dropOffs: [],
+        },
+        { stage: initialStage },
       );
 
-      this.wizardStore.update(chatId, (current) => {
-        if (!current) return undefined;
-        return { ...state, promptMessageId: (prompt as any)?.message_id ?? state.promptMessageId };
-      });
+      const state =
+        this.wizardStore.update(chatId, (current) => {
+          if (!current) return undefined;
+          return {
+            ...current,
+            orders: previousState?.orders ?? current.orders,
+            pendingApiKey: undefined,
+            pendingClientId: undefined,
+          };
+        }) ?? baseState;
 
+      if (!credentials) {
+        await this.view.updatePrompt(
+          ctx,
+          chatId,
+          state,
+          this.view.renderAuthWelcome(),
+          this.view.buildAuthWelcomeKeyboard(),
+        );
+        await this.notifyAdmin(ctx, 'wizard.start', [`stage: ${state.stage}`]);
+        return;
+      }
+
+      await this.view.updatePrompt(
+        ctx,
+        chatId,
+        state,
+        this.view.renderLanding(state),
+        this.view.buildLandingKeyboard(state),
+      );
       await this.notifyAdmin(ctx, 'wizard.start', [`stage: ${state.stage}`]);
     } catch (error) {
       this.logger.error(`start wizard failed: ${this.describeError(error)}`);
@@ -101,7 +125,7 @@ export class SupplyWizardHandler {
     }
 
     if (!state || state.stage !== 'awaitSpreadsheet') {
-      await ctx.reply('Сначала запустите мастер командой /ozon_supply.');
+      await ctx.reply('Сначала запустите мастер командой /start.');
       return;
     }
 
@@ -114,7 +138,13 @@ export class SupplyWizardHandler {
     }
 
     try {
-      await ctx.reply('Получаю файл, подождите...');
+      await this.view.updatePrompt(
+        ctx,
+        chatId,
+        state,
+        'Получаю файл, подождите...',
+        this.view.buildUploadKeyboard(),
+      );
       const buffer = await this.downloadTelegramFile(ctx, document.file_id);
       await this.processSpreadsheet(ctx, chatId, state, { buffer, label: document.file_name ?? 'файл' });
       await this.notifyAdmin(ctx, 'wizard.documentUploaded', [
@@ -129,6 +159,90 @@ export class SupplyWizardHandler {
     }
   }
 
+  async handleAuthApiKeyInput(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    text: string,
+  ): Promise<void> {
+    const apiKey = text.trim();
+    if (!apiKey) {
+      await ctx.reply('API Key не должен быть пустым. Попробуйте ещё раз.');
+      return;
+    }
+
+    const updated = this.wizardStore.update(chatId, (current) => {
+      if (!current) return undefined;
+      return {
+        ...current,
+        pendingApiKey: apiKey,
+        stage: 'authClientId',
+      };
+    });
+
+    if (!updated) {
+      await ctx.reply('Мастер закрыт. Запустите /start заново.');
+      return;
+    }
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      updated,
+      this.view.renderAuthClientIdPrompt(this.maskSecret(apiKey)),
+      this.view.buildAuthClientIdKeyboard(),
+    );
+  }
+
+  async handleAuthClientIdInput(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    text: string,
+  ): Promise<void> {
+    const clientId = text.trim();
+    if (!clientId) {
+      await ctx.reply('Client ID не должен быть пустым. Попробуйте ещё раз.');
+      return;
+    }
+
+    const apiKey = state.pendingApiKey;
+    if (!apiKey) {
+      await ctx.reply('Сначала введите API Key.');
+      await this.showAuthApiKey(ctx, chatId, state);
+      return;
+    }
+
+    this.credentialsStore.set(chatId, { clientId, apiKey });
+
+    const updated = this.wizardStore.update(chatId, (current) => {
+      if (!current) return undefined;
+      return {
+        ...current,
+        pendingApiKey: undefined,
+        pendingClientId: undefined,
+        stage: 'landing',
+      };
+    });
+
+    if (!updated) {
+      await ctx.reply('Мастер закрыт. Запустите /start заново.');
+      return;
+    }
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      updated,
+      this.view.renderLanding(updated),
+      this.view.buildLandingKeyboard(updated),
+    );
+
+    await this.notifyAdmin(ctx, 'wizard.authCompleted', [
+      `client_id: ${this.maskSecret(clientId)}`,
+    ]);
+  }
+
   async handleSpreadsheetLink(ctx: Context, text: string): Promise<void> {
     const chatId = this.extractChatId(ctx);
     if (!chatId) return;
@@ -139,7 +253,7 @@ export class SupplyWizardHandler {
     }
 
     if (!state || state.stage !== 'awaitSpreadsheet') {
-      await ctx.reply('Запустите мастер командой /ozon_supply и загрузите файл.');
+      await ctx.reply('Запустите мастер командой /start и загрузите файл.');
       return;
     }
 
@@ -150,7 +264,13 @@ export class SupplyWizardHandler {
     }
 
     try {
-      await ctx.reply('Загружаю таблицу, подождите...');
+      await this.view.updatePrompt(
+        ctx,
+        chatId,
+        state,
+        'Загружаю таблицу, подождите...',
+        this.view.buildUploadKeyboard(),
+      );
       await this.processSpreadsheet(ctx, chatId, state, { spreadsheet: trimmed, label: trimmed });
       await this.notifyAdmin(ctx, 'wizard.spreadsheetLink', [`link: ${trimmed}`]);
     } catch (error) {
@@ -181,7 +301,7 @@ export class SupplyWizardHandler {
 
     const credentials = this.resolveCredentials(chatId);
     if (!credentials) {
-      await ctx.reply('🔐 Сначала сохраните ключи через /ozon_auth <CLIENT_ID> <API_KEY>.');
+      await ctx.reply('🔐 Сначала сохраните ключи через /start <CLIENT_ID> <API_KEY>.');
       return;
     }
 
@@ -257,7 +377,7 @@ export class SupplyWizardHandler {
     });
 
     if (!updated) {
-      await ctx.reply('Мастер закрыт. Запустите /ozon_supply, чтобы начать заново.');
+      await ctx.reply('Мастер закрыт. Запустите /start, чтобы начать заново.');
       return;
     }
 
@@ -277,13 +397,17 @@ export class SupplyWizardHandler {
       );
     }
 
-    await ctx.reply(summaryParts.join('\n'));
+    const promptText = [
+      ...summaryParts,
+      '',
+      'Выберите пункт сдачи кнопкой ниже или введите новый запрос, чтобы найти другой вариант.',
+    ].join('\n');
 
     await this.view.updatePrompt(
       ctx,
       chatId,
       updated,
-      'Выберите пункт сдачи кнопкой ниже или введите новый запрос, чтобы найти другой вариант.',
+      promptText,
       this.view.buildDropOffKeyboard(updated),
     );
   }
@@ -329,7 +453,7 @@ export class SupplyWizardHandler {
 
     const credentials = this.resolveCredentials(chatId);
     if (!credentials) {
-      await ctx.reply('🔐 Сначала сохраните ключи через /ozon_auth.');
+      await ctx.reply('🔐 Сначала сохраните ключи через /start.');
       return;
     }
 
@@ -371,12 +495,14 @@ export class SupplyWizardHandler {
     if (readyInDays > 0) {
       summaryLines.push(`Готовность к отгрузке через: ${readyInDays} дн.`);
     } else {
-    summaryLines.push('Готовность фиксируем по выбранному таймслоту.');
+    summaryLines.push('Автоматически будет выбран первый доступный временной слот.');
     }
     summaryLines.push('', 'Создаю поставку...');
 
     await this.view.updatePrompt(ctx, chatId, updated, summaryLines.join('\n'));
     await this.notifyAdmin(ctx, 'wizard.supplyProcessing', summaryLines);
+
+    let supplyResult: OzonSupplyProcessResult | undefined;
 
     try {
       await this.supplyService.runSingleTask(clonedTask, {
@@ -384,22 +510,19 @@ export class SupplyWizardHandler {
         readyInDays,
         dropOffWarehouseId: updated.selectedDropOffId,
         skipDropOffValidation: true,
-        onEvent: async (result) => this.sendSupplyEvent(ctx, result),
+        onEvent: async (result) => {
+          if (result.event === 'supplyCreated') {
+            supplyResult = result;
+          }
+          await this.sendSupplyEvent(ctx, result);
+        },
       });
-      await this.view.updatePrompt(ctx, chatId, updated, 'Мастер завершён ✅');
-      await ctx.reply('✅ Поставка создана.');
-      await this.notifyAdmin(ctx, 'wizard.supplyDone', [
-        `draft: ${clonedTask.draftId ?? '—'}`,
-        `warehouse: ${clonedTask.warehouseName ?? clonedTask.warehouseId ?? '—'}`,
-        updated.selectedTimeslot ? `timeslot: ${updated.selectedTimeslot.label}` : undefined,
-      ]);
+      await this.handleSupplySuccess(ctx, chatId, updated, clonedTask, supplyResult);
     } catch (error) {
       await this.view.updatePrompt(ctx, chatId, updated, 'Мастер завершён с ошибкой ❌');
       await ctx.reply(`❌ Ошибка при обработке: ${this.describeError(error)}`);
       await this.view.sendErrorDetails(ctx, this.extractErrorPayload(error));
       await this.notifyAdmin(ctx, 'wizard.supplyError', [this.describeError(error)]);
-    } finally {
-      this.wizardStore.clear(chatId);
     }
   }
 
@@ -413,26 +536,35 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const [, action, payload] = data.split(':');
+    const [, action, ...rest] = data.split(':');
 
     switch (action) {
+      case 'auth':
+        await this.onAuthCallback(ctx, chatId, state, rest);
+        return;
+      case 'landing':
+        await this.onLandingCallback(ctx, chatId, state, rest);
+        return;
+      case 'orders':
+        await this.onOrdersCallback(ctx, chatId, state, rest);
+        return;
       case 'clusterStart':
         await this.onClusterStart(ctx, chatId, state);
         return;
       case 'cluster':
-        await this.onClusterSelect(ctx, chatId, state, payload);
+        await this.onClusterSelect(ctx, chatId, state, rest[0]);
         return;
       case 'warehouse':
-        await this.onWarehouseSelect(ctx, chatId, state, payload);
+        await this.onWarehouseSelect(ctx, chatId, state, rest[0]);
         return;
       case 'dropoff':
-        await this.onDropOffSelect(ctx, chatId, state, payload);
+        await this.onDropOffSelect(ctx, chatId, state, rest[0]);
         return;
       case 'draftWarehouse':
-        await this.onDraftWarehouseSelect(ctx, chatId, state, payload);
+        await this.onDraftWarehouseSelect(ctx, chatId, state, rest[0]);
         return;
       case 'timeslot':
-        await this.onTimeslotSelect(ctx, chatId, state, payload);
+        await this.onTimeslotSelect(ctx, chatId, state, rest[0]);
         return;
       case 'cancel':
         this.wizardStore.clear(chatId);
@@ -445,6 +577,419 @@ export class SupplyWizardHandler {
     }
   }
 
+  private async onAuthCallback(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    parts: string[],
+  ): Promise<void> {
+    const action = parts[0];
+
+    switch (action) {
+      case 'login':
+        await this.showAuthApiKey(ctx, chatId, state);
+        await this.safeAnswerCbQuery(ctx, chatId);
+        return;
+      case 'info':
+        await this.showAuthInstruction(ctx, chatId, state);
+        await this.safeAnswerCbQuery(ctx, chatId);
+        return;
+      case 'back': {
+        const target = parts[1];
+        if (target === 'welcome') {
+          await this.showAuthWelcome(ctx, chatId, state);
+          await this.safeAnswerCbQuery(ctx, chatId);
+          return;
+        }
+        if (target === 'apiKey') {
+          await this.showAuthApiKey(ctx, chatId, state, { keepExisting: true });
+          await this.safeAnswerCbQuery(ctx, chatId);
+          return;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+
+    await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
+  }
+
+  private async showAuthWelcome(
+    ctx: Context,
+    chatId: string,
+    fallback: SupplyWizardState,
+  ): Promise<void> {
+    const state =
+      this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        return {
+          ...current,
+          stage: 'authWelcome',
+        };
+      }) ?? fallback;
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      state,
+      this.view.renderAuthWelcome(),
+      this.view.buildAuthWelcomeKeyboard(),
+    );
+  }
+
+  private async showAuthInstruction(
+    ctx: Context,
+    chatId: string,
+    fallback: SupplyWizardState,
+  ): Promise<void> {
+    const state =
+      this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        return {
+          ...current,
+          stage: 'authWelcome',
+        };
+      }) ?? fallback;
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      state,
+      this.view.renderAuthInstruction(),
+      this.view.buildAuthInstructionKeyboard(),
+    );
+  }
+
+  private async showAuthApiKey(
+    ctx: Context,
+    chatId: string,
+    fallback: SupplyWizardState,
+    options: { keepExisting?: boolean } = {},
+  ): Promise<void> {
+    const state =
+      this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        return {
+          ...current,
+          stage: 'authApiKey',
+          pendingApiKey: options.keepExisting ? current.pendingApiKey : undefined,
+        };
+      }) ?? fallback;
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      state,
+      this.view.renderAuthApiKeyPrompt(),
+      this.view.buildAuthApiKeyKeyboard(),
+    );
+  }
+
+  private async showAuthClientId(
+    ctx: Context,
+    chatId: string,
+    fallback: SupplyWizardState,
+  ): Promise<void> {
+    const updated =
+      this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        return {
+          ...current,
+          stage: 'authClientId',
+        };
+      }) ?? fallback;
+
+    const masked = updated.pendingApiKey ? this.maskSecret(updated.pendingApiKey) : undefined;
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      updated,
+      this.view.renderAuthClientIdPrompt(masked),
+      this.view.buildAuthClientIdKeyboard(),
+    );
+  }
+
+  private maskSecret(value: string): string {
+    if (!value) {
+      return '***';
+    }
+    if (value.length <= 4) {
+      return '*'.repeat(value.length);
+    }
+    return `${value.slice(0, 2)}…${value.slice(-2)}`;
+  }
+
+  private async onLandingCallback(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    parts: string[],
+  ): Promise<void> {
+    const action = parts[0];
+
+    switch (action) {
+      case 'start':
+        await this.presentUploadPrompt(ctx, chatId, state);
+        await this.safeAnswerCbQuery(ctx, chatId, 'Жду файл');
+        return;
+      case 'back':
+        await this.showLanding(ctx, chatId, state);
+        await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись назад');
+        return;
+      default:
+        await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
+        return;
+    }
+  }
+
+  private async showLanding(
+    ctx: Context,
+    chatId: string,
+    fallback: SupplyWizardState,
+  ): Promise<void> {
+    const state =
+      this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        return {
+          ...current,
+          stage: 'landing',
+        };
+      }) ?? fallback;
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      state,
+      this.view.renderLanding(state),
+      this.view.buildLandingKeyboard(state),
+    );
+  }
+
+  private async presentUploadPrompt(
+    ctx: Context,
+    chatId: string,
+    fallback: SupplyWizardState,
+  ): Promise<void> {
+    const state =
+      this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        return {
+          ...current,
+          stage: 'awaitSpreadsheet',
+          spreadsheet: undefined,
+          tasks: undefined,
+          selectedTaskId: undefined,
+          dropOffs: [],
+          dropOffSearchQuery: undefined,
+          selectedDropOffId: undefined,
+          selectedDropOffName: undefined,
+          selectedClusterId: undefined,
+          selectedClusterName: undefined,
+          selectedWarehouseId: undefined,
+          selectedWarehouseName: undefined,
+          draftWarehouses: [],
+          draftTimeslots: [],
+          draftStatus: 'idle',
+          draftOperationId: undefined,
+          draftId: undefined,
+          draftCreatedAt: undefined,
+          draftExpiresAt: undefined,
+          draftError: undefined,
+          selectedTimeslot: undefined,
+          readyInDays: undefined,
+        };
+      }) ?? fallback;
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      state,
+      this.view.renderUploadPrompt(),
+      this.view.buildUploadKeyboard(),
+    );
+  }
+
+  private async onOrdersCallback(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    parts: string[],
+  ): Promise<void> {
+    const action = parts[0];
+
+    switch (action) {
+      case 'list':
+        await this.showOrdersList(ctx, chatId, state);
+        await this.safeAnswerCbQuery(ctx, chatId);
+        return;
+      case 'details': {
+        const orderId = parts[1];
+        await this.showOrderDetails(ctx, chatId, state, orderId);
+        await this.safeAnswerCbQuery(ctx, chatId);
+        return;
+      }
+      case 'cancel':
+        await this.safeAnswerCbQuery(ctx, chatId, 'Функция отмены скоро появится');
+        return;
+      case 'back':
+        await this.showLanding(ctx, chatId, state);
+        await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись назад');
+        return;
+      default:
+        await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
+        return;
+    }
+  }
+
+  private async showOrdersList(
+    ctx: Context,
+    chatId: string,
+    fallback: SupplyWizardState,
+  ): Promise<void> {
+    const state =
+      this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        return {
+          ...current,
+          stage: 'ordersList',
+        };
+      }) ?? fallback;
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      state,
+      this.view.renderOrdersList(state),
+      this.view.buildOrdersListKeyboard(state),
+    );
+  }
+
+  private async showOrderDetails(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    orderId?: string,
+  ): Promise<void> {
+    if (!orderId) {
+      await this.safeAnswerCbQuery(ctx, chatId, 'Заявка не найдена');
+      return;
+    }
+
+    const currentState = this.wizardStore.get(chatId) ?? state;
+    const order = currentState.orders.find((item) => item.id === orderId);
+    if (!order) {
+      await this.safeAnswerCbQuery(ctx, chatId, 'Заявка не найдена');
+      return;
+    }
+
+    const updated =
+      this.wizardStore.update(chatId, (existing) => {
+        if (!existing) return undefined;
+        return {
+          ...existing,
+          stage: 'orderDetails',
+          activeOrderId: orderId,
+        };
+      }) ?? currentState;
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      updated,
+      this.view.renderOrderDetails(order),
+      this.view.buildOrderDetailsKeyboard(),
+    );
+  }
+
+  private async handleSupplySuccess(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    task: OzonSupplyTask,
+    result?: OzonSupplyProcessResult,
+  ): Promise<void> {
+    const operationId = result?.operationId ?? this.extractOperationIdFromMessage(result?.message) ?? task.draftOperationId ?? `draft-${task.draftId ?? task.taskId}`;
+    const arrival = state.selectedTimeslot?.label ?? this.describeTimeslot(task.selectedTimeslot);
+    const warehouse = state.selectedWarehouseName ?? state.selectedDropOffName ?? state.selectedWarehouseId?.toString();
+
+    const items: SupplyWizardSupplyItem[] = task.items.map((item) => ({
+      article: item.article,
+      quantity: item.quantity,
+      sku: item.sku,
+    }));
+
+    const entry: SupplyWizardOrderSummary = {
+      id: operationId,
+      arrival: arrival ?? undefined,
+      warehouse: warehouse ?? undefined,
+      items,
+      createdAt: Date.now(),
+    };
+
+    const updated =
+      this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        const withoutDuplicate = current.orders.filter((order) => order.id !== entry.id);
+        return {
+          ...current,
+          orders: [...withoutDuplicate, entry],
+          stage: 'landing',
+          tasks: undefined,
+          readyInDays: undefined,
+          selectedTimeslot: undefined,
+          draftTimeslots: [],
+          draftWarehouses: [],
+          draftStatus: 'idle',
+          draftOperationId: undefined,
+          draftId: undefined,
+          draftCreatedAt: undefined,
+          draftExpiresAt: undefined,
+          draftError: undefined,
+          spreadsheet: undefined,
+        };
+      }) ?? state;
+
+    const refreshed = this.wizardStore.get(chatId) ?? updated;
+    const successText = this.view.renderSupplySuccess(entry);
+    const landingText = this.view.renderLanding(refreshed);
+    const promptText = [successText, '', landingText].join('\n');
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      refreshed,
+      promptText,
+      this.view.buildLandingKeyboard(refreshed),
+    );
+
+    await this.notifyAdmin(ctx, 'wizard.supplyDone', [
+      `order: ${entry.id}`,
+      entry.arrival ? `arrival: ${entry.arrival}` : undefined,
+      entry.warehouse ? `warehouse: ${entry.warehouse}` : undefined,
+    ]);
+  }
+
+  private extractOperationIdFromMessage(message?: string): string | undefined {
+    if (!message) return undefined;
+    const match = /operation_id=([\w-]+)/i.exec(message);
+    return match ? match[1] : undefined;
+  }
+
+  private describeTimeslot(slot?: OzonDraftTimeslot): string | undefined {
+    if (!slot) {
+      return undefined;
+    }
+
+    const from = slot.from_in_timezone;
+    const to = slot.to_in_timezone;
+    if (!from || !to) {
+      return undefined;
+    }
+    return `${from} — ${to}`;
+  }
+
   private async processSpreadsheet(
     ctx: Context,
     chatId: string,
@@ -453,7 +998,7 @@ export class SupplyWizardHandler {
   ): Promise<void> {
     const credentials = this.resolveCredentials(chatId);
     if (!credentials) {
-      await ctx.reply('🔐 Сначала сохраните ключи через /ozon_auth.');
+      await ctx.reply('🔐 Сначала сохраните ключи через /start.');
       return;
     }
 
@@ -533,19 +1078,14 @@ export class SupplyWizardHandler {
       return;
     }
 
-    await ctx.reply(summary);
+    const promptText = [
+      summary,
+      '',
+      'Файл обработан. Введите город, адрес или название пункта сдачи, чтобы найти место отгрузки.',
+      'Можно отправить новый запрос в любой момент или отменить мастера кнопкой ниже.',
+    ].join('\n');
 
-    await this.view.updatePrompt(
-      ctx,
-      chatId,
-      updated,
-      [
-        'Файл обработан. Проверьте список товаров.',
-        'Введите город, адрес или название пункта сдачи, чтобы найти место отгрузки.',
-        'Можно отправить новый запрос в любой момент или отменить мастера кнопкой ниже.',
-      ].join('\n'),
-      this.view.withCancel(),
-    );
+    await this.view.updatePrompt(ctx, chatId, updated, promptText, this.view.withCancel());
   }
 
   private async onClusterStart(
@@ -948,8 +1488,6 @@ export class SupplyWizardHandler {
     state: SupplyWizardState,
     payload: string | undefined,
   ): Promise<void> {
-      console.log(payload)
-
     if (state.stage !== 'draftWarehouseSelect') {
       await this.safeAnswerCbQuery(ctx, chatId, 'Дождитесь формирования списка складов');
       return;
@@ -1028,7 +1566,7 @@ export class SupplyWizardHandler {
 
     const credentials = this.resolveCredentials(chatId);
     if (!credentials) {
-      await ctx.reply('🔐 Сначала сохраните ключи через /ozon_auth <CLIENT_ID> <API_KEY>.');
+      await ctx.reply('🔐 Сначала сохраните ключи через /start <CLIENT_ID> <API_KEY>.');
       return;
     }
 
@@ -1519,7 +2057,6 @@ export class SupplyWizardHandler {
     const knownOperationId = this.resolveKnownDraftOperationId(state);
     const knownDraftId = state.draftId ?? this.latestDraftId;
 
-    await ctx.reply('⚠️ Выберите склад доставки');
     this.resetDraftStateForRetry(chatId);
     let freshState = this.wizardStore.get(chatId);
 
@@ -1548,6 +2085,21 @@ export class SupplyWizardHandler {
 
     if (freshState) {
       await this.ensureDraftCreated(ctx, chatId, freshState);
+      await this.view.updatePrompt(
+        ctx,
+        chatId,
+        freshState,
+        '⚠️ Выберите склад доставки',
+        this.view.withCancel(),
+      );
+    } else {
+      await this.view.updatePrompt(
+        ctx,
+        chatId,
+        state,
+        '⚠️ Выберите склад доставки',
+        this.view.withCancel(),
+      );
     }
   }
 
@@ -1615,7 +2167,7 @@ export class SupplyWizardHandler {
 
     const credentials = this.resolveCredentials(chatId);
     if (!credentials) {
-      await ctx.reply('🔐 Сначала сохраните ключи через /ozon_auth <CLIENT_ID> <API_KEY>.');
+      await ctx.reply('🔐 Сначала сохраните ключи через /start <CLIENT_ID> <API_KEY>.');
       return;
     }
 
@@ -1663,7 +2215,13 @@ export class SupplyWizardHandler {
       return;
     }
 
-    await ctx.reply('Создаю черновик, подождите...');
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      started,
+      'Создаю черновик, подождите...',
+      this.view.withCancel(),
+    );
 
     let operationId: string | undefined;
     try {
@@ -1917,12 +2475,12 @@ export class SupplyWizardHandler {
       return;
     }
 
-    await ctx.reply(
-      [
-        `❌ Не удалось создать черновик: ${reason}`,
-        'Попробуйте выбрать другие параметры или повторите попытку позже.',
-      ].join('\n'),
-    );
+    const message = [
+      `❌ Не удалось создать черновик: ${reason}`,
+      'Попробуйте выбрать другие параметры или повторите попытку позже.',
+    ].join('\n');
+
+    await this.view.updatePrompt(ctx, chatId, updated, message, this.view.withCancel());
     await this.notifyAdmin(ctx, 'wizard.draftError', [reason]);
     this.latestDraftOperationId = undefined;
   }
@@ -1982,7 +2540,7 @@ export class SupplyWizardHandler {
     }
   }
 
-  private async sendSupplyEvent(ctx: Context, result: { task: OzonSupplyTask; event: string; message?: string }): Promise<void> {
+  private async sendSupplyEvent(ctx: Context, result: OzonSupplyProcessResult): Promise<void> {
     const chatId = this.extractChatId(ctx);
     if (!chatId) return;
 
@@ -1991,9 +2549,10 @@ export class SupplyWizardHandler {
       event: result.event,
       message: result.message,
     });
-    if (!text) return;
+    if (!text) {
+      return;
+    }
 
-    await ctx.telegram.sendMessage(chatId, text);
     await this.notifyAdmin(ctx, `wizard.${result.event}`, [text]);
   }
 

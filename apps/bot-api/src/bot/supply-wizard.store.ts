@@ -50,10 +50,28 @@ export interface SupplyWizardTimeslotOption {
   data: OzonDraftTimeslot;
 }
 
+export interface SupplyWizardSupplyItem {
+  article: string;
+  quantity: number;
+  sku?: number;
+}
+
+export interface SupplyWizardOrderSummary {
+  id: string;
+  arrival?: string;
+  warehouse?: string;
+  items: SupplyWizardSupplyItem[];
+  createdAt: number;
+}
+
 export type SupplyWizardDraftStatus = 'idle' | 'creating' | 'success' | 'failed';
 
 export type SupplyWizardStage =
   | 'idle'
+  | 'authWelcome'
+  | 'authApiKey'
+  | 'authClientId'
+  | 'landing'
   | 'awaitSpreadsheet'
   | 'awaitDropOffQuery'
   | 'clusterPrompt'
@@ -62,6 +80,8 @@ export type SupplyWizardStage =
   | 'draftWarehouseSelect'
   | 'timeslotSelect'
   | 'dropOffSelect'
+  | 'ordersList'
+  | 'orderDetails'
   | 'awaitReadyDays'
   | 'processing';
 
@@ -91,6 +111,10 @@ export interface SupplyWizardState {
   selectedTaskId?: string;
   readyInDays?: number;
   promptMessageId?: number;
+  pendingApiKey?: string;
+  pendingClientId?: string;
+  orders: SupplyWizardOrderSummary[];
+  activeOrderId?: string;
   createdAt: number;
 }
 
@@ -105,9 +129,10 @@ export class SupplyWizardStore {
       warehouses: Record<number, SupplyWizardWarehouseOption[]>;
       dropOffs: SupplyWizardDropOffOption[];
     },
+    options: { stage?: SupplyWizardStage } = {},
   ): SupplyWizardState {
     const state: SupplyWizardState = {
-      stage: 'awaitSpreadsheet',
+      stage: options.stage ?? 'awaitSpreadsheet',
       clusters: this.cloneClusters(payload.clusters),
       warehouses: this.cloneWarehouses(payload.warehouses),
       dropOffs: this.cloneDropOffs(payload.dropOffs),
@@ -121,6 +146,10 @@ export class SupplyWizardStore {
       draftExpiresAt: undefined,
       draftError: undefined,
       selectedTimeslot: undefined,
+      pendingApiKey: undefined,
+      pendingClientId: undefined,
+      orders: [],
+      activeOrderId: undefined,
       createdAt: Date.now(),
       promptMessageId: undefined,
     };
@@ -154,6 +183,13 @@ export class SupplyWizardStore {
             data: state.selectedTimeslot.data ? { ...state.selectedTimeslot.data } : state.selectedTimeslot.data,
           }
         : undefined,
+      pendingApiKey: state.pendingApiKey,
+      pendingClientId: state.pendingClientId,
+      orders: state.orders.map((order) => ({
+        ...order,
+        items: order.items.map((item) => ({ ...item })),
+      })),
+      activeOrderId: state.activeOrderId,
     };
   }
 
@@ -187,6 +223,13 @@ export class SupplyWizardStore {
                     : current.selectedTimeslot.data,
                 }
               : undefined,
+            pendingApiKey: current.pendingApiKey,
+            pendingClientId: current.pendingClientId,
+            orders: current.orders.map((order) => ({
+              ...order,
+              items: order.items.map((item) => ({ ...item })),
+            })),
+            activeOrderId: current.activeOrderId,
           }
         : undefined,
     );
@@ -215,6 +258,13 @@ export class SupplyWizardStore {
             data: next.selectedTimeslot.data ? { ...next.selectedTimeslot.data } : next.selectedTimeslot.data,
           }
         : undefined,
+      pendingApiKey: next.pendingApiKey,
+      pendingClientId: next.pendingClientId,
+      orders: next.orders.map((order) => ({
+        ...order,
+        items: order.items.map((item) => ({ ...item })),
+      })),
+      activeOrderId: next.activeOrderId,
       createdAt: next.createdAt ?? current?.createdAt ?? Date.now(),
     };
     this.storage.set(chatId, normalized);
