@@ -44,6 +44,7 @@ export class SupplyWizardViewService {
       [{ text: 'Авторизоваться', callback_data: 'wizard:auth:login' }],
       [{ text: 'Инструкция', callback_data: 'wizard:auth:info' }],
     ];
+
     return this.withNavigation(rows);
   }
 
@@ -82,30 +83,41 @@ export class SupplyWizardViewService {
   }
 
   renderLanding(state: SupplyWizardState): string {
-    const lines = [
-      '✅ Авторизация сохранена. Готовы оформить поставку.',
-    ];
+    const lines = ['Главное меню.'];
+
+    const pendingTasks = state.pendingTasks ?? [];
+    if (pendingTasks.length) {
+      const current = pendingTasks[pendingTasks.length - 1];
+      lines.push(
+        '',
+        `В обработке ${pendingTasks.length} ${pendingTasks.length === 1 ? 'задача' : 'задачи'}.`,
+        `Последняя: ${current.operationId ?? current.id}${current.warehouse ? ` → ${current.warehouse}` : ''}.`,
+        'Следите за прогрессом в разделе «Мои задачи».',
+      );
+    }
+
     if (state.orders.length) {
       const last = state.orders[state.orders.length - 1];
       lines.push(
         '',
-        `Последняя заявка: № ${last.id}${last.arrival ? ` — окно ${last.arrival}` : ''}.`,
-        'Можно создать новую или посмотреть список заявок.',
+        `Последняя поставка: № ${last.operationId ?? last.id}${last.timeslotLabel ? ` — слот ${last.timeslotLabel}` : ''}.`,
+        'История доступна в разделе «Мои поставки».',
       );
     } else {
-      lines.push('', 'Нажмите «Создать поставку», чтобы загрузить файл с товарами.');
+      lines.push('', 'Нажмите «Новая поставка», чтобы загрузить файл с товарами.');
     }
     return lines.join('\n');
   }
 
   buildLandingKeyboard(state: SupplyWizardState): Array<Array<{ text: string; callback_data: string }>> {
     const rows: Array<Array<{ text: string; callback_data: string }>> = [
-      [{ text: 'Создать поставку', callback_data: 'wizard:landing:start' }],
+      [{ text: 'Новая поставка', callback_data: 'wizard:landing:start' }],
+      [{ text: 'Мои задачи', callback_data: 'wizard:tasks:list' }],
     ];
     if (state.orders.length) {
-      rows.push([{ text: 'Мои заявки 🔁', callback_data: 'wizard:orders:list' }]);
+      rows.push([{ text: 'Мои поставки', callback_data: 'wizard:orders:list' }]);
     }
-    return this.withCancel(rows);
+    return rows;
   }
 
   renderUploadPrompt(): string {
@@ -123,15 +135,15 @@ export class SupplyWizardViewService {
 
   renderOrdersList(state: SupplyWizardState): string {
     if (!state.orders.length) {
-      return 'Список заявок пуст. Создайте новую поставку.';
+      return 'Список поставок пуст. Создайте новую поставку.';
     }
 
-    const lines = ['Мои заявки:'];
+    const lines = ['Мои поставки:'];
     state.orders.forEach((order, index) => {
       const arrival = order.arrival ? ` — ${order.arrival}` : '';
       lines.push(`${index + 1}. №${order.id}${arrival}`);
     });
-    lines.push('', 'Выберите заявку, чтобы посмотреть детали.');
+    lines.push('', 'Выберите поставку, чтобы посмотреть детали.');
     return lines.join('\n');
   }
 
@@ -143,16 +155,16 @@ export class SupplyWizardViewService {
       },
     ]);
 
-    rows.push([{ text: 'Создать новую', callback_data: 'wizard:landing:start' }]);
+    rows.push([{ text: 'Создать новую поставку', callback_data: 'wizard:landing:start' }]);
     return this.withNavigation(rows, { back: 'wizard:orders:back' });
   }
 
   renderOrderDetails(order: SupplyWizardOrderSummary): string {
     const lines = [
-      `Заявка № ${order.operationId ?? order.id}`,
+      `Поставка №${order.operationId ?? order.id}`,
       order.clusterName ? `Кластер: ${order.clusterName}` : undefined,
-        order.warehouse ? `Склад: ${order.warehouse}` : undefined,
-        order.dropOffName ? `Пункт сдачи: ${order.dropOffName}` : undefined,
+      order.dropOffName ? `Пункт сдачи: ${order.dropOffName}` : undefined,
+      order.warehouse ? `Склад: ${order.warehouse}` : undefined,
       order.timeslotLabel
         ? `Таймслот: ${order.timeslotLabel}`
         : order.arrival
@@ -172,11 +184,60 @@ export class SupplyWizardViewService {
     return this.withNavigation(rows, { back: 'wizard:orders:list' });
   }
 
+  renderTasksList(state: SupplyWizardState): string {
+    const pendingTasks = state.pendingTasks ?? [];
+    if (!pendingTasks.length) {
+      return 'Активных задач нет. Запустите новую поставку.';
+    }
+
+    const lines = ['Мои задачи:'];
+    pendingTasks.forEach((task, index) => {
+      const warehouse = task.warehouse ? ` → ${task.warehouse}` : '';
+      lines.push(`${index + 1}. ${task.operationId ?? task.id}${warehouse}`);
+    });
+    lines.push('', 'Выберите задачу, чтобы посмотреть детали или отменить её.');
+    return lines.join('\n');
+  }
+
+  buildTasksListKeyboard(state: SupplyWizardState): Array<Array<{ text: string; callback_data: string }>> {
+    const pendingTasks = state.pendingTasks ?? [];
+    const rows = pendingTasks.map((task) => [
+      {
+        text: `${task.operationId ?? task.id}${task.warehouse ? ` • ${task.warehouse}` : ''}`,
+        callback_data: `wizard:tasks:details:${task.taskId ?? task.id}`,
+      },
+    ]);
+    rows.push([{ text: 'Назад', callback_data: 'wizard:tasks:back' }]);
+    return rows;
+  }
+
+  renderTaskDetails(task: SupplyWizardOrderSummary): string {
+    const lines = [
+      `Задача ${task.operationId ?? task.id}`,
+      task.clusterName ? `Кластер: ${task.clusterName}` : undefined,
+      task.dropOffName ? `Пункт сдачи: ${task.dropOffName}` : undefined,
+      task.warehouse ? `Склад: ${task.warehouse}` : undefined,
+      task.timeslotLabel ? `Таймслот: ${task.timeslotLabel}` : undefined,
+      '',
+      'Товары:',
+      ...task.items.map((item) => `• ${item.article} × ${item.quantity}`),
+    ].filter((value): value is string => Boolean(value));
+    return lines.join('\n');
+  }
+
+  buildTaskDetailsKeyboard(task: SupplyWizardOrderSummary): Array<Array<{ text: string; callback_data: string }>> {
+    const rows = [
+      [{ text: 'Отменить задачу', callback_data: `wizard:tasks:cancel:${task.taskId ?? task.id}` }],
+    ];
+    rows.push([{ text: 'Назад', callback_data: 'wizard:tasks:list' }]);
+    return rows;
+  }
+
   renderSupplySuccess(order: SupplyWizardOrderSummary): string {
     const lines = [
       'Поставка создана ✅',
       `ID: ${order.id}`,
-      order.arrival ? `Время отгрузки: ${order.arrival}` : undefined,
+      order.timeslotLabel ? `Таймслот: ${order.timeslotLabel}` : order.arrival ? `Время отгрузки: ${order.arrival}` : undefined,
       order.warehouse ? `Склад: ${order.warehouse}` : undefined,
     ].filter((value): value is string => Boolean(value));
     return lines.join('\n');
@@ -499,13 +560,15 @@ export class SupplyWizardViewService {
 
   withNavigation(
     rows: Array<Array<{ text: string; callback_data: string }>> = [],
-    options: { back?: string } = {},
+    options: { back?: string, cancel?: string } = {},
   ): Array<Array<{ text: string; callback_data: string }>> {
     const keyboard = [...rows];
     if (options.back) {
       keyboard.push([{ text: 'Назад', callback_data: options.back }]);
+    } else if (options.cancel) {
+      keyboard.push([{ text: 'Отмена', callback_data: 'wizard:cancel' }]);
     }
-    keyboard.push([{ text: 'Отмена', callback_data: 'wizard:cancel' }]);
+
     return keyboard;
   }
 

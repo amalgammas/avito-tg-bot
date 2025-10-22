@@ -5,15 +5,12 @@ export class UserCredentialsEntity {
   @PrimaryColumn({ type: 'text' })
   chatId!: string;
 
-  @Column({ type: 'text' })
-  clientId!: string;
+  @Column({ type: 'text', nullable: true })
+  clientId: string | null = null;
 
-  @Column({ type: 'text' })
-  apiKey!: string;
+  @Column({ type: 'text', nullable: true })
+  apiKey: string | null = null;
 
-  @Column({ type: 'datetime' })
-  verifiedAt!: Date;
-
-  @Column({ type: 'simple-json', nullable: true })
-  clusters?: Array<{ id: number; name?: string }>;
+  @Column({ type: 'datetime', nullable: true })
+  verifiedAt: Date | null = null;
 }

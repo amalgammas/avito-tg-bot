@@ -7,6 +7,7 @@ import {
   OzonDraftTimeslot,
   OzonCluster,
   OzonAvailableWarehouse,
+  OzonDraftStatus,
 } from '../config/ozon-api.service';
 import {
   OzonSupplyProcessOptions,
@@ -352,10 +353,6 @@ export class OzonSupplyService {
       return { task, event: 'error', message: 'Не удалось определить cluster_id' };
     }
 
-    if (!task.warehouseId) {
-      return { task, event: 'error', message: 'Не удалось определить warehouse_id' };
-    }
-
     const creds = credentials ?? this.ozonApiDefaultCredentials();
 
     if (task.draftOperationId) {
@@ -372,6 +369,22 @@ export class OzonSupplyService {
     const info = await this.ozonApi.getDraftInfo(task.draftOperationId, credentials);
 
     if (info.status === 'CALCULATION_STATUS_SUCCESS') {
+    const warehouseChoice = this.resolveWarehouseFromDraft(info, task.warehouseId, task.warehouseName);
+      if (!warehouseChoice) {
+        return {
+          task,
+          event: 'draftError',
+          message: 'Черновик не содержит доступных складов для отгрузки',
+        };
+      }
+
+      const selectedWarehouseId = warehouseChoice.warehouseId;
+      const selectedWarehouseName = warehouseChoice.name;
+      const warehouseChanged =
+        typeof task.warehouseId === 'number' && task.warehouseId !== selectedWarehouseId;
+
+      task.warehouseId = selectedWarehouseId;
+      task.warehouseName = selectedWarehouseName ?? task.warehouseName;
       task.draftId = info.draft_id ?? task.draftId;
       this.rememberDraft(task, info.draft_id ?? task.draftId);
       const timeslot = await this.pickTimeslot(task, credentials);
@@ -379,6 +392,7 @@ export class OzonSupplyService {
       if (!timeslot) {
         return { task, event: 'timeslotMissing', message: 'Свободных таймслотов нет' };
       }
+      task.selectedTimeslot = timeslot;
 
       const operationId = await this.ozonApi.createSupply(
         {
@@ -391,10 +405,14 @@ export class OzonSupplyService {
 
       if (operationId) {
         task.orderFlag = 1;
+        const messageParts = [`Создана поставка, operation_id=${operationId}`];
+        if (warehouseChanged) {
+          messageParts.push(`выбран склад ${selectedWarehouseId}`);
+        }
         return {
           task,
           event: 'supplyCreated',
-          message: `Создана поставка, operation_id=${operationId}`,
+          message: messageParts.join(', '),
           operationId,
         };
       }
@@ -505,6 +523,71 @@ export class OzonSupplyService {
     return undefined;
   }
 
+  private resolveWarehouseFromDraft(
+    info: OzonDraftStatus,
+    preferredWarehouseId: number | undefined,
+    preferredWarehouseName: string | undefined,
+  ): { warehouseId: number; name?: string } | undefined {
+    const warehouses = this.collectDraftWarehouses(info);
+    if (!warehouses.length) {
+      return undefined;
+    }
+
+    if (typeof preferredWarehouseId === 'number') {
+      const match = warehouses.find(
+        (entry) => entry.warehouseId === preferredWarehouseId && entry.isAvailable !== false,
+      );
+      if (match) {
+        return { warehouseId: match.warehouseId, name: match.name ?? preferredWarehouseName };
+      }
+    }
+
+    const firstAvailable = warehouses.find((entry) => entry.isAvailable !== false);
+    if (firstAvailable) {
+      return { warehouseId: firstAvailable.warehouseId, name: firstAvailable.name ?? preferredWarehouseName };
+    }
+
+    const fallback = warehouses[0];
+    return fallback
+      ? { warehouseId: fallback.warehouseId, name: fallback.name ?? preferredWarehouseName }
+      : undefined;
+  }
+
+  private collectDraftWarehouses(
+    info: OzonDraftStatus,
+  ): Array<{ warehouseId: number; name?: string; isAvailable?: boolean }> {
+    const result: Array<{ warehouseId: number; name?: string; isAvailable?: boolean }> = [];
+    for (const cluster of info.clusters ?? []) {
+      for (const warehouseInfo of cluster.warehouses ?? []) {
+        const rawId =
+          warehouseInfo?.supply_warehouse?.warehouse_id ??
+          (warehouseInfo as any)?.warehouse_id ??
+          undefined;
+        const warehouseId = this.parseWarehouseId(rawId);
+        if (!warehouseId) {
+          continue;
+        }
+        const name = warehouseInfo?.supply_warehouse?.name?.trim();
+        const isAvailable = warehouseInfo?.status?.is_available;
+        result.push({ warehouseId, name, isAvailable });
+      }
+    }
+    return result;
+  }
+
+  private parseWarehouseId(value: unknown): number | undefined {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.round(value);
+    }
+    if (typeof value === 'string') {
+      const parsed = Number(value.trim());
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.round(parsed);
+      }
+    }
+    return undefined;
+  }
+
   private ozonApiDefaultCredentialsAvailable(): boolean {
     const creds = this.ozonApiDefaultCredentials();
     return Boolean(creds.clientId && creds.apiKey);
@@ -535,10 +618,28 @@ export class OzonSupplyService {
   }
 
   private computeReadyDate(days: number): string {
-    const defaultDays = 28;
-    const safeDays = Number.isFinite(days) && Math.floor(days) > 0 ? Math.floor(days) : defaultDays;
+    const minDays = 2;
+    const maxDays = 28;
+    const defaultDays = 2;
+
+    let readyDays: number;
+    if (!Number.isFinite(days)) {
+      readyDays = defaultDays;
+    } else {
+      const rounded = Math.floor(days);
+      if (rounded === 0) {
+        readyDays = 0;
+      } else if (rounded < minDays) {
+        readyDays = minDays;
+      } else if (rounded > maxDays) {
+        readyDays = maxDays;
+      } else {
+        readyDays = rounded;
+      }
+    }
+
     const base = new Date();
-    base.setUTCDate(base.getUTCDate() + safeDays);
+    base.setUTCDate(base.getUTCDate() + readyDays);
     base.setUTCHours(23, 59, 59, 0);
     return this.toOzonIso(base);
   }

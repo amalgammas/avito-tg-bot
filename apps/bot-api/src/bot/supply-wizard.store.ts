@@ -89,6 +89,8 @@ export type SupplyWizardStage =
   | 'dropOffSelect'
   | 'ordersList'
   | 'orderDetails'
+  | 'tasksList'
+  | 'taskDetails'
   | 'awaitReadyDays'
   | 'processing';
 
@@ -122,6 +124,8 @@ export interface SupplyWizardState {
   pendingClientId?: string;
   orders: SupplyWizardOrderSummary[];
   activeOrderId?: string;
+  pendingTasks: SupplyWizardOrderSummary[];
+  activeTaskId?: string;
   createdAt: number;
   autoWarehouseSelection?: boolean;
 }
@@ -158,6 +162,8 @@ export class SupplyWizardStore {
       pendingClientId: undefined,
       orders: [],
       activeOrderId: undefined,
+      pendingTasks: [],
+      activeTaskId: undefined,
       createdAt: Date.now(),
       promptMessageId: undefined,
       autoWarehouseSelection: false,
@@ -199,6 +205,11 @@ export class SupplyWizardStore {
         items: order.items.map((item) => ({ ...item })),
       })),
       activeOrderId: state.activeOrderId,
+      pendingTasks: (state.pendingTasks ?? []).map((task) => ({
+        ...task,
+        items: task.items.map((item) => ({ ...item })),
+      })),
+      activeTaskId: state.activeTaskId,
     };
   }
 

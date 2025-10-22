@@ -4,7 +4,7 @@ import { Context } from 'telegraf';
 
 import { SupplyWizardHandler } from './supply-wizard.handler';
 import { UserCredentialsStore } from './user-credentials.store';
-import { OzonApiService, OzonCredentials } from '../config/ozon-api.service';
+import { OzonCredentials } from '../config/ozon-api.service';
 import { AdminNotifierService } from './admin-notifier.service';
 
 @Update()
@@ -15,17 +15,15 @@ export class BotUpdate {
     'Привет! Я помогу оформить поставку на Ozon:',
     ' 1. /start — запустить мастер',
     ' 2. /ozon_keys — посмотреть сохранённые ключи',
-    ' 3. /ozon_clear — удалить ключи из памяти',
+    ' 3. /ozon_clear — удалить ключи из базы',
     '',
     'Дополнительно:',
-    ' /ping — проверить доступность бота',
-    ' /help — показать эту подсказку',
+    ' /ping — проверить доступность бота'
   ].join('\n');
 
   constructor(
     private readonly wizard: SupplyWizardHandler,
     private readonly credentialsStore: UserCredentialsStore,
-    private readonly ozonApi: OzonApiService,
     private readonly adminNotifier: AdminNotifierService,
   ) {}
 
@@ -87,13 +85,15 @@ export class BotUpdate {
       return;
     }
 
-    if (!(await this.credentialsStore.has(chatId))) {
+    const credentials = await this.credentialsStore.get(chatId);
+    if (!credentials) {
       await ctx.reply('Сохранённых ключей нет.');
       return;
     }
 
     await this.credentialsStore.clear(chatId);
-    await ctx.reply('✅ Ключи удалены из памяти бота.');
+    await ctx.reply('✅ Ключи удалены из базы бота.');
+    await this.wizard.start(ctx)
 
     await this.adminNotifier.notifyWizardEvent({
       ctx,
@@ -111,7 +111,7 @@ export class BotUpdate {
 
     const lines = entries.map(({ chatId, credentials }) => {
       const updated = credentials.verifiedAt.toISOString();
-      return `• chat_id: ${chatId}, client_id: ${this.maskValue(credentials.clientId)}, api_key: ${this.maskValue(credentials.apiKey)}, updated: ${updated}`;
+      return `• chat_id: ${chatId},\n• client_id: ${this.maskValue(credentials.clientId)},\n• api_key: ${this.maskValue(credentials.apiKey)},\n• updated: ${updated}`;
     });
 
     await ctx.reply(['Сохранённые ключи (маскированы):', ...lines].join('\n'));

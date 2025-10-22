@@ -8,7 +8,6 @@ export interface UserOzonCredentials {
   clientId: string;
   apiKey: string;
   verifiedAt: Date;
-  clusters?: Array<{ id: number; name?: string }>;
 }
 
 @Injectable()
@@ -19,53 +18,65 @@ export class UserCredentialsStore {
   ) {}
 
   async set(chatId: string, credentials: Omit<UserOzonCredentials, 'verifiedAt'>): Promise<void> {
-    const entity = this.repository.create({
-      chatId,
-      clientId: credentials.clientId,
-      apiKey: credentials.apiKey,
-      verifiedAt: new Date(),
-      clusters: credentials.clusters,
-    });
+    const entity =
+      (await this.repository.findOne({ where: { chatId } })) ??
+      this.repository.create({ chatId });
 
+    entity.clientId = credentials.clientId;
+    entity.apiKey = credentials.apiKey;
+    entity.verifiedAt = new Date();
     await this.repository.save(entity);
   }
 
   async get(chatId: string): Promise<UserOzonCredentials | undefined> {
     const entity = await this.repository.findOne({ where: { chatId } });
-    return entity ? this.mapEntity(entity) : undefined;
+    return this.toCredentials(entity);
   }
 
   async clear(chatId: string): Promise<void> {
-    await this.repository.delete({ chatId });
+    await this.repository.update(
+      { chatId },
+      {
+        clientId: null,
+        apiKey: null,
+        verifiedAt: null,
+      },
+    );
   }
 
   async has(chatId: string): Promise<boolean> {
-    const count = await this.repository.count({ where: { chatId } });
-    return count > 0;
+    const entity = await this.repository.findOne({ where: { chatId } });
+    return Boolean(this.toCredentials(entity));
   }
 
   async entries(): Promise<Array<{ chatId: string; credentials: UserOzonCredentials }>> {
     const records = await this.repository.find({ order: { verifiedAt: 'DESC' } });
-    return records.map((record) => ({ chatId: record.chatId, credentials: this.mapEntity(record) }));
+
+    return records.reduce<Array<{ chatId: string; credentials: UserOzonCredentials }>>((acc, record) => {
+      const credentials = this.toCredentials(record);
+      if (!credentials) {
+        return acc;
+      }
+      acc.push({ chatId: record.chatId, credentials });
+      return acc;
+    }, []);
   }
 
-  async updateClusters(chatId: string, clusters: Array<{ id: number; name?: string }>): Promise<void> {
-    const entity = await this.repository.findOne({ where: { chatId } });
+  private toCredentials(entity: UserCredentialsEntity | null | undefined): UserOzonCredentials | undefined {
     if (!entity) {
-      return;
+      return undefined;
     }
 
-    entity.clusters = clusters;
-    entity.verifiedAt = new Date();
-    await this.repository.save(entity);
-  }
+    const clientId = entity.clientId?.trim();
+    const apiKey = entity.apiKey?.trim();
+    if (!clientId || !apiKey || !entity.verifiedAt) {
+      return undefined;
+    }
 
-  private mapEntity(entity: UserCredentialsEntity): UserOzonCredentials {
     return {
-      clientId: entity.clientId,
-      apiKey: entity.apiKey,
+      clientId,
+      apiKey,
       verifiedAt: entity.verifiedAt,
-      clusters: entity.clusters ?? undefined,
     };
   }
 }

@@ -10,11 +10,13 @@ import {
   OzonDraftStatus,
   OzonDraftTimeslot,
 } from '../config/ozon-api.service';
+
 import { OzonSheetService } from '../ozon/ozon-sheet.service';
 import { OzonSupplyService } from '../ozon/ozon-supply.service';
 import { OzonSupplyProcessResult, OzonSupplyTask } from '../ozon/ozon-supply.types';
 import { UserCredentialsStore } from './user-credentials.store';
 import { SupplyOrderStore } from '../storage/supply-order.store';
+
 import {
   SupplyWizardStore,
   SupplyWizardState,
@@ -24,6 +26,7 @@ import {
   SupplyWizardOrderSummary,
   SupplyWizardSupplyItem,
 } from './supply-wizard.store';
+
 import { AdminNotifierService } from './admin-notifier.service';
 import { SupplyWizardViewService } from './supply-wizard/view.service';
 
@@ -35,10 +38,12 @@ export class SupplyWizardHandler {
   private readonly draftPollMaxAttempts = 1_000;
   private readonly draftRecreateMaxAttempts = 1_000;
   private readonly draftLifetimeMs = 30 * 60 * 1000;
+  private readonly readyDaysMin = 2;
+  private readonly readyDaysMax = 28;
   private latestDraftWarehouses: SupplyWizardDraftWarehouseOption[] = [];
   private latestDraftId?: number;
   private latestDraftOperationId?: string;
-  private readonly taskAbortControllers = new Map<string, AbortController>();
+  private readonly taskAbortControllers = new Map<string, { controller: AbortController; taskId: string }>();
 
   constructor(
     private readonly credentialsStore: UserCredentialsStore,
@@ -89,26 +94,29 @@ export class SupplyWizardHandler {
           };
         }) ?? { ...baseState, orders: persistedOrders };
 
+      await this.syncPendingTasks(chatId);
+      const landingState = this.wizardStore.get(chatId) ?? state;
+
       if (!credentials) {
         await this.view.updatePrompt(
           ctx,
           chatId,
-          state,
+          landingState,
           this.view.renderAuthWelcome(),
           this.view.buildAuthWelcomeKeyboard(),
         );
-        await this.notifyAdmin(ctx, 'wizard.start', [`stage: ${state.stage}`]);
+        await this.notifyAdmin(ctx, 'wizard.start', [`stage: ${landingState.stage}`]);
         return;
       }
 
       await this.view.updatePrompt(
         ctx,
         chatId,
-        state,
-        this.view.renderLanding(state),
-        this.view.buildLandingKeyboard(state),
+        landingState,
+        this.view.renderLanding(landingState),
+        this.view.buildLandingKeyboard(landingState),
       );
-      await this.notifyAdmin(ctx, 'wizard.start', [`stage: ${state.stage}`]);
+      await this.notifyAdmin(ctx, 'wizard.start', [`stage: ${landingState.stage}`]);
     } catch (error) {
       this.logger.error(`start wizard failed: ${this.describeError(error)}`);
       await ctx.reply(`❌ Не удалось инициализировать мастер: ${this.describeError(error)}`);
@@ -426,14 +434,31 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const parsed = Number(text.trim());
-    if (!Number.isFinite(parsed) || parsed < 0) {
-      await ctx.reply('Введите неотрицательное число дней.');
-      return;
+    await ctx.reply('Готовность к отгрузке теперь выбирается автоматически — ждать ничего не нужно.');
+  }
+
+  private buildReadyContext(state: SupplyWizardState): string[] {
+    const lines: string[] = [];
+
+    if (state.selectedClusterName || state.selectedClusterId) {
+      lines.push(`Кластер: ${state.selectedClusterName ?? state.selectedClusterId}.`);
     }
 
-    const readyInDays = Math.floor(parsed);
-    await this.startSupplyProcessing(ctx, chatId, state, readyInDays);
+    if (state.autoWarehouseSelection) {
+      lines.push('Склад: Первый доступный (определю автоматически).');
+    } else if (state.selectedWarehouseName || state.selectedWarehouseId) {
+      lines.push(`Склад: ${state.selectedWarehouseName ?? state.selectedWarehouseId}.`);
+    }
+
+    if (state.selectedDropOffName || state.selectedDropOffId) {
+      lines.push(`Пункт сдачи: ${state.selectedDropOffName ?? state.selectedDropOffId}.`);
+    }
+
+    if (state.selectedTimeslot?.label) {
+      lines.push(`Таймслот: ${state.selectedTimeslot.label}.`);
+    }
+
+    return lines;
   }
 
   private async startSupplyProcessing(
@@ -445,6 +470,11 @@ export class SupplyWizardHandler {
     const task = state.tasks?.[0];
     if (!task) {
       await ctx.reply('Не найдены товары для обработки. Запустите мастер заново.');
+      this.wizardStore.clear(chatId);
+      return;
+    }
+    if (!task.taskId) {
+      await ctx.reply('Не удалось определить идентификатор задачи. Запустите мастер заново.');
       this.wizardStore.clear(chatId);
       return;
     }
@@ -465,46 +495,33 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const wasAutoWarehouseSelection = Boolean(state.autoWarehouseSelection);
-    const clonedTask = this.cloneTask(task);
+    const abortController = this.registerAbortController(chatId, task.taskId);
 
-    let workingState = state;
-    if (workingState.autoWarehouseSelection) {
-      const preparedState = await this.prepareAutoWarehouseSelection(
-        ctx,
-        chatId,
-        workingState,
-        clonedTask,
-        credentials,
-      );
-      if (!preparedState) {
-        return;
-      }
-      workingState = preparedState;
-    }
-
-    const refreshedState = this.wizardStore.get(chatId) ?? workingState;
-    const effectiveTask = clonedTask;
+    const wasAutoWarehouseSelection = typeof state.selectedWarehouseId !== 'number';
+    const effectiveTask = this.cloneTask(task);
 
     const updated = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
       return {
         ...current,
-        stage: 'processing',
+        stage: 'landing',
         readyInDays,
-        autoWarehouseSelection: false,
+        autoWarehouseSelection: current.autoWarehouseSelection,
       };
     });
 
     if (!updated) {
       await ctx.reply('Мастер закрыт. Запустите заново.');
+      this.clearAbortController(chatId, task.taskId);
       return;
     }
 
     effectiveTask.clusterId = updated.selectedClusterId;
     effectiveTask.city = updated.selectedClusterName ?? '';
     effectiveTask.warehouseId = updated.selectedWarehouseId;
-    effectiveTask.warehouseName = updated.selectedWarehouseName ?? '';
+    effectiveTask.warehouseName = wasAutoWarehouseSelection
+      ? effectiveTask.warehouseName
+      : updated.selectedWarehouseName ?? effectiveTask.warehouseName;
     effectiveTask.selectedTimeslot = updated.selectedTimeslot?.data ?? effectiveTask.selectedTimeslot;
     if (updated.draftOperationId) {
       effectiveTask.draftOperationId = updated.draftOperationId;
@@ -513,48 +530,113 @@ export class SupplyWizardHandler {
       effectiveTask.draftId = updated.draftId;
     }
 
+    const warehouseLabel = wasAutoWarehouseSelection
+      ? 'Первый доступный склад'
+      : updated.selectedWarehouseName ??
+        (typeof updated.selectedWarehouseId === 'number' ? `Склад ${updated.selectedWarehouseId}` : '—');
+
     const summaryLines = [
       `Кластер: ${updated.selectedClusterName ?? '—'}`,
-      `Склад: ${updated.selectedWarehouseName ?? updated.selectedWarehouseId ?? '—'}`,
+      `Склад: ${warehouseLabel}`,
       `Пункт сдачи: ${updated.selectedDropOffName ?? updated.selectedDropOffId ?? '—'}`,
     ];
-    if (updated.selectedTimeslot) {
-      summaryLines.push(`Таймслот: ${updated.selectedTimeslot.label}.`);
-    }
-    if (readyInDays > 0) {
-      summaryLines.push(`Готовность к отгрузке через: ${readyInDays} дн.`);
-    } else {
-    summaryLines.push('Автоматически будет выбран первый доступный временной слот.');
-    }
+    summaryLines.push(`Готовность к отгрузке: ${readyInDays} дн. (по умолчанию).`);
+    summaryLines.push('Таймслот и доступный склад будут выбраны автоматически.');
     summaryLines.push('', 'Создаю поставку...');
 
-    await this.view.updatePrompt(ctx, chatId, updated, summaryLines.join('\n'));
-    await this.notifyAdmin(ctx, 'wizard.supplyProcessing', summaryLines);
+    try {
+      await this.orderStore.saveTask(chatId, {
+        task: effectiveTask,
+        clusterId: updated.selectedClusterId!,
+        clusterName: updated.selectedClusterName,
+        warehouseId: updated.selectedWarehouseId,
+        warehouseName:
+          wasAutoWarehouseSelection
+            ? warehouseLabel
+            : updated.selectedWarehouseName ??
+              (typeof updated.selectedWarehouseId === 'number'
+                ? String(updated.selectedWarehouseId)
+                : undefined),
+        dropOffId: updated.selectedDropOffId!,
+        dropOffName: updated.selectedDropOffName ?? String(updated.selectedDropOffId),
+        readyInDays,
+        timeslotLabel:
+          updated.selectedTimeslot?.label ?? this.describeTimeslot(effectiveTask.selectedTimeslot),
+        warehouseAutoSelect: wasAutoWarehouseSelection,
+        timeslotAutoSelect: true,
+      });
 
-    await this.orderStore.saveTask(chatId, {
+      if (!this.wizardStore.get(chatId)) {
+        this.clearAbortController(chatId, task.taskId);
+        await this.orderStore.deleteByTaskId(chatId, task.taskId);
+        return;
+      }
+
+      await this.syncPendingTasks(chatId);
+
+      const landingState = this.wizardStore.get(chatId) ?? updated;
+      const landingText = this.view.renderLanding(landingState);
+      const promptText = [
+        ...summaryLines,
+        '',
+        'Задача запущена. Проверяйте раздел «Мои задачи».',
+        '',
+        landingText,
+      ].join('\n');
+
+      if (!this.wizardStore.get(chatId)) {
+        this.clearAbortController(chatId, task.taskId);
+        await this.orderStore.deleteByTaskId(chatId, task.taskId);
+        return;
+      }
+
+      await this.view.updatePrompt(
+        ctx,
+        chatId,
+        landingState,
+        promptText,
+        this.view.buildLandingKeyboard(landingState),
+      );
+      await this.notifyAdmin(ctx, 'wizard.supplyProcessing', summaryLines);
+      if (!this.wizardStore.get(chatId)) {
+        this.clearAbortController(chatId, task.taskId);
+        await this.orderStore.deleteByTaskId(chatId, task.taskId);
+        return;
+      }
+    } catch (error) {
+      this.clearAbortController(chatId, task.taskId);
+      throw error;
+    }
+
+    void this.processSupplyTask({
+      ctx,
+      chatId,
+      state: updated,
       task: effectiveTask,
-      clusterId: updated.selectedClusterId!,
-      clusterName: updated.selectedClusterName,
-      warehouseId: updated.selectedWarehouseId!,
-      warehouseName: updated.selectedWarehouseName ?? String(updated.selectedWarehouseId),
-      dropOffId: updated.selectedDropOffId!,
-      dropOffName: updated.selectedDropOffName ?? String(updated.selectedDropOffId),
       readyInDays,
-      timeslotLabel:
-        updated.selectedTimeslot?.label ?? this.describeTimeslot(effectiveTask.selectedTimeslot),
-      warehouseAutoSelect: wasAutoWarehouseSelection,
-      timeslotAutoSelect: true,
+      credentials,
+      abortController,
     });
+  }
 
-    const abortController = this.registerAbortController(chatId);
+  private async processSupplyTask(params: {
+    ctx: Context;
+    chatId: string;
+    state: SupplyWizardState;
+    task: OzonSupplyTask;
+    readyInDays: number;
+    credentials: OzonCredentials;
+    abortController: AbortController;
+  }): Promise<void> {
+    const { ctx, chatId, state, task, readyInDays, credentials, abortController } = params;
 
     let supplyResult: OzonSupplyProcessResult | undefined;
 
     try {
-      await this.supplyService.runSingleTask(effectiveTask, {
+      await this.supplyService.runSingleTask(task, {
         credentials,
         readyInDays,
-        dropOffWarehouseId: updated.selectedDropOffId,
+        dropOffWarehouseId: state.selectedDropOffId,
         skipDropOffValidation: true,
         abortSignal: abortController.signal,
         onEvent: async (result) => {
@@ -564,129 +646,49 @@ export class SupplyWizardHandler {
           await this.sendSupplyEvent(ctx, result);
         },
       });
-      await this.handleSupplySuccess(ctx, chatId, updated, effectiveTask, supplyResult);
+      await this.handleSupplySuccess(ctx, chatId, state, task, supplyResult);
     } catch (error) {
       if (this.isAbortError(error)) {
         this.logger.log(`[${chatId}] обработка поставки отменена пользователем`);
         return;
       }
-      await this.view.updatePrompt(ctx, chatId, updated, 'Мастер завершён с ошибкой ❌');
+
+      this.logger.error(`processSupplyTask failed: ${this.describeError(error)}`);
+      await this.view.updatePrompt(ctx, chatId, state, 'Мастер завершён с ошибкой ❌');
       await ctx.reply(`❌ Ошибка при обработке: ${this.describeError(error)}`);
       await this.view.sendErrorDetails(ctx, this.extractErrorPayload(error));
       await this.notifyAdmin(ctx, 'wizard.supplyError', [this.describeError(error)]);
     } finally {
-      this.clearAbortController(chatId);
+      this.clearAbortController(chatId, task.taskId);
     }
   }
 
-  private async prepareAutoWarehouseSelection(
-    ctx: Context,
-    chatId: string,
-    state: SupplyWizardState,
-    task: OzonSupplyTask,
-    credentials: OzonCredentials,
-  ): Promise<SupplyWizardState | undefined> {
-    if (!state.autoWarehouseSelection) {
-      return state;
-    }
+  private async syncPendingTasks(chatId: string): Promise<SupplyWizardOrderSummary[]> {
+    const pending = await this.orderStore.listTaskSummaries(chatId);
+    this.wizardStore.update(chatId, (current) => {
+      if (!current) return undefined;
+      return {
+        ...current,
+        pendingTasks: pending,
+      };
+    });
+    return pending;
+  }
 
-    const clusterId = state.selectedClusterId;
-    const dropOffId = state.selectedDropOffId;
-    if (!clusterId || !dropOffId) {
-      await ctx.reply('Не удалось определить кластер или пункт сдачи для автоматического выбора склада.');
-      return undefined;
-    }
-
-    let items: Array<{ sku: number; quantity: number }>;
-    try {
-      items = this.buildDraftItems(task);
-    } catch (error) {
-      await ctx.reply(`Не удалось подготовить товары для черновика: ${this.describeError(error)}`);
-      return undefined;
-    }
-
-    let operationId = state.draftOperationId?.trim();
-    let draftId = state.draftId;
-
-    if (!operationId) {
-      try {
-        operationId = await this.ozonApi.createDraft(
-          {
-            clusterIds: [clusterId],
-            dropOffPointWarehouseId: dropOffId,
-            items,
-            type: 'CREATE_TYPE_CROSSDOCK',
-          },
-          credentials,
-        );
-      } catch (error) {
-        await ctx.reply(`Не удалось создать черновик для автоматического выбора склада: ${this.describeError(error)}`);
-        return undefined;
-      }
-    }
-
-    if (!operationId) {
-      await ctx.reply('Сервис Ozon вернул пустой operation_id при создании черновика.');
-      return undefined;
-    }
-
-    const pollResult = await this.pollDraftStatus(chatId, operationId, credentials);
-    if (pollResult.status !== 'success' || !pollResult.draftInfo) {
-      await ctx.reply('Не удалось получить данные черновика для автоматического выбора склада.');
-      return undefined;
-    }
-
-    draftId = pollResult.draftId ?? pollResult.draftInfo.draft_id ?? draftId;
-
-    const allOptions = this.view.mapDraftWarehouseOptions(pollResult.draftInfo);
-    const { limited } = this.view.limitDraftWarehouseOptions(allOptions);
-    const chosen = limited[0] ?? allOptions[0];
-
-    if (!chosen) {
-      await ctx.reply('Ozon не вернул доступных складов для выбранного кластера. Попробуйте выбрать склад вручную.');
-      return undefined;
-    }
-
-    task.warehouseId = chosen.warehouseId;
-    task.warehouseName = chosen.name ?? task.warehouseName;
-    task.draftOperationId = operationId;
-    task.draftId = draftId ?? task.draftId;
-
-    this.latestDraftWarehouses = limited;
-    this.latestDraftOperationId = operationId;
-    this.latestDraftId = draftId;
-
-    const updatedState =
-      this.wizardStore.update(chatId, (current) => {
-        if (!current) return undefined;
-        return {
-          ...current,
-          selectedWarehouseId: chosen.warehouseId,
-          selectedWarehouseName: chosen.name ?? String(chosen.warehouseId),
-          draftOperationId: operationId,
-          draftId: draftId,
-          draftStatus: 'success',
-          draftWarehouses: limited,
-          draftTimeslots: [],
-          selectedTimeslot: undefined,
-          autoWarehouseSelection: false,
-          tasks: (current.tasks ?? []).map((task) => ({
-            ...task,
-            warehouseId: chosen.warehouseId,
-            warehouseName: chosen.name ?? task.warehouseName,
-            draftOperationId: operationId,
-            draftId: draftId ?? task.draftId,
-            selectedTimeslot: undefined,
-          })),
-        };
-      }) ?? this.wizardStore.get(chatId) ?? state;
-
-    await this.notifyAdmin(ctx, 'wizard.autoWarehouseSelected', [
-      `warehouse: ${chosen.name ?? chosen.warehouseId}`,
-      `operation: ${operationId}`,
-    ]);
-
-    return updatedState;
+  private async cancelPendingTask(ctx: Context, chatId: string, taskId: string): Promise<void> {
+    this.abortActiveTask(chatId, taskId);
+    await this.orderStore.deleteByTaskId(chatId, taskId);
+    await this.syncPendingTasks(chatId);
+    this.wizardStore.update(chatId, (current) => {
+      if (!current) return undefined;
+      return {
+        ...current,
+        tasks: current.tasks?.filter((task) => task.taskId !== taskId),
+        selectedTaskId: current.selectedTaskId === taskId ? undefined : current.selectedTaskId,
+        autoWarehouseSelection: false,
+      };
+    });
+    await this.notifyAdmin(ctx, 'wizard.taskCancelled', [`task: ${taskId}`]);
   }
 
   async handleCallback(ctx: Context, data: string): Promise<void> {
@@ -710,6 +712,12 @@ export class SupplyWizardHandler {
         return;
       case 'orders':
         await this.onOrdersCallback(ctx, chatId, state, rest);
+        return;
+      case 'tasks':
+        await this.onTasksCallback(ctx, chatId, state, rest);
+        return;
+      case 'ready':
+        await this.onReadyCallback(ctx, chatId, state, rest);
         return;
       case 'clusterStart':
         await this.onClusterStart(ctx, chatId, state);
@@ -738,6 +746,7 @@ export class SupplyWizardHandler {
               .filter((taskId): taskId is string => Boolean(taskId))
               .map((taskId) => this.orderStore.deleteByTaskId(chatId, taskId)),
           );
+          await this.syncPendingTasks(chatId);
         }
         this.wizardStore.clear(chatId);
         await this.safeAnswerCbQuery(ctx, chatId, 'Мастер отменён');
@@ -921,12 +930,15 @@ export class SupplyWizardHandler {
     chatId: string,
     fallback: SupplyWizardState,
   ): Promise<void> {
+    await this.syncPendingTasks(chatId);
     const state =
       this.wizardStore.update(chatId, (current) => {
         if (!current) return undefined;
         return {
           ...current,
           stage: 'landing',
+          activeOrderId: undefined,
+          activeTaskId: undefined,
         };
       }) ?? fallback;
 
@@ -1015,6 +1027,135 @@ export class SupplyWizardHandler {
     }
   }
 
+  private async onTasksCallback(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    parts: string[],
+  ): Promise<void> {
+    const action = parts[0];
+
+    switch (action) {
+      case 'list': {
+        await this.syncPendingTasks(chatId);
+        const current = this.wizardStore.get(chatId) ?? state;
+        const updated =
+          this.wizardStore.update(chatId, (existing) => {
+            if (!existing) return undefined;
+            return {
+              ...existing,
+              stage: 'tasksList',
+              activeTaskId: undefined,
+            };
+          }) ?? current;
+
+        await this.view.updatePrompt(
+          ctx,
+          chatId,
+          updated,
+          this.view.renderTasksList(updated),
+          this.view.buildTasksListKeyboard(updated),
+        );
+        await this.safeAnswerCbQuery(ctx, chatId);
+        return;
+      }
+      case 'details': {
+        const taskId = parts[1];
+        await this.syncPendingTasks(chatId);
+        const current = this.wizardStore.get(chatId) ?? state;
+        if (!taskId) {
+          await this.safeAnswerCbQuery(ctx, chatId, 'Задача не найдена');
+          return;
+        }
+        const task = current.pendingTasks.find((item) => item.taskId === taskId || item.id === taskId);
+        if (!task) {
+          await this.safeAnswerCbQuery(ctx, chatId, 'Задача не найдена');
+          return;
+        }
+
+        const updated =
+          this.wizardStore.update(chatId, (existing) => {
+            if (!existing) return undefined;
+            return {
+              ...existing,
+              stage: 'taskDetails',
+              activeTaskId: taskId,
+            };
+          }) ?? current;
+
+        await this.view.updatePrompt(
+          ctx,
+          chatId,
+          updated,
+          this.view.renderTaskDetails(task),
+          this.view.buildTaskDetailsKeyboard(task),
+        );
+        await this.safeAnswerCbQuery(ctx, chatId);
+        return;
+      }
+      case 'cancel': {
+        const taskId = parts[1];
+        if (!taskId) {
+          await this.safeAnswerCbQuery(ctx, chatId, 'Задача не найдена');
+          return;
+        }
+
+        await this.cancelPendingTask(ctx, chatId, taskId);
+        await this.syncPendingTasks(chatId);
+        const current = this.wizardStore.get(chatId) ?? state;
+        if (current.pendingTasks.length) {
+          const updated =
+            this.wizardStore.update(chatId, (existing) => {
+              if (!existing) return undefined;
+              return {
+                ...existing,
+                stage: 'tasksList',
+                activeTaskId: undefined,
+              };
+            }) ?? current;
+
+          await this.view.updatePrompt(
+            ctx,
+            chatId,
+            updated,
+            this.view.renderTasksList(updated),
+            this.view.buildTasksListKeyboard(updated),
+          );
+        } else {
+          await this.showLanding(ctx, chatId, current);
+        }
+        await this.safeAnswerCbQuery(ctx, chatId, 'Задача отменена');
+        return;
+      }
+      case 'back':
+        await this.showLanding(ctx, chatId, state);
+        await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись назад');
+        return;
+      default:
+        await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
+        return;
+    }
+  }
+
+  private async onReadyCallback(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    parts: string[],
+  ): Promise<void> {
+    const action = parts[0];
+
+    switch (action) {
+      case 'select': {
+        await this.safeAnswerCbQuery(ctx, chatId, 'Готовность выбирается автоматически');
+        return;
+      }
+      default:
+        await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
+        return;
+    }
+  }
+
   private async showOrdersList(
     ctx: Context,
     chatId: string,
@@ -1084,7 +1225,12 @@ export class SupplyWizardHandler {
   ): Promise<void> {
     const operationId = result?.operationId ?? this.extractOperationIdFromMessage(result?.message) ?? task.draftOperationId ?? `draft-${task.draftId ?? task.taskId}`;
     const arrival = state.selectedTimeslot?.label ?? this.describeTimeslot(task.selectedTimeslot);
-    const warehouse = state.selectedWarehouseName ?? state.selectedDropOffName ?? state.selectedWarehouseId?.toString();
+    const warehouse =
+      state.selectedWarehouseName ??
+      task.warehouseName ??
+      (typeof state.selectedWarehouseId === 'number' ? `Склад ${state.selectedWarehouseId}` : undefined) ??
+      state.selectedDropOffName ??
+      state.selectedDropOffId?.toString();
 
     const items: SupplyWizardSupplyItem[] = task.items.map((item) => ({
       article: item.article,
@@ -1138,6 +1284,8 @@ export class SupplyWizardHandler {
       items,
       task,
     });
+
+    await this.syncPendingTasks(chatId);
 
     const refreshed = this.wizardStore.get(chatId) ?? updated;
     const successText = this.view.renderSupplySuccess(entry);
@@ -1510,7 +1658,8 @@ export class SupplyWizardHandler {
 
     if (hasDropOffSelection) {
       await this.safeAnswerCbQuery(ctx, chatId, 'Склад выбран');
-      await this.startSupplyProcessing(ctx, chatId, updated, 0);
+
+      await this.startSupplyProcessing(ctx, chatId, updated, this.readyDaysMin);
       return;
     }
 
@@ -1704,23 +1853,27 @@ export class SupplyWizardHandler {
     chatId: string,
     state: SupplyWizardState,
     option: SupplyWizardDraftWarehouseOption,
-  ): Promise<void> {
+    options: { skipReadyPrompt?: boolean } = {},
+  ): Promise<SupplyWizardState | undefined> {
+    const skipReadyPrompt = options.skipReadyPrompt ?? false;
     const summaryLines = this.view.describeWarehouseSelection(option, state);
 
     await this.notifyAdmin(ctx, 'wizard.warehouseSelected', summaryLines);
 
-    await this.view.updatePrompt(
-      ctx,
-      chatId,
-      state,
-      [...summaryLines, '', 'Получаю доступные таймслоты...'].join('\n'),
-      this.view.withCancel(),
-    );
+    if (!skipReadyPrompt) {
+      await this.view.updatePrompt(
+        ctx,
+        chatId,
+        state,
+        [...summaryLines, '', 'Получаю доступные таймслоты...'].join('\n'),
+        this.view.withCancel(),
+      );
+    }
 
     const credentials = await this.resolveCredentials(chatId);
     if (!credentials) {
       await ctx.reply('🔐 Сначала сохраните ключи через /start.');
-      return;
+      return undefined;
     }
 
     const draftId = state.draftId ?? this.latestDraftId;
@@ -1731,7 +1884,7 @@ export class SupplyWizardHandler {
       if (freshState) {
         await this.ensureDraftCreated(ctx, chatId, freshState);
       }
-      return;
+      return undefined;
     }
 
     let timeslotOptions: SupplyWizardTimeslotOption[] = [];
@@ -1765,7 +1918,7 @@ export class SupplyWizardHandler {
           this.view.buildDraftWarehouseKeyboard(rollback),
         );
       }
-      return;
+      return undefined;
     }
 
     const { limited, truncated } = this.view.limitTimeslotOptions(timeslotOptions);
@@ -1801,54 +1954,37 @@ export class SupplyWizardHandler {
     });
 
     if (!stored) {
-      return;
+      return undefined;
     }
 
     if (!limited.length) {
-      await this.view.updatePrompt(
-        ctx,
-        chatId,
-        stored,
-        [
-          ...summaryLines,
-          '',
-          'Свободных таймслотов для этого склада нет.',
-          'Выберите другой склад или попробуйте позже.',
-        ].join('\n'),
-        this.view.buildDraftWarehouseKeyboard(stored),
-      );
-      return;
+      const fallbackText = [
+        ...summaryLines,
+        '',
+        'Свободных таймслотов для этого склада нет.',
+        'Выберите другой склад или попробуйте позже.',
+      ].join('\n');
+      if (skipReadyPrompt) {
+        await ctx.reply(fallbackText);
+      } else {
+        await this.view.updatePrompt(
+          ctx,
+          chatId,
+          stored,
+          fallbackText,
+          this.view.buildDraftWarehouseKeyboard(stored),
+        );
+      }
+      return undefined;
     }
 
     const selectedTimeslot = stored.selectedTimeslot;
-
-    const promptLines = [
-      ...summaryLines,
-      '',
-      'Доступные таймслоты:',
-      ...this.view.formatTimeslotSummary(limited),
-    ];
-    if (truncated) {
-      promptLines.push(`… Показаны первые ${limited.length} из ${timeslotOptions.length} вариантов.`);
-    }
-    if (selectedTimeslot) {
-      promptLines.push('', `Выбрали первый таймслот: ${selectedTimeslot.label}.`);
-    }
-    promptLines.push('', 'Начинаю оформление поставки...');
-
-    await this.view.updatePrompt(
-      ctx,
-      chatId,
-      stored,
-      promptLines.join('\n'),
-      this.view.withCancel(),
-    );
 
     if (selectedTimeslot) {
       await this.notifyAdmin(ctx, 'wizard.timeslotSelected', [`timeslot: ${selectedTimeslot.label}`]);
     }
 
-    await this.startSupplyProcessing(ctx, chatId, stored, 0);
+    return stored;
   }
 
   private async onTimeslotSelect(
@@ -1873,31 +2009,8 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const updated = this.wizardStore.update(chatId, (current) => {
-      if (!current) return undefined;
-      const tasks = (current.tasks ?? []).map((task) => ({
-        ...task,
-        selectedTimeslot: option.data,
-      }));
-
-      return {
-        ...current,
-        stage: 'awaitReadyDays',
-        selectedTimeslot: option,
-        draftTimeslots: current.draftTimeslots,
-        tasks,
-      };
-    });
-
-    if (!updated) {
-      await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
-      return;
-    }
-
     await this.notifyAdmin(ctx, 'wizard.timeslotSelected', [`timeslot: ${option.label}`]);
-
-    await this.safeAnswerCbQuery(ctx, chatId, 'Таймслот выбран');
-    await this.startSupplyProcessing(ctx, chatId, updated, 0);
+    await this.safeAnswerCbQuery(ctx, chatId, 'Таймслот выбирается автоматически');
   }
 
   private async fetchTimeslotsForWarehouse(
@@ -1938,8 +2051,10 @@ export class SupplyWizardHandler {
 
   private computeTimeslotWindow(): { from: string; to: string } {
     const now = new Date();
-    const from = this.toOzonIso(now);
-    const to = this.toOzonIso(this.addUtcDays(now, 28));
+    const start = this.addUtcDays(now, this.readyDaysMin);
+    const end = this.addUtcDays(now, this.readyDaysMax);
+    const from = this.toOzonIso(start);
+    const to = this.toOzonIso(end);
     return { from, to };
   }
 
@@ -2707,25 +2822,36 @@ export class SupplyWizardHandler {
     return undefined;
   }
 
-  private registerAbortController(chatId: string): AbortController {
+  private registerAbortController(chatId: string, taskId: string): AbortController {
     const existing = this.taskAbortControllers.get(chatId);
     if (existing) {
-      existing.abort();
+      existing.controller.abort();
     }
     const controller = new AbortController();
-    this.taskAbortControllers.set(chatId, controller);
+    this.taskAbortControllers.set(chatId, { controller, taskId });
     return controller;
   }
 
-  private abortActiveTask(chatId: string): void {
-    const controller = this.taskAbortControllers.get(chatId);
-    if (controller) {
-      controller.abort();
-      this.taskAbortControllers.delete(chatId);
+  private abortActiveTask(chatId: string, taskId?: string): void {
+    const entry = this.taskAbortControllers.get(chatId);
+    if (!entry) {
+      return;
     }
+    if (taskId && entry.taskId !== taskId) {
+      return;
+    }
+    entry.controller.abort();
+    this.taskAbortControllers.delete(chatId);
   }
 
-  private clearAbortController(chatId: string): void {
+  private clearAbortController(chatId: string, taskId?: string): void {
+    const entry = this.taskAbortControllers.get(chatId);
+    if (!entry) {
+      return;
+    }
+    if (taskId && entry.taskId !== taskId) {
+      return;
+    }
     this.taskAbortControllers.delete(chatId);
   }
 

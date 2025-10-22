@@ -10,7 +10,7 @@ export interface SupplyOrderTaskPayload {
   task: OzonSupplyTask;
   clusterId: number;
   clusterName?: string;
-  warehouseId: number;
+  warehouseId?: number;
   warehouseName?: string;
   dropOffId: number;
   dropOffName?: string;
@@ -32,6 +32,7 @@ export interface SupplyOrderCompletionPayload {
 
 export interface SupplyOrderQuery {
   status?: SupplyOrderStatus;
+  chatId?: string;
 }
 
 @Injectable()
@@ -56,6 +57,9 @@ export class SupplyOrderStore {
     const where: Partial<SupplyOrderEntity> = {};
     if (query.status) {
       where.status = query.status;
+    }
+    if (query.chatId) {
+      where.chatId = query.chatId;
     }
     return this.repository.find({ where, order: { createdAt: 'ASC' } });
   }
@@ -85,7 +89,11 @@ export class SupplyOrderStore {
     entity.dropOffName = payload.dropOffName;
     entity.readyInDays = payload.readyInDays;
     entity.arrival = payload.timeslotLabel ?? entity.arrival;
-    entity.warehouse = payload.warehouseName ?? payload.dropOffName ?? entity.warehouse;
+    if (payload.warehouseName) {
+      entity.warehouse = payload.warehouseName;
+    } else if (!entity.warehouse && payload.dropOffName) {
+      entity.warehouse = payload.dropOffName;
+    }
     entity.taskPayload = this.cloneTask(payload.task);
     entity.items = this.cloneItems(payload.task.items);
     entity.timeslotFrom = payload.task.selectedTimeslot?.from_in_timezone;
@@ -143,6 +151,11 @@ export class SupplyOrderStore {
 
   async deleteByTaskId(chatId: string, taskId: string): Promise<void> {
     await this.repository.delete({ chatId, taskId });
+  }
+
+  async listTaskSummaries(chatId: string): Promise<SupplyWizardOrderSummary[]> {
+    const tasks = await this.listTasks({ chatId, status: 'task' });
+    return tasks.map((task) => this.mapEntityToSummary(task));
   }
 
   private mapEntityToSummary(record: SupplyOrderEntity): SupplyWizardOrderSummary {
