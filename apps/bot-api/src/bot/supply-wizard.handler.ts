@@ -1684,6 +1684,32 @@ export class SupplyWizardHandler {
       return;
     }
 
+    if (action === 'backToClusters') {
+      const updated = this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        if (current.stage !== 'warehouseSelect') {
+          return current;
+        }
+        return {
+          ...current,
+          stage: 'clusterSelect',
+          warehouseSearchQuery: undefined,
+          warehousePage: 0,
+        };
+      }) ?? state;
+
+      const promptLines = ['Выберите кластер, чтобы продолжить.'];
+      await this.view.updatePrompt(
+        ctx,
+        chatId,
+        updated,
+        promptLines.join('\n'),
+        this.view.buildClusterKeyboard(updated),
+      );
+      await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись к выбору клaster');
+      return;
+    }
+
     const selectedClusterId = state.selectedClusterId;
     if (!selectedClusterId) {
       await this.safeAnswerCbQuery(ctx, chatId, 'Сначала выберите кластер');
@@ -1971,6 +1997,7 @@ export class SupplyWizardHandler {
       hasNext: view.hasNext,
       includeAuto: view.total > 0,
       searchActive: Boolean(view.searchQuery),
+      includeBackToCluster: true,
     });
 
     await this.view.updatePrompt(ctx, chatId, nextState, prompt, keyboard);

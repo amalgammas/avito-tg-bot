@@ -549,6 +549,7 @@ export class SupplyWizardViewService {
     hasNext: boolean;
     includeAuto: boolean;
     searchActive: boolean;
+    includeBackToCluster?: boolean;
   }): Array<Array<{ text: string; callback_data: string }>> {
     const rows: Array<Array<{ text: string; callback_data: string }>> = [];
 
@@ -584,6 +585,15 @@ export class SupplyWizardViewService {
         callback_data: params.hasNext ? 'wizard:warehouse:page:next' : 'wizard:warehouse:noop',
       });
       rows.push(navRow);
+    }
+
+    if (params.includeBackToCluster) {
+      rows.push([
+        {
+          text: '← Выбрать другой кластер',
+          callback_data: 'wizard:warehouse:backToClusters',
+        },
+      ]);
     }
 
     return this.withCancel(rows);
