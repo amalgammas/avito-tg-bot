@@ -1,19 +1,47 @@
-# Repository Guidelines
+# Project Playbook
 
-## Project Structure & Module Organization
-The NestJS app lives in `apps/bot-api/src`, split into feature-focused folders: `bot` for Telegram handlers, `config` for configuration providers, `health` for readiness endpoints, and `ozon` for marketplace integrations. Entrypoint code sits in `main.ts` and is wired by `app.module.ts`. Build artifacts land in `dist/`; do not edit anything there. Shared infrastructure such as the container recipe is under `infra/`. Use `@bot/*` path aliases (configured in `tsconfig.json`) when importing across modules.
+Документ для разработчиков: что важно знать о кодовой базе, мастере поставок и рабочем процессе.
 
-## Build, Test, and Development Commands
-Run `yarn inst-deps` once to install dependencies. Use `yarn start:dev` for a live TypeScript process with NestJS hot reload. Execute `yarn build` to emit production JavaScript into `dist/`, then start it with `yarn start`. These commands assume environment variables from `.env` are loaded (see below).
+## Архитектура
+- **Приложение NestJS** живёт в `apps/bot-api/src`.
+- **Бот** (`bot/`): Telegram-обработчики, мастер поставки, хранилища состояния и данных (TypeORM + SQLite).
+- **Интеграции** (`config/`, `ozon/`): `OzonApiService`, сервисы для черновиков, таймслотов и фоновой обработки.
+- **Хранилище** (`storage/`): TypeORM-сущности `user_credentials`, `supply_orders` и соответствующие store‑классы.
+- **Инфраструктура**: Dockerfile в `infra/`, CI в `.github/workflows/ci.yml`.
 
-## Coding Style & Naming Conventions
-Code is TypeScript with strict compiler settings. Follow the existing two-space indentation and keep lines concise. Name files and providers in kebab-case (`ozon-supply.service.ts`) and classes in PascalCase (`OzonSupplyService`). Group providers and modules by domain to mirror the folder layout. Maintain lightweight module-level comments only when context is non-obvious.
+## Интерактивный мастер
+1. **Авторизация** — `/ozon_auth` либо ввод Client ID / API Key в мастере. Ключи лежат в SQLite и маскируются в ответах.
+2. **Загрузка файла** — Excel/Google Sheet. Парсер приводит задачи к `OzonSupplyTask`.
+3. **Поиск drop-off** — текстовый поиск с ответами из `/v1/warehouse/fbo/list`.
+4. **Выбор кластера** — после клика запрашиваем `/v1/cluster/list` c `cluster_ids=[id]`.
+5. **Выбор склада** — клавиатура с пагинацией (10 на страницу), стрелки, сброс поиска, возврат к списку кластеров.
+6. **Таймслоты** — создаём/переиспользуем черновик, выбираем первый доступный таймслот.
+7. **Готовность** — клавиатура + ручной ввод (0, 2–28 дней). После выбора задача сохраняется в `supply_orders`, запускается `processSupplyTask`.
+8. **Фоновая обработка** — `SupplyTaskRunnerService` продолжает поллинг API, создаёт поставку, отправляет уведомления админам.
 
-## Testing Guidelines
-A Jest harness is not checked in yet; when adding tests, scaffold Nest’s default Jest setup and expose it as `yarn test`. Place `*.spec.ts` files alongside the code they cover and target isolated providers or services. Cover new logic and critical error paths before merging. Until automated tests exist, validate flows by running `yarn start:dev` against a staging bot token.
+## Кодстайл и соглашения
+- TypeScript, строгий компилятор, 2 пробела.
+- Классы в PascalCase, файлы/провайдеры в kebab-case.
+- Все запросы в Ozon проходят через `OzonApiService`. Добавляя новые эндпоинты, расширяйте сервис, а не вызывайте `axios` напрямую.
+- Бизнес-логика мастера живёт в `SupplyWizardHandler`. Перед изменениями продумайте влияния на состояние (`SupplyWizardStore`) и клавиатуры (`SupplyWizardViewService`).
+- Любые пользовательские секреты маскируем, храним в базе только в зашифрованном/минимальном виде.
 
-## Commit & Pull Request Guidelines
-Commit history shows short imperative messages with optional issue tags (`create-project#3`). Continue that format: start with a verb, append an issue handle when applicable, and keep scope focused. For pull requests, describe the motivation, enumerate key changes, and link tracking tickets. Include configuration notes or screenshots if the change affects bot behavior or external integrations.
+## Документация
+- README описывает текущий сценарий мастера и команды бота. Обновляйте его при добавлении шагов или команд.
+- Этот файл (AGENTS.md) содержит быстрый план для инженеров. Держите его в актуальном состоянии.
+- Если вносите изменения в мастер, синхронизируйте help-сообщение (`BotUpdate.helpMessage`).
 
-## Configuration & Secrets
-Copy `.env.example` to `.env` and fill required keys (bot token, Ozon credentials, HTTP port). Never commit secrets. When adding new variables, update the example file and document defaults in the PR description. Prefer injecting configuration through Nest’s `ConfigService` rather than reading from `process.env` directly.
+## Процесс разработки
+1. `yarn install`, `yarn start:dev` — бот и SQLite поднимутся локально.
+2. Вносите изменения (предпочтительно TDD для новых сервисов). Автотестов нет — добавляйте unit/e2e при изменениях.
+3. Перед пушем — `yarn build` и краткая проверка мастера (загрузка файла, выбор drop-off/склада, отмена задачи, повторный запуск).
+4. Коммиты — короткие, в повелительном наклонении. PR: мотивация, список изменений, инструкции по проверке.
+
+## Проверочный чек-лист перед мерджем
+- [ ] README отражает новый сценарий.
+- [ ] Help-сообщение и клавиатуры соответствуют коду.
+- [ ] `yarn build` без ошибок.
+- [ ] При отмене задачи нет зависших поллингов.
+- [ ] Уведомления админам отправляются в ключевых точках (auth, draft, supply).
+
+Следуя этому Playbook, поддерживать бота и наращивать функциональность значительно проще. Удачи! 🚀
