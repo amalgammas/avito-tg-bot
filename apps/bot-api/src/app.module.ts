@@ -54,13 +54,15 @@ import { SupplyOrderEntity } from './storage/entities/supply-order.entity';
 
                 const nodeEnv = config.get<string>('nodeEnv') ?? 'development';
 
-                if (nodeEnv === 'production') {
+                const useWebhook = config.get<boolean>('telegram.useWebhook');
+
+                if (nodeEnv === 'production' && useWebhook !== false) {
                     const webhookDomain = config.get<string>('telegram.webhookDomain');
                     const webhookPath = config.get<string>('telegram.webhookPath');
 
                     if (!webhookDomain || !webhookPath) {
                         throw new Error(
-                            'WEBHOOK_DOMAIN and WEBHOOK_PATH must be configured in production',
+                            'WEBHOOK_DOMAIN and WEBHOOK_PATH must be configured in production when telegram.useWebhook != false',
                         );
                     }
 
