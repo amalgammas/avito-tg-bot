@@ -436,7 +436,87 @@ export class SupplyWizardHandler {
       return;
     }
 
-    await ctx.reply('Готовность к отгрузке теперь выбирается автоматически — ждать ничего не нужно.');
+    const normalizedText = text.trim().replace(',', '.');
+    const parsed = Number(normalizedText);
+    if (!Number.isFinite(parsed)) {
+      await ctx.reply('Введите число: 0 или значение от 2 до 28.');
+      return;
+    }
+
+    const readyInDays = Math.floor(parsed);
+    const handled = await this.applyReadyDays(ctx, chatId, state, readyInDays);
+    if (!handled) {
+      await ctx.reply('Используйте 0 для первого доступного слота или число от 2 до 28.');
+    }
+  }
+
+  private normalizeReadyDaysValue(value: number): number | undefined {
+    if (!Number.isFinite(value)) {
+      return undefined;
+    }
+    const rounded = Math.floor(value);
+    if (rounded === 0) {
+      return 0;
+    }
+    if (rounded < this.readyDaysMin || rounded > this.readyDaysMax) {
+      return undefined;
+    }
+    return rounded;
+  }
+
+  private async applyReadyDays(
+    ctx: Context,
+    chatId: string,
+    fallback: SupplyWizardState,
+    value: number,
+  ): Promise<boolean> {
+    const state = this.wizardStore.get(chatId) ?? fallback;
+    if (!state || state.stage !== 'awaitReadyDays') {
+      return false;
+    }
+
+    const normalized = this.normalizeReadyDaysValue(value);
+    if (normalized === undefined) {
+      return false;
+    }
+
+    await this.startSupplyProcessing(ctx, chatId, state, normalized);
+    return true;
+  }
+
+  private async promptReadyDays(
+    ctx: Context,
+    chatId: string,
+    fallback: SupplyWizardState,
+    options: { summaryLines?: string[] } = {},
+  ): Promise<void> {
+    const updated =
+      this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        return {
+          ...current,
+          stage: 'awaitReadyDays',
+          readyInDays: undefined,
+          warehouseSearchQuery: undefined,
+          warehousePage: 0,
+        };
+      }) ?? fallback;
+
+    const summarySource = options.summaryLines && options.summaryLines.length
+      ? options.summaryLines
+      : this.buildReadyContext(updated);
+    const summary = summarySource.filter((line): line is string => Boolean(line && line.length));
+    const textLines = summary.length
+      ? [...summary, '', this.view.renderReadyDaysPrompt()]
+      : [this.view.renderReadyDaysPrompt()];
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      updated,
+      textLines.join('\n'),
+      this.view.buildReadyDaysKeyboard(),
+    );
   }
 
   private buildReadyContext(state: SupplyWizardState): string[] {
@@ -1151,7 +1231,15 @@ export class SupplyWizardHandler {
 
     switch (action) {
       case 'select': {
-        await this.safeAnswerCbQuery(ctx, chatId, 'Готовность выбирается автоматически');
+        const value = Number(parts[1]);
+        const handled = await this.applyReadyDays(ctx, chatId, state, value);
+        await this.safeAnswerCbQuery(ctx, chatId, handled ? 'Готовность учтена' : 'Некорректное значение');
+        if (!handled) {
+          const latest = this.wizardStore.get(chatId) ?? state;
+          if (latest?.stage === 'awaitReadyDays') {
+            await this.promptReadyDays(ctx, chatId, latest);
+          }
+        }
         return;
       }
       default:
@@ -1706,7 +1794,7 @@ export class SupplyWizardHandler {
         promptLines.join('\n'),
         this.view.buildClusterKeyboard(updated),
       );
-      await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись к выбору клaster');
+      await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись к выбору кластера');
       return;
     }
 
@@ -1777,7 +1865,8 @@ export class SupplyWizardHandler {
 
     if (hasDropOffSelection) {
       await this.safeAnswerCbQuery(ctx, chatId, 'Склад выбран');
-      await this.startSupplyProcessing(ctx, chatId, updated, this.readyDaysMin);
+      const summary = this.buildReadyContext(updated);
+      await this.promptReadyDays(ctx, chatId, updated, { summaryLines: summary });
       return;
     }
 
@@ -2231,6 +2320,25 @@ export class SupplyWizardHandler {
       await this.notifyAdmin(ctx, 'wizard.timeslotSelected', [`timeslot: ${selectedTimeslot.label}`]);
     }
 
+    const readySummary = [
+      ...summaryLines,
+      '',
+      'Доступные таймслоты:',
+      ...this.view.formatTimeslotSummary(limited),
+    ];
+    if (truncated) {
+      readySummary.push(`… Показаны первые ${limited.length} из ${timeslotOptions.length} вариантов.`);
+    }
+    if (selectedTimeslot) {
+      readySummary.push('', `Выбрали таймслот: ${selectedTimeslot.label}.`);
+    }
+
+    if (skipReadyPrompt) {
+      await this.startSupplyProcessing(ctx, chatId, stored, this.readyDaysMin);
+      return stored;
+    }
+
+    await this.promptReadyDays(ctx, chatId, stored, { summaryLines: readySummary });
     return stored;
   }
 
@@ -2256,8 +2364,36 @@ export class SupplyWizardHandler {
       return;
     }
 
+    const updated = this.wizardStore.update(chatId, (current) => {
+      if (!current) return undefined;
+      const tasks = (current.tasks ?? []).map((task) => ({
+        ...task,
+        selectedTimeslot: option.data,
+      }));
+
+      return {
+        ...current,
+        stage: 'awaitReadyDays',
+        selectedTimeslot: option,
+        draftTimeslots: current.draftTimeslots,
+        tasks,
+      };
+    });
+
+    if (!updated) {
+      await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
+      return;
+    }
+
     await this.notifyAdmin(ctx, 'wizard.timeslotSelected', [`timeslot: ${option.label}`]);
-    await this.safeAnswerCbQuery(ctx, chatId, 'Таймслот выбирается автоматически');
+    await this.safeAnswerCbQuery(ctx, chatId, 'Таймслот выбран');
+
+    const summary = [
+      ...this.buildReadyContext(updated),
+      '',
+      `Выбрали таймслот: ${option.label}.`,
+    ];
+    await this.promptReadyDays(ctx, chatId, updated, { summaryLines: summary });
   }
 
   private async fetchTimeslotsForWarehouse(

@@ -133,6 +133,37 @@ export class SupplyWizardViewService {
     return this.withNavigation([], { back: 'wizard:landing:back' });
   }
 
+  renderReadyDaysPrompt(): string {
+    return [
+      'Через сколько дней будете готовы к отгрузке?',
+      '',
+      'Выберите вариант на клавиатуре или введите число от 0 до 28 (0 — готов к отгрузке день в день).',
+      'По умолчанию бот использует 2 дня.',
+    ].join('\n');
+  }
+
+  buildReadyDaysKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+    const rows: Array<Array<{ text: string; callback_data: string }>> = [
+      [
+        { text: '0 дней', callback_data: 'wizard:ready:select:0' },
+        { text: '1 день', callback_data: 'wizard:ready:select:0' },
+        { text: '2 дня', callback_data: 'wizard:ready:select:2' },
+      ],
+      [
+        { text: '3 дня', callback_data: 'wizard:ready:select:3' },
+        { text: '5 дней', callback_data: 'wizard:ready:select:5' },
+        { text: '7 дней', callback_data: 'wizard:ready:select:7' },
+      ],
+      [
+        { text: '14 дней', callback_data: 'wizard:ready:select:14' },
+        { text: '21 день', callback_data: 'wizard:ready:select:21' },
+        { text: '28 дней', callback_data: 'wizard:ready:select:28' },
+      ],
+    ];
+
+    return this.withCancel(rows);
+  }
+
   renderOrdersList(state: SupplyWizardState): string {
     if (!state.orders.length) {
       return 'Список поставок пуст. Создайте новую поставку.';
