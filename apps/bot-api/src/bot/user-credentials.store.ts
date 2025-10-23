@@ -49,8 +49,9 @@ export class UserCredentialsStore {
     return Boolean(this.toCredentials(entity));
   }
 
-  async entries(): Promise<Array<{ chatId: string; credentials: UserOzonCredentials }>> {
-    const records = await this.repository.find({ order: { verifiedAt: 'DESC' } });
+  async entries(chatId?: string): Promise<Array<{ chatId: string; credentials: UserOzonCredentials }>> {
+    const where = chatId ? { chatId } : undefined;
+    const records = await this.repository.find({ where, order: { verifiedAt: 'DESC' } });
 
     return records.reduce<Array<{ chatId: string; credentials: UserOzonCredentials }>>((acc, record) => {
       const credentials = this.toCredentials(record);

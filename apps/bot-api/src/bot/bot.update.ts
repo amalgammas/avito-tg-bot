@@ -103,19 +103,27 @@ export class BotUpdate {
 
   @Command('ozon_keys')
   async onOzonKeys(@Ctx() ctx: Context): Promise<void> {
-    const entries = await this.credentialsStore.entries();
-
-    if (!entries.length) {
-      await ctx.reply('Хранилище пустое. Пройдите авторизацию через /start.');
+    const chatId = this.extractChatId(ctx);
+    if (!chatId) {
+      await ctx.reply('Не удалось определить чат. Используйте приватный диалог с ботом.');
       return;
     }
 
-    const lines = entries.map(({ chatId, credentials }) => {
-      const updated = credentials.verifiedAt.toISOString();
-      return `• chat_id: ${chatId},\n• client_id: ${this.maskValue(credentials.clientId)},\n• api_key: ${this.maskValue(credentials.apiKey)},\n• updated: ${updated}`;
-    });
+    const credentials = await this.credentialsStore.get(chatId);
+    if (!credentials) {
+      await ctx.reply('Сохранённых ключей нет. Пройдите авторизацию через /start.');
+      return;
+    }
 
-    await ctx.reply(['Сохранённые ключи (маскированы):', ...lines].join('\n'));
+    const updated = credentials.verifiedAt.toISOString();
+    const lines = [
+      'Сохранённые ключи (маскированы):',
+      `• client_id: ${this.maskValue(credentials.clientId)}`,
+      `• api_key: ${this.maskValue(credentials.apiKey)}`,
+      `• обновлено: ${updated}`,
+    ];
+
+    await ctx.reply(lines.join('\n'));
   }
 
   @On('document')
