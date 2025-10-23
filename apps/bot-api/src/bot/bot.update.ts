@@ -104,6 +104,7 @@ export class BotUpdate {
   @Command('ozon_keys')
   async onOzonKeys(@Ctx() ctx: Context): Promise<void> {
     const entries = await this.credentialsStore.entries();
+
     if (!entries.length) {
       await ctx.reply('Хранилище пустое. Пройдите авторизацию через /start.');
       return;
@@ -147,6 +148,11 @@ export class BotUpdate {
 
     if (state.stage === 'authClientId') {
       await this.wizard.handleAuthClientIdInput(ctx, chatId, state, text);
+      return;
+    }
+
+    if (state.stage === 'warehouseSelect') {
+      await this.wizard.handleWarehouseSearch(ctx, chatId, state, text);
       return;
     }
 

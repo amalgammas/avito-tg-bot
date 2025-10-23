@@ -128,6 +128,8 @@ export interface SupplyWizardState {
   activeTaskId?: string;
   createdAt: number;
   autoWarehouseSelection?: boolean;
+  warehouseSearchQuery?: string;
+  warehousePage?: number;
 }
 
 @Injectable()
@@ -167,6 +169,8 @@ export class SupplyWizardStore {
       createdAt: Date.now(),
       promptMessageId: undefined,
       autoWarehouseSelection: false,
+      warehouseSearchQuery: undefined,
+      warehousePage: 0,
     };
     this.storage.set(chatId, state);
     return state;
@@ -210,6 +214,8 @@ export class SupplyWizardStore {
         items: task.items.map((item) => ({ ...item })),
       })),
       activeTaskId: state.activeTaskId,
+      warehouseSearchQuery: state.warehouseSearchQuery,
+      warehousePage: state.warehousePage,
     };
   }
 
@@ -286,6 +292,8 @@ export class SupplyWizardStore {
       })),
       activeOrderId: next.activeOrderId,
       createdAt: next.createdAt ?? current?.createdAt ?? Date.now(),
+      warehouseSearchQuery: next.warehouseSearchQuery ?? undefined,
+      warehousePage: typeof next.warehousePage === 'number' ? next.warehousePage : current?.warehousePage ?? 0,
     };
     this.storage.set(chatId, normalized);
     return normalized;

@@ -344,7 +344,10 @@ export class OzonSupplyService {
     task: OzonSupplyTask,
     credentials: OzonCredentials | undefined,
     dropOffWarehouseId: number,
+    abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult> {
+    this.ensureNotAborted(abortSignal);
+
     if (!credentials && !this.ozonApiDefaultCredentialsAvailable()) {
       return { task, event: 'noCredentials', message: 'Не заданы ключи Ozon' };
     }
@@ -356,20 +359,23 @@ export class OzonSupplyService {
     const creds = credentials ?? this.ozonApiDefaultCredentials();
 
     if (task.draftOperationId) {
-      return this.handleExistingDraft(task, creds);
+      return this.handleExistingDraft(task, creds, abortSignal);
     }
 
-    return this.createDraft(task, creds, dropOffWarehouseId);
+    return this.createDraft(task, creds, dropOffWarehouseId, abortSignal);
   }
 
   private async handleExistingDraft(
     task: OzonSupplyTask,
     credentials: OzonCredentials,
+    abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult> {
+    this.ensureNotAborted(abortSignal);
     const info = await this.ozonApi.getDraftInfo(task.draftOperationId, credentials);
+    this.ensureNotAborted(abortSignal);
 
     if (info.status === 'CALCULATION_STATUS_SUCCESS') {
-    const warehouseChoice = this.resolveWarehouseFromDraft(info, task.warehouseId, task.warehouseName);
+      const warehouseChoice = this.resolveWarehouseFromDraft(info, task.warehouseId, task.warehouseName);
       if (!warehouseChoice) {
         return {
           task,
@@ -387,7 +393,8 @@ export class OzonSupplyService {
       task.warehouseName = selectedWarehouseName ?? task.warehouseName;
       task.draftId = info.draft_id ?? task.draftId;
       this.rememberDraft(task, info.draft_id ?? task.draftId);
-      const timeslot = await this.pickTimeslot(task, credentials);
+      this.ensureNotAborted(abortSignal);
+      const timeslot = await this.pickTimeslot(task, credentials, abortSignal);
 
       if (!timeslot) {
         return { task, event: 'timeslotMissing', message: 'Свободных таймслотов нет' };
@@ -445,7 +452,9 @@ export class OzonSupplyService {
     task: OzonSupplyTask,
     credentials: OzonCredentials,
     dropOffWarehouseId: number,
+    abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult> {
+    this.ensureNotAborted(abortSignal);
     const cacheKey = this.getTaskHash(task);
     const cached = this.draftCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
@@ -458,7 +467,9 @@ export class OzonSupplyService {
       };
     }
 
+    this.ensureNotAborted(abortSignal);
     const ozonItems = await this.buildOzonItems(task, credentials);
+    this.ensureNotAborted(abortSignal);
 
     const operationId = await this.ozonApi.createDraft(
       {
@@ -469,6 +480,7 @@ export class OzonSupplyService {
       },
       credentials,
     );
+    this.ensureNotAborted(abortSignal);
 
     if (!operationId) {
       return { task, event: 'error', message: 'Черновик не создан: пустой operation_id' };
@@ -487,6 +499,7 @@ export class OzonSupplyService {
   private async pickTimeslot(
     task: OzonSupplyTask,
     credentials: OzonCredentials,
+    abortSignal?: AbortSignal,
   ): Promise<OzonDraftTimeslot | undefined> {
     if (task.selectedTimeslot) {
       return task.selectedTimeslot;
@@ -509,6 +522,7 @@ export class OzonSupplyService {
       },
       credentials,
     );
+    this.ensureNotAborted(abortSignal);
 
     for (const warehouse of response.drop_off_warehouse_timeslots ?? []) {
       for (const day of warehouse.days ?? []) {

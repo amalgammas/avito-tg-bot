@@ -22,6 +22,7 @@ import {
   SupplyWizardState,
   SupplyWizardDropOffOption,
   SupplyWizardDraftWarehouseOption,
+  SupplyWizardWarehouseOption,
   SupplyWizardTimeslotOption,
   SupplyWizardOrderSummary,
   SupplyWizardSupplyItem,
@@ -40,6 +41,7 @@ export class SupplyWizardHandler {
   private readonly draftLifetimeMs = 30 * 60 * 1000;
   private readonly readyDaysMin = 2;
   private readonly readyDaysMax = 28;
+  private readonly warehousePageSize = 10;
   private latestDraftWarehouses: SupplyWizardDraftWarehouseOption[] = [];
   private latestDraftId?: number;
   private latestDraftOperationId?: string;
@@ -507,6 +509,8 @@ export class SupplyWizardHandler {
         stage: 'landing',
         readyInDays,
         autoWarehouseSelection: current.autoWarehouseSelection,
+        warehouseSearchQuery: undefined,
+        warehousePage: 0,
       };
     });
 
@@ -726,7 +730,7 @@ export class SupplyWizardHandler {
         await this.onClusterSelect(ctx, chatId, state, rest[0]);
         return;
       case 'warehouse':
-        await this.onWarehouseSelect(ctx, chatId, state, rest[0]);
+        await this.onWarehouseSelect(ctx, chatId, state, rest);
         return;
       case 'dropoff':
         await this.onDropOffSelect(ctx, chatId, state, rest[0]);
@@ -1512,10 +1516,37 @@ export class SupplyWizardHandler {
       return;
     }
 
+    const credentials = await this.resolveCredentials(chatId);
+    if (!credentials) {
+      await ctx.reply('🔐 Сначала сохраните ключи через /start.');
+      return;
+    }
+
+    let refreshedWarehouses: SupplyWizardWarehouseOption[] | undefined;
+    try {
+      const response = await this.ozonApi.listClusters(
+        { clusterIds: [cluster.id], clusterType: 'CLUSTER_TYPE_OZON' },
+        credentials,
+      );
+      const buildResult = this.view.buildOptions(response.clusters ?? []);
+      refreshedWarehouses = buildResult.warehouses[cluster.id] ?? [];
+      if (!refreshedWarehouses.length) {
+        this.logger.debug(`[${chatId}] listClusters returned empty warehouses for cluster ${cluster.id}`);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `[${chatId}] Не удалось обновить склады для кластера ${cluster.id}: ${this.describeError(error)}`,
+      );
+    }
+
     const hasDropOffSelection = Boolean(state.selectedDropOffId);
 
     const updated = this.wizardStore.update(chatId, (current) => {
       if (!current) return undefined;
+      const nextWarehouses = { ...current.warehouses };
+      if (refreshedWarehouses) {
+        nextWarehouses[cluster.id] = refreshedWarehouses;
+      }
       return {
         ...current,
         stage: hasDropOffSelection ? 'warehouseSelect' : 'dropOffSelect',
@@ -1533,6 +1564,9 @@ export class SupplyWizardHandler {
         draftExpiresAt: undefined,
         draftError: undefined,
         autoWarehouseSelection: false,
+        warehouseSearchQuery: undefined,
+        warehousePage: 0,
+        warehouses: nextWarehouses,
         tasks: (current.tasks ?? []).map((task) => ({
           ...task,
           clusterId: cluster.id,
@@ -1556,21 +1590,14 @@ export class SupplyWizardHandler {
     ]);
 
     if (hasDropOffSelection) {
+      const nextState = this.wizardStore.get(chatId) ?? updated;
       const dropOffLabelForPrompt =
-        updated.selectedDropOffName ??
-        (updated.selectedDropOffId ? String(updated.selectedDropOffId) : '—');
+        nextState.selectedDropOffName ??
+        (nextState.selectedDropOffId ? String(nextState.selectedDropOffId) : '—');
 
-      await this.view.updatePrompt(
-        ctx,
-        chatId,
-        updated,
-        [
-          `Кластер выбран: ${cluster.name}.`,
-          `Пункт сдачи: ${dropOffLabelForPrompt}.`,
-          'Выберите склад отгрузки или оставьте «Первый доступный».',
-        ].join('\n'),
-        this.view.buildClusterWarehouseKeyboard(updated),
-      );
+      await this.showWarehouseSelection(ctx, chatId, nextState, {
+        dropOffLabel: dropOffLabelForPrompt,
+      });
     } else {
       await this.view.updatePrompt(
         ctx,
@@ -1591,10 +1618,69 @@ export class SupplyWizardHandler {
     ctx: Context,
     chatId: string,
     state: SupplyWizardState,
-    payload: string | undefined,
+    payloadParts: string[],
   ): Promise<void> {
     if (state.stage !== 'warehouseSelect') {
       await this.safeAnswerCbQuery(ctx, chatId, 'Сначала выберите кластер и пункт сдачи');
+      return;
+    }
+
+    state = this.wizardStore.get(chatId) ?? state;
+
+    const action = payloadParts?.[0];
+    const extra = payloadParts?.[1];
+
+    if (!action) {
+      await this.safeAnswerCbQuery(ctx, chatId, 'Склад не найден');
+      return;
+    }
+
+    if (action === 'noop') {
+      await this.safeAnswerCbQuery(ctx, chatId);
+      return;
+    }
+
+    if (action === 'page') {
+      const view = this.computeWarehouseView(chatId, state);
+      const delta = extra === 'next' ? 1 : extra === 'prev' ? -1 : 0;
+      const target = Math.min(Math.max(0, view.page + delta), Math.max(0, view.pageCount - 1));
+      if (target === view.page) {
+        await this.safeAnswerCbQuery(ctx, chatId, delta > 0 ? 'Это последняя страница' : 'Это первая страница');
+        return;
+      }
+      const updated =
+        this.wizardStore.update(chatId, (current) => {
+          if (!current) return undefined;
+          if (current.stage !== 'warehouseSelect') {
+            return current;
+          }
+          return {
+            ...current,
+            warehousePage: target,
+          };
+        }) ?? this.wizardStore.get(chatId) ?? view.state;
+
+      await this.showWarehouseSelection(ctx, chatId, updated);
+      await this.safeAnswerCbQuery(ctx, chatId, 'Страница обновлена');
+      return;
+    }
+
+    if (action === 'search' && extra === 'clear') {
+      const updated =
+        this.wizardStore.update(chatId, (current) => {
+          if (!current) return undefined;
+          if (current.stage !== 'warehouseSelect') {
+            return current;
+          }
+          return {
+            ...current,
+            warehouseSearchQuery: undefined,
+            warehousePage: 0,
+          };
+        }) ?? this.wizardStore.get(chatId) ?? state;
+
+      await this.showWarehouseSelection(ctx, chatId, updated);
+      await this.safeAnswerCbQuery(ctx, chatId, 'Поиск сброшен');
       return;
     }
 
@@ -1604,13 +1690,20 @@ export class SupplyWizardHandler {
       return;
     }
 
-    const clusterWarehouses = state.warehouses[selectedClusterId] ?? [];
-    const requestedAuto = payload === 'auto';
-    const warehouseId = requestedAuto ? clusterWarehouses[0]?.warehouse_id : Number(payload);
+    const baseWarehouses = state.warehouses[selectedClusterId] ?? [];
+    const requestedAuto = action === 'auto';
 
+    if (requestedAuto) {
+      if (!baseWarehouses.length) {
+        await this.safeAnswerCbQuery(ctx, chatId, 'Для автоматического выбора нет доступных складов');
+        return;
+      }
+    }
+
+    const warehouseId = requestedAuto ? baseWarehouses[0]?.warehouse_id : Number(action);
     const warehouse = requestedAuto
-      ? clusterWarehouses[0]
-      : clusterWarehouses.find((item) => item.warehouse_id === warehouseId);
+      ? baseWarehouses[0]
+      : baseWarehouses.find((item) => item.warehouse_id === warehouseId);
 
     if (!warehouse || !Number.isFinite(warehouse.warehouse_id)) {
       await this.safeAnswerCbQuery(ctx, chatId, 'Склад не найден');
@@ -1658,7 +1751,6 @@ export class SupplyWizardHandler {
 
     if (hasDropOffSelection) {
       await this.safeAnswerCbQuery(ctx, chatId, 'Склад выбран');
-
       await this.startSupplyProcessing(ctx, chatId, updated, this.readyDaysMin);
       return;
     }
@@ -1724,6 +1816,8 @@ export class SupplyWizardHandler {
         draftExpiresAt: undefined,
         draftError: undefined,
         autoWarehouseSelection: false,
+        warehouseSearchQuery: undefined,
+        warehousePage: 0,
         tasks: (current.tasks ?? []).map((task) => ({
           ...task,
           clusterId: current.selectedClusterId ?? task.clusterId,
@@ -1744,29 +1838,20 @@ export class SupplyWizardHandler {
       option.address ? `address: ${option.address}` : undefined,
     ]);
 
-    const lines: string[] = [
-      `Пункт сдачи выбран: ${option.name} (${option.warehouse_id}).`,
-    ];
-    if (option.address) {
-      lines.push(`Адрес: ${option.address}.`);
-    }
-    if (hasClusterSelection && (updated.selectedClusterName || updated.selectedClusterId)) {
-      lines.push(
-        `Кластер: ${updated.selectedClusterName ?? updated.selectedClusterId}.`,
-      );
-    }
-
     if (hasClusterSelection) {
-      lines.push('Выберите склад отгрузки или оставьте «Первый доступный».');
-
-      await this.view.updatePrompt(
-        ctx,
-        chatId,
-        updated,
-        lines.join('\n'),
-        this.view.buildClusterWarehouseKeyboard(updated),
-      );
+      await this.showWarehouseSelection(ctx, chatId, updated, {
+        dropOffLabel: option.name,
+      });
     } else {
+      const lines: string[] = [
+        `Пункт сдачи выбран: ${option.name} (${option.warehouse_id}).`,
+      ];
+      if (option.address) {
+        lines.push(`Адрес: ${option.address}.`);
+      }
+      if (updated.selectedClusterName || updated.selectedClusterId) {
+        lines.push(`Кластер: ${updated.selectedClusterName ?? updated.selectedClusterId}.`);
+      }
       lines.push(
         'Нажмите «Выбрать кластер», чтобы продолжить.',
         'При необходимости отправьте новый запрос с городом, чтобы сменить пункт сдачи.',
@@ -1782,6 +1867,141 @@ export class SupplyWizardHandler {
     }
 
     await this.safeAnswerCbQuery(ctx, chatId, 'Пункт сдачи выбран');
+  }
+
+  private computeWarehouseView(
+    chatId: string,
+    state: SupplyWizardState,
+  ): {
+    state: SupplyWizardState;
+    items: SupplyWizardWarehouseOption[];
+    total: number;
+    filteredTotal: number;
+    page: number;
+    pageCount: number;
+    hasPrev: boolean;
+    hasNext: boolean;
+    searchQuery?: string;
+  } {
+    const clusterId = state.selectedClusterId;
+    const warehouses = clusterId ? state.warehouses[clusterId] ?? [] : [];
+    const searchQuery = state.warehouseSearchQuery?.trim();
+    const normalizedSearch = searchQuery ? searchQuery.toLowerCase() : undefined;
+
+    const filtered = normalizedSearch
+      ? warehouses.filter((option) => {
+          const name = option.name?.toLowerCase() ?? '';
+          const idString = String(option.warehouse_id);
+          return name.includes(normalizedSearch) || idString.includes(normalizedSearch);
+        })
+      : warehouses;
+
+    const total = warehouses.length;
+    const filteredTotal = filtered.length;
+    const pageCount = filteredTotal ? Math.max(1, Math.ceil(filteredTotal / this.warehousePageSize)) : 1;
+    let page = state.warehousePage ?? 0;
+
+    if (page >= pageCount) {
+      const updated = this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        if (current.stage !== 'warehouseSelect') {
+          return current;
+        }
+        return {
+          ...current,
+          warehousePage: pageCount - 1,
+        };
+      });
+      if (updated) {
+        state = updated;
+        page = state.warehousePage ?? 0;
+      } else {
+        page = Math.max(0, pageCount - 1);
+      }
+    }
+
+    const start = page * this.warehousePageSize;
+    const items = filtered.slice(start, start + this.warehousePageSize);
+
+    return {
+      state,
+      items,
+      total,
+      filteredTotal,
+      page,
+      pageCount,
+      hasPrev: page > 0,
+      hasNext: page < pageCount - 1,
+      searchQuery,
+    };
+  }
+
+  private async showWarehouseSelection(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    options: { dropOffLabel?: string } = {},
+  ): Promise<void> {
+    const clusterId = state.selectedClusterId;
+    if (!clusterId) {
+      return;
+    }
+
+    const view = this.computeWarehouseView(chatId, state);
+    const nextState = view.state;
+
+    const prompt = this.view.renderWarehouseSelection({
+      clusterName: nextState.selectedClusterName,
+      dropOffLabel:
+        options.dropOffLabel ??
+        nextState.selectedDropOffName ??
+        (nextState.selectedDropOffId ? String(nextState.selectedDropOffId) : undefined),
+      total: view.total,
+      filteredTotal: view.filteredTotal,
+      page: view.page,
+      pageCount: view.pageCount,
+      searchQuery: view.searchQuery,
+    });
+
+    const keyboard = this.view.buildClusterWarehouseKeyboard({
+      items: view.items,
+      page: view.page,
+      pageCount: view.pageCount,
+      hasPrev: view.hasPrev,
+      hasNext: view.hasNext,
+      includeAuto: view.total > 0,
+      searchActive: Boolean(view.searchQuery),
+    });
+
+    await this.view.updatePrompt(ctx, chatId, nextState, prompt, keyboard);
+  }
+
+  async handleWarehouseSearch(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    text: string,
+  ): Promise<void> {
+    if (state.stage !== 'warehouseSelect') {
+      return;
+    }
+
+    const query = text.trim();
+    const normalized = query.length ? query : undefined;
+    const updated =
+      this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        if (current.stage !== 'warehouseSelect') {
+          return current;
+        }
+        return {
+          ...current,
+          warehouseSearchQuery: normalized,
+          warehousePage: 0,
+        };
+      }) ?? this.wizardStore.get(chatId) ?? state;
+
+    await this.showWarehouseSelection(ctx, chatId, updated);
   }
 
   private async onDraftWarehouseSelect(
@@ -2322,17 +2542,36 @@ export class SupplyWizardHandler {
 
     await this.notifyAdmin(ctx, 'wizard.callbackExpired', [`stage: ${current.stage}`]);
 
-    const keyboard =
-      current.stage === 'warehouseSelect'
-        ? this.view.buildClusterWarehouseKeyboard(current)
-        : this.view.withCancel();
+    if (current.stage === 'warehouseSelect') {
+      const view = this.computeWarehouseView(chatId, current);
+      const keyboard = this.view.buildClusterWarehouseKeyboard({
+        items: view.items,
+        page: view.page,
+        pageCount: view.pageCount,
+        hasPrev: view.hasPrev,
+        hasNext: view.hasNext,
+        includeAuto: view.filteredTotal > 0,
+        searchActive: Boolean(view.searchQuery),
+      });
+      const prompt = this.view.renderWarehouseSelection({
+        clusterName: current.selectedClusterName,
+        dropOffLabel: current.selectedDropOffName ?? (current.selectedDropOffId ? String(current.selectedDropOffId) : undefined),
+        total: view.total,
+        filteredTotal: view.filteredTotal,
+        page: view.page,
+        pageCount: view.pageCount,
+        searchQuery: view.searchQuery,
+      });
+      await this.view.updatePrompt(ctx, chatId, view.state, prompt, keyboard);
+      return;
+    }
 
     await this.view.updatePrompt(
       ctx,
       chatId,
       current,
-      '⚠️ Выберите склад доставки',
-      keyboard,
+      '⚠️ Выберите действие',
+      this.view.withCancel(),
     );
   }
 

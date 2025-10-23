@@ -496,30 +496,95 @@ export class SupplyWizardViewService {
     return this.withCancel(rows);
   }
 
-  buildClusterWarehouseKeyboard(
-    state: SupplyWizardState,
-  ): Array<Array<{ text: string; callback_data: string }>> {
-    const clusterId = state.selectedClusterId;
-    if (!clusterId) {
-      return this.withCancel();
+  renderWarehouseSelection(params: {
+    clusterName?: string;
+    dropOffLabel?: string;
+    total: number;
+    filteredTotal: number;
+    page: number;
+    pageCount: number;
+    searchQuery?: string;
+  }): string {
+    const lines: string[] = [];
+
+    if (params.clusterName) {
+      lines.push(`Кластер: ${params.clusterName}.`);
+    }
+    if (params.dropOffLabel) {
+      lines.push(`Пункт сдачи: ${params.dropOffLabel}.`);
     }
 
-    const warehouses = state.warehouses[clusterId] ?? [];
-    const limited = warehouses.slice(0, this.draftWarehouseOptionsLimit);
+    const search = params.searchQuery?.trim();
+    if (search) {
+      lines.push(`Поиск: «${search}».`);
+    }
+
+    if (params.filteredTotal > 0) {
+      const totalInfo = params.total !== params.filteredTotal
+        ? `${params.filteredTotal} из ${params.total}`
+        : `${params.filteredTotal}`;
+      lines.push(`Доступные склады: ${totalInfo}.`);
+      if (params.pageCount > 1) {
+        lines.push(`Страница ${params.page + 1} из ${params.pageCount}.`);
+      }
+      lines.push(
+        '',
+        'Выберите склад кнопкой или введите часть названия / номера, чтобы отфильтровать список.',
+      );
+    } else {
+      lines.push(
+        '',
+        'Склады не найдены. Введите часть названия или ID, чтобы попробовать другой вариант.',
+      );
+    }
+
+    return lines.join('\n');
+  }
+
+  buildClusterWarehouseKeyboard(params: {
+    items: SupplyWizardWarehouseOption[];
+    page: number;
+    pageCount: number;
+    hasPrev: boolean;
+    hasNext: boolean;
+    includeAuto: boolean;
+    searchActive: boolean;
+  }): Array<Array<{ text: string; callback_data: string }>> {
     const rows: Array<Array<{ text: string; callback_data: string }>> = [];
 
-    if (limited.length) {
+    if (params.includeAuto) {
       rows.push([{ text: 'Первый доступный 🥇', callback_data: 'wizard:warehouse:auto' }]);
     }
 
-    limited.forEach((warehouse) => {
+    params.items.forEach((warehouse) => {
       rows.push([
         {
-          text: warehouse.name,
+          text: `${warehouse.name} (${warehouse.warehouse_id})`,
           callback_data: `wizard:warehouse:${warehouse.warehouse_id}`,
         },
       ]);
     });
+
+    if (params.searchActive) {
+      rows.push([{ text: 'Сбросить поиск', callback_data: 'wizard:warehouse:search:clear' }]);
+    }
+
+    if (params.pageCount > 1) {
+      const navRow: Array<{ text: string; callback_data: string }> = [];
+      navRow.push({
+        text: '⬅️',
+        callback_data: params.hasPrev ? 'wizard:warehouse:page:prev' : 'wizard:warehouse:noop',
+      });
+      navRow.push({
+        text: `${params.page + 1}/${params.pageCount}`,
+        callback_data: 'wizard:warehouse:noop',
+      });
+      navRow.push({
+        text: '➡️',
+        callback_data: params.hasNext ? 'wizard:warehouse:page:next' : 'wizard:warehouse:noop',
+      });
+      rows.push(navRow);
+    }
 
     return this.withCancel(rows);
   }
