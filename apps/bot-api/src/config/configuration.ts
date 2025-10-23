@@ -10,6 +10,7 @@ export interface AppConfig {
     webhookDomain?: string;
     webhookPath?: string;
     adminIds: string[];
+    useWebhook?: boolean;
   };
 
   ozon: {
@@ -43,6 +44,10 @@ export const configuration = (): AppConfig => ({
       .split(',')
       .map((value) => value.trim())
       .filter((value) => value.length > 0),
+    useWebhook:
+      process.env.TELEGRAM_USE_WEBHOOK && process.env.TELEGRAM_USE_WEBHOOK.length
+        ? !/^false$/i.test(process.env.TELEGRAM_USE_WEBHOOK)
+        : undefined,
   },
   ozon: {
     clientId: process.env.OZON_CLIENT_ID ?? '',
