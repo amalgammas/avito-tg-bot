@@ -352,16 +352,16 @@ export class SupplyWizardHandler {
         };
       });
 
-      const targetState = updated ?? state;
-      await this.view.updatePrompt(
-        ctx,
-        chatId,
-        targetState,
-        `По запросу «${query}» ничего не найдено. Попробуйте уточнить название города или адреса.`,
-        this.view.withCancel(),
-      );
-      return;
-    }
+    const targetState = updated ?? state;
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      targetState,
+      `По запросу «${query}» ничего не найдено. Попробуйте уточнить название города или адреса.`,
+      this.view.buildDropOffQueryKeyboard(),
+    );
+    return;
+  }
 
     const limited = options.slice(0, this.dropOffOptionsLimit);
     const truncated = limited.length < options.length;
@@ -799,6 +799,9 @@ export class SupplyWizardHandler {
       case 'orders':
         await this.onOrdersCallback(ctx, chatId, state, rest);
         return;
+      case 'upload':
+        await this.onUploadCallback(ctx, chatId, state, rest);
+        return;
       case 'tasks':
         await this.onTasksCallback(ctx, chatId, state, rest);
         return;
@@ -1079,7 +1082,7 @@ export class SupplyWizardHandler {
       state,
       this.view.renderUploadPrompt(),
       this.view.buildUploadKeyboard(),
-        { parseMode: 'HTML' },
+      { parseMode: 'HTML' },
     );
   }
 
@@ -1113,6 +1116,23 @@ export class SupplyWizardHandler {
         await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
         return;
     }
+  }
+
+  private async onUploadCallback(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    parts: string[],
+  ): Promise<void> {
+    const action = parts[0];
+
+    if (action === 'restart') {
+      await this.presentUploadPrompt(ctx, chatId, state);
+      await this.safeAnswerCbQuery(ctx, chatId, 'Загрузите новый файл');
+      return;
+    }
+
+    await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
   }
 
   private async onTasksCallback(
@@ -1517,7 +1537,13 @@ export class SupplyWizardHandler {
       'Можно отправить новый запрос в любой момент или отменить мастера кнопкой ниже.',
     ].join('\n');
 
-    await this.view.updatePrompt(ctx, chatId, updated, promptText, this.view.withCancel());
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      updated,
+      promptText,
+      this.view.buildDropOffQueryKeyboard(),
+    );
   }
 
   private async onClusterStart(

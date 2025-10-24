@@ -154,6 +154,13 @@ export class SupplyWizardViewService {
         return this.withNavigation([], { back: 'wizard:landing:back' });
     }
 
+    buildDropOffQueryKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+        return [
+            [{ text: 'Назад', callback_data: 'wizard:upload:restart' }],
+            [{ text: 'Отмена', callback_data: 'wizard:cancel' }],
+        ];
+    }
+
     renderReadyDaysPrompt(): string {
         return [
             'Через сколько дней будете готовы к отгрузке?',
@@ -534,7 +541,11 @@ export class SupplyWizardViewService {
                 callback_data: `wizard:dropoff:${option.warehouse_id}`,
             },
         ]);
-        return this.withCancel(rows);
+        return [
+            ...rows,
+            [{ text: 'Назад', callback_data: 'wizard:upload:restart' }],
+            [{ text: 'Отмена', callback_data: 'wizard:cancel' }],
+        ];
     }
 
     buildDraftWarehouseKeyboard(
