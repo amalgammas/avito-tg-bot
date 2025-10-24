@@ -285,6 +285,10 @@ export class SupplyWizardViewService {
     }
 
     renderTaskDetails(task: SupplyWizardOrderSummary): string {
+        const limit = 20;
+        const totalItems = task.items.length;
+        const displayedItems = task.items.slice(0, limit);
+
         const lines = [
             `Задача ${this.formatTaskName(task.operationId ?? task.id)}`,
             '',
@@ -295,7 +299,10 @@ export class SupplyWizardViewService {
             task.timeslotLabel ? `Таймслот: ${task.timeslotLabel}` : undefined,
             '',
             'Товары:',
-            ...task.items.map((item) => `• ${item.article} × ${item.quantity}`),
+            ...displayedItems.map((item) => `• ${item.article} × ${item.quantity}`),
+            ...(totalItems > limit
+                ? [`… и ещё ${totalItems - limit} позиций`]
+                : []),
         ].filter((value): value is string => Boolean(value));
         return lines.join('\n');
     }
@@ -305,6 +312,7 @@ export class SupplyWizardViewService {
             [{ text: 'Отменить задачу', callback_data: `wizard:tasks:cancel:${task.taskId ?? task.id}` }],
         ];
         rows.push([{ text: 'Назад', callback_data: 'wizard:tasks:list' }]);
+
         return rows;
     }
 

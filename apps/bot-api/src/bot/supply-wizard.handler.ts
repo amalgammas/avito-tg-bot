@@ -828,24 +828,25 @@ export class SupplyWizardHandler {
             case 'draftWarehouse':
                 await this.onDraftWarehouseSelect(ctx, chatId, state, rest[0]);
                 return;
-            case 'timeslot':
-                await this.onTimeslotSelect(ctx, chatId, state, rest[0]);
-                return;
-            case 'cancel':
-                this.abortActiveTask(chatId);
-                if (state.tasks?.length) {
-                    await Promise.all(
-                        state.tasks
-                            .map((task) => task?.taskId)
-                            .filter((taskId): taskId is string => Boolean(taskId))
-                            .map((taskId) => this.orderStore.deleteByTaskId(chatId, taskId)),
-                    );
-                    await this.syncPendingTasks(chatId);
-                }
-                this.wizardStore.clear(chatId);
-                await this.safeAnswerCbQuery(ctx, chatId, 'Мастер отменён');
-                await this.view.updatePrompt(ctx, chatId, state, 'Мастер отменён.');
-                return;
+      case 'timeslot':
+        await this.onTimeslotSelect(ctx, chatId, state, rest[0]);
+        return;
+      case 'cancel': {
+        this.abortActiveTask(chatId);
+        if (state.tasks?.length) {
+          await Promise.all(
+            state.tasks
+              .map((task) => task?.taskId)
+              .filter((taskId): taskId is string => Boolean(taskId))
+              .map((taskId) => this.orderStore.deleteByTaskId(chatId, taskId)),
+          );
+          await this.syncPendingTasks(chatId);
+        }
+        this.wizardStore.clear(chatId);
+        await this.safeAnswerCbQuery(ctx, chatId, 'Задача отменена');
+        await this.presentLandingAfterCancel(ctx, chatId, state);
+        return;
+      }
             default:
                 await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
                 return;
@@ -1124,30 +1125,72 @@ export class SupplyWizardHandler {
         }
     }
 
-    private async onUploadCallback(
-        ctx: Context,
-        chatId: string,
-        state: SupplyWizardState,
-        parts: string[],
-    ): Promise<void> {
-        const action = parts[0];
+  private async onUploadCallback(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    parts: string[],
+  ): Promise<void> {
+    const action = parts[0];
 
-        if (action === 'restart') {
-            await this.presentUploadPrompt(ctx, chatId, state);
-            await this.safeAnswerCbQuery(ctx, chatId, 'Загрузите новый файл');
-            return;
-        }
-
-        await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
+    if (action === 'restart') {
+      await this.presentUploadPrompt(ctx, chatId, state);
+      await this.safeAnswerCbQuery(ctx, chatId, 'Загрузите новый файл');
+      return;
     }
 
-    private async onTasksCallback(
-        ctx: Context,
-        chatId: string,
-        state: SupplyWizardState,
-        parts: string[],
-    ): Promise<void> {
-        const action = parts[0];
+    await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
+  }
+
+  private async presentLandingAfterCancel(
+    ctx: Context,
+    chatId: string,
+    fallback: SupplyWizardState,
+  ): Promise<void> {
+    const pendingTasks = await this.syncPendingTasks(chatId);
+    const orders = await this.orderStore.list(chatId);
+
+    const baseState =
+      this.wizardStore.start(
+        chatId,
+        {
+          clusters: fallback.clusters ?? [],
+          warehouses: fallback.warehouses ?? {},
+          dropOffs: [],
+        },
+        { stage: 'landing' },
+      ) ?? fallback;
+
+    const updated =
+      this.wizardStore.update(chatId, (current) => {
+        if (!current) return undefined;
+        return {
+          ...current,
+          orders,
+          pendingTasks,
+          promptMessageId: undefined,
+          activeOrderId: undefined,
+          activeTaskId: undefined,
+        };
+      }) ?? baseState;
+
+    await this.view.updatePrompt(
+      ctx,
+      chatId,
+      updated,
+      this.view.renderLanding(updated),
+      this.view.buildLandingKeyboard(updated),
+      { parseMode: 'HTML' },
+    );
+  }
+
+  private async onTasksCallback(
+    ctx: Context,
+    chatId: string,
+    state: SupplyWizardState,
+    parts: string[],
+  ): Promise<void> {
+    const action = parts[0];
 
         switch (action) {
             case 'list': {
