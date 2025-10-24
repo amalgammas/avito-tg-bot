@@ -11,6 +11,7 @@ import {
     SupplyWizardWarehouseOption,
     SupplyWizardStore,
 } from '../supply-wizard.store';
+import { it } from "node:test";
 
 @Injectable()
 export class SupplyWizardViewService {
@@ -96,7 +97,7 @@ export class SupplyWizardViewService {
     }
 
     renderLanding(state: SupplyWizardState): string {
-        const lines = ['Главное меню.'];
+        const lines = ['<b>Главное меню.</b>'];
 
         const pendingTasks = state.pendingTasks ?? [];
         if (pendingTasks.length) {
@@ -104,8 +105,6 @@ export class SupplyWizardViewService {
             lines.push(
                 '',
                 `В обработке ${pendingTasks.length} ${pendingTasks.length === 1 ? 'задача' : 'задачи'}.`,
-                `Последняя: ${current.operationId ?? current.id}${current.warehouse ? ` → ${current.warehouse}` : ''}.`,
-                'Следите за прогрессом в разделе «Мои задачи».',
             );
         }
 
@@ -142,7 +141,7 @@ export class SupplyWizardViewService {
             '',
             'Бот использует формат Ozon для создания поставок.',
             '',
-            'ШАБЛОН_URL',
+            'https://disk.yandex.ru/i/a0vDXZdlImtPUA',
             '',
             'На листе 3 столбца: артикул, имя (необязательно), количество',
             '',
@@ -163,10 +162,12 @@ export class SupplyWizardViewService {
 
     renderReadyDaysPrompt(): string {
         return [
-            'Через сколько дней будете готовы к отгрузке?',
+            '<b>Выберите, через сколько дней будете готовы к отгрузке.</b>',
             '',
-            'Выберите вариант на клавиатуре или введите число от 0 до 28 (0 — готов к отгрузке день в день).',
-            'По умолчанию бот использует 2 дня.',
+            'Введите количество дней на подготовку поставки. Тайм слот будет забронирован с учетом времени на подготовку. Выберите один из предложенных вариантов или введите одно целое число от 0 до 28.',
+            '',
+            '0 дней - значит готов отгрузиться день в день, и бот может ловить слот на текущий день.',
+            '1 день - бот будет ловить слот на завтра, и т.д.',
         ].join('\n');
     }
 
@@ -253,10 +254,21 @@ export class SupplyWizardViewService {
 
         const lines = ['Мои задачи:'];
         pendingTasks.forEach((task, index) => {
-            const warehouse = task.warehouse ? ` → ${task.warehouse}` : '';
-            lines.push(`${index + 1}. ${task.operationId ?? task.id}${warehouse}`);
+            let items = 0;
+            task.items.map((item) => items += item.quantity)
+
+            const desc = `${this.formatTaskName(task.id)}: ${items}шт. ${task.items.length} товаров`
+            const dropOff = task.dropOffName ? task.dropOffName : '';
+            const cluster = task.clusterName ? task.clusterName : '';
+            const warehouse = task.warehouse ? task.warehouse : '';
+
+            lines.push(`${index + 1}. ${desc}. ${dropOff} → ${cluster} → ${warehouse}`);
         });
-        lines.push('', 'Выберите задачу, чтобы посмотреть детали или отменить её.');
+        lines.push(
+            '',
+            'Выберите задачу, чтобы посмотреть детали или отменить её.'
+        );
+
         return lines.join('\n');
     }
 
@@ -264,7 +276,7 @@ export class SupplyWizardViewService {
         const pendingTasks = state.pendingTasks ?? [];
         const rows = pendingTasks.map((task) => [
             {
-                text: `${task.operationId ?? task.id}${task.warehouse ? ` • ${task.warehouse}` : ''}`,
+                text: `${this.formatTaskName(task.operationId ?? task.id)}`,
                 callback_data: `wizard:tasks:details:${task.taskId ?? task.id}`,
             },
         ]);
@@ -274,10 +286,12 @@ export class SupplyWizardViewService {
 
     renderTaskDetails(task: SupplyWizardOrderSummary): string {
         const lines = [
-            `Задача ${task.operationId ?? task.id}`,
-            task.clusterName ? `Кластер: ${task.clusterName}` : undefined,
+            `Задача ${this.formatTaskName(task.operationId ?? task.id)}`,
+            '',
             task.dropOffName ? `Пункт сдачи: ${task.dropOffName}` : undefined,
+            task.clusterName ? `Кластер: ${task.clusterName}` : undefined,
             task.warehouse ? `Склад: ${task.warehouse}` : undefined,
+            '',
             task.timeslotLabel ? `Таймслот: ${task.timeslotLabel}` : undefined,
             '',
             'Товары:',
@@ -585,17 +599,20 @@ export class SupplyWizardViewService {
         }
 
         if (params.filteredTotal > 0) {
+            lines.push(
+                '',
+                '<b>Выберите склад для поиска слотов.</b>',
+                '',
+                '<b>Если вы хотите отправить поставку в любой доступный склад в кластере, то выберите пункт “Первый доступный”.</b>',
+                '',
+                'Если вы хотите отправить поставку на <b>конкретный</b> склад в кластере, выберите его в списке ниже. Выберите склад кнопкой или введите часть названия / номера, чтобы отфильтровать список.',
+                ''
+            );
+
             const totalInfo = params.total !== params.filteredTotal
                 ? `${params.filteredTotal} из ${params.total}`
                 : `${params.filteredTotal}`;
-            lines.push(`Доступные склады: ${totalInfo}.`);
-            if (params.pageCount > 1) {
-                lines.push(`Страница ${params.page + 1} из ${params.pageCount}.`);
-            }
-            lines.push(
-                '',
-                'Выберите склад кнопкой или введите часть названия / номера, чтобы отфильтровать список.',
-            );
+            lines.push(`Всего складов в кластере: ${totalInfo}`);
         } else {
             lines.push(
                 '',
@@ -765,13 +782,24 @@ export class SupplyWizardViewService {
     }
 
     formatItemsSummary(task: { items: Array<{ article: string; sku?: number; quantity: number }> }): string {
-        const lines = task.items.map((item) => `• ${item.article} → SKU ${item.sku} × ${item.quantity}`);
+        const limit = 20;
+        const total = task.items.length;
+        const displayed = task.items.slice(0, limit);
+        const lines = displayed.map((item) => `• ${item.article} → SKU ${item.sku} × ${item.quantity}`);
+
+        if (total > limit) {
+            lines.push(`… и ещё ${total - limit} позиций без вывода, чтобы не перегружать чат.`);
+        }
 
         return [
             'Товары из файла:',
             ...lines,
             '',
-            'Введите ниже город, адрес или название пункта сдачи, чтобы найти место отгрузки.',
+            '<b>Сейчас бот работает только с кросс-докингом.</b>',
+            '',
+            'Далее необходимо выбрать точку для сдачи поставки по кросс-докингу',
+            '',
+            '<b>Введите ниже город, адрес или название пункта сдачи поставок кросс-докинг.</b>'
         ].join('\n');
     }
 
@@ -900,6 +928,13 @@ export class SupplyWizardViewService {
         const timezonePart = timezone ? ` (${timezone})` : '';
 
         return `${datePart} ${fromPart}–${toPart}${timezonePart}`;
+    }
+
+    private formatTaskName(name: string | undefined): string | undefined {
+        if (name) {
+            const names = name.split('-');
+            return names[1];
+        }
     }
 
     private formatDropOffButtonLabel(option: SupplyWizardDropOffOption): string {
