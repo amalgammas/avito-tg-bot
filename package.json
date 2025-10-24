@@ -6,8 +6,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "start": "NODE_ENV=production node dist/bootstrap.js",
-    "start:prod": "NODE_ENV=production node dist/bootstrap.js",
-    "start_boot": "NODE_ENV=production node dist/bootstrap.js",
     "start:dev": "NODE_ENV=development ts-node -r tsconfig-paths/register apps/bot-api/src/main.ts",
     "inst-deps": "yarn install"
   },

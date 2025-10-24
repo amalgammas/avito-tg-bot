@@ -104,8 +104,9 @@ export class SupplyWizardHandler {
           ctx,
           chatId,
           landingState,
-          this.view.renderAuthWelcome(),
-          this.view.buildAuthWelcomeKeyboard(),
+        this.view.renderAuthWelcome(),
+        this.view.buildAuthWelcomeKeyboard(),
+        { parseMode: 'HTML' },
         );
         await this.notifyAdmin(ctx, 'wizard.start', [`stage: ${landingState.stage}`]);
         return;
@@ -117,6 +118,7 @@ export class SupplyWizardHandler {
         landingState,
         this.view.renderLanding(landingState),
         this.view.buildLandingKeyboard(landingState),
+          { parseMode: 'HTML' },
       );
       await this.notifyAdmin(ctx, 'wizard.start', [`stage: ${landingState.stage}`]);
     } catch (error) {
@@ -900,6 +902,7 @@ export class SupplyWizardHandler {
       state,
       this.view.renderAuthWelcome(),
       this.view.buildAuthWelcomeKeyboard(),
+      { parseMode: 'HTML' },
     );
   }
 
@@ -1076,6 +1079,7 @@ export class SupplyWizardHandler {
       state,
       this.view.renderUploadPrompt(),
       this.view.buildUploadKeyboard(),
+        { parseMode: 'HTML' },
     );
   }
 
