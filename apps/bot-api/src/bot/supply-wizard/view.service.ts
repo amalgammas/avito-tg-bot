@@ -175,7 +175,7 @@ export class SupplyWizardViewService {
         const rows: Array<Array<{ text: string; callback_data: string }>> = [
             [
                 { text: '0 дней', callback_data: 'wizard:ready:select:0' },
-                { text: '1 день', callback_data: 'wizard:ready:select:0' },
+                { text: '1 день', callback_data: 'wizard:ready:select:1' },
                 { text: '2 дня', callback_data: 'wizard:ready:select:2' },
             ],
             [
