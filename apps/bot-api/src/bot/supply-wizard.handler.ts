@@ -1806,7 +1806,7 @@ export class SupplyWizardHandler {
             ctx,
             chatId,
             updated,
-            '<b>Выберите кластер, в который планируете вести поставку.</>',
+            '<b>Выберите кластер, в который планируете везти поставку.</>',
             this.view.buildClusterKeyboard(updated),
             { parseMode: 'HTML' },
         );
