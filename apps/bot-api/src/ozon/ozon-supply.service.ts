@@ -32,6 +32,8 @@ export class OzonSupplyService {
   private readonly pollIntervalMs: number;
   private readonly availableWarehousesTtlMs = 10 * 60 * 1000; // 10 минут
   private readonly draftTtlMs = 55 * 60 * 1000; // 55 минут
+  private readonly timeslotWindowMaxDays = 28;
+  private readonly dayMs = 24 * 60 * 60 * 1000;
   private readonly draftCache = new Map<
     string,
     { operationId: string; draftId?: number; expiresAt: number }
@@ -175,7 +177,8 @@ export class OzonSupplyService {
     options: OzonSupplyProcessOptions & { readyInDays: number },
   ): Promise<void> {
     const cloned = this.cloneTask(task);
-    cloned.lastDay = this.computeReadyDate(options.readyInDays);
+    cloned.readyInDays = options.readyInDays;
+    cloned.lastDay = this.computeTimeslotUpperBound();
     cloned.orderFlag = cloned.orderFlag ?? 0;
 
     const map: OzonSupplyTaskMap = new Map([[cloned.taskId, cloned]]);
@@ -509,9 +512,7 @@ export class OzonSupplyService {
       return undefined;
     }
 
-    const dateFrom = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
-    const dateFromIso = this.toOzonIso(dateFrom);
-    const dateToIso = this.normalizeDateString(task.lastDay);
+    const { dateFromIso, dateToIso } = this.computeTimeslotWindow(task);
 
     const response = await this.ozonApi.getDraftTimeslots(
       {
@@ -618,44 +619,84 @@ export class OzonSupplyService {
     return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
   }
 
-  private normalizeDateString(value: string): string {
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return this.toOzonIso(new Date(Date.now() + 28 * 24 * 60 * 60 * 1000));
-    }
-
-    if (/T/.test(trimmed)) {
-      return trimmed;
-    }
-
-    return `${trimmed}T23:59:59Z`;
+  private computeTimeslotUpperBound(): string {
+    const upper = new Date();
+    upper.setUTCDate(upper.getUTCDate() + this.timeslotWindowMaxDays);
+    upper.setUTCHours(23, 59, 59, 0);
+    return this.toOzonIso(upper);
   }
 
-  private computeReadyDate(days: number): string {
-    const minDays = 2;
-    const maxDays = 28;
-    const defaultDays = 2;
+  private computeTimeslotWindow(task: OzonSupplyTask): { dateFromIso: string; dateToIso: string } {
+    const readyInDays = this.resolveReadyInDays(task);
+    const from = new Date();
+    from.setUTCHours(0, 0, 0, 0);
+    from.setUTCDate(from.getUTCDate() + readyInDays);
 
-    let readyDays: number;
-    if (!Number.isFinite(days)) {
-      readyDays = defaultDays;
-    } else {
-      const rounded = Math.floor(days);
-      if (rounded === 0) {
-        readyDays = 0;
-      } else if (rounded < minDays) {
-        readyDays = minDays;
-      } else if (rounded > maxDays) {
-        readyDays = maxDays;
-      } else {
-        readyDays = rounded;
-      }
+    const to = new Date();
+    to.setUTCDate(to.getUTCDate() + this.timeslotWindowMaxDays);
+    to.setUTCHours(23, 59, 59, 0);
+
+    if (from.getTime() > to.getTime()) {
+      from.setTime(to.getTime());
     }
 
-    const base = new Date();
-    base.setUTCDate(base.getUTCDate() + readyDays);
-    base.setUTCHours(23, 59, 59, 0);
-    return this.toOzonIso(base);
+    return {
+      dateFromIso: this.toOzonIso(from),
+      dateToIso: this.toOzonIso(to),
+    };
+  }
+
+  private resolveReadyInDays(task: OzonSupplyTask): number {
+    const direct = this.normalizeReadyInDays(task.readyInDays);
+    if (direct !== undefined) {
+      return direct;
+    }
+
+    const fallback = this.normalizeReadyInDays(this.estimateReadyInDaysFromLastDay(task.lastDay));
+    if (fallback !== undefined) {
+      return fallback;
+    }
+
+    return 2;
+  }
+
+  private normalizeReadyInDays(value: unknown): number | undefined {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      return undefined;
+    }
+    const rounded = Math.floor(value);
+    if (rounded <= 0) {
+      return 0;
+    }
+    if (rounded >= this.timeslotWindowMaxDays) {
+      return this.timeslotWindowMaxDays;
+    }
+    return rounded;
+  }
+
+  private estimateReadyInDaysFromLastDay(value: string | undefined): number | undefined {
+    if (!value) {
+      return undefined;
+    }
+
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      return undefined;
+    }
+
+    const baseline = new Date();
+    baseline.setUTCHours(0, 0, 0, 0);
+    const diffMs = parsed.getTime() - baseline.getTime();
+    if (!Number.isFinite(diffMs)) {
+      return undefined;
+    }
+
+    const diffDays = Math.ceil(diffMs / this.dayMs);
+    if (!Number.isFinite(diffDays)) {
+      return undefined;
+    }
+
+    return diffDays;
   }
 
   private cloneTask(task: OzonSupplyTask): OzonSupplyTask {

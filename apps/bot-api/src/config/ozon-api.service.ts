@@ -119,8 +119,33 @@ export interface OzonSupplyCreateStatus {
   operation_id?: string;
   state?: string;
   status?: string;
-  result?: unknown;
+  result?: {
+    order_ids?: number[];
+    [key: string]: unknown;
+  };
   errors?: Array<{ code?: number; message?: string }>;
+  error_messages?: string[];
+}
+
+export interface OzonCancelSupplyResponse {
+  operation_id?: string;
+}
+
+export interface OzonSupplyCancelStatusSupply {
+  supply_id?: number;
+  is_supply_cancelled?: boolean;
+  error_reasons?: Array<{ code?: string; message?: string }>;
+}
+
+export interface OzonSupplyCancelStatusResult {
+  is_order_cancelled?: boolean;
+  supplies?: OzonSupplyCancelStatusSupply[];
+}
+
+export interface OzonSupplyCancelStatus {
+  status?: string;
+  result?: OzonSupplyCancelStatusResult;
+  error_reasons?: Array<{ code?: string; message?: string }>;
 }
 
 @Injectable()
@@ -492,6 +517,38 @@ export class OzonApiService {
   ): Promise<OzonSupplyCreateStatus> {
     const response = await this.post<OzonSupplyCreateStatus>(
       '/v1/draft/supply/create/status',
+      { operation_id: operationId },
+      undefined,
+      credentials,
+    );
+    return response.data;
+  }
+
+  async cancelSupplyOrder(
+    orderId: number | string,
+    credentials?: OzonCredentials,
+  ): Promise<string | undefined> {
+    const normalized =
+      typeof orderId === 'string' ? Number(orderId.trim()) : Number(orderId);
+    if (!Number.isFinite(normalized) || normalized <= 0) {
+      throw new Error(`Некорректный order_id: ${orderId}`);
+    }
+
+    const response = await this.post<OzonCancelSupplyResponse>(
+      '/v1/supply-order/cancel',
+      { order_id: Math.trunc(normalized) },
+      undefined,
+      credentials,
+    );
+    return response.data?.operation_id;
+  }
+
+  async getSupplyCancelStatus(
+    operationId: string,
+    credentials?: OzonCredentials,
+  ): Promise<OzonSupplyCancelStatus> {
+    const response = await this.post<OzonSupplyCancelStatus>(
+      '/v1/supply-order/cancel/status',
       { operation_id: operationId },
       undefined,
       credentials,

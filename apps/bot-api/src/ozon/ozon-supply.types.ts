@@ -15,6 +15,7 @@ export interface OzonSupplyTask {
   draftOperationId: string;
   orderFlag: number;
   items: OzonSupplyItem[];
+  readyInDays?: number;
   clusterId?: string | number;
   warehouseId?: number;
   selectedTimeslot?: OzonDraftTimeslot;

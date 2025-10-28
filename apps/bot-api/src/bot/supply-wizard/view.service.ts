@@ -252,9 +252,14 @@ export class SupplyWizardViewService {
         return lines.join('\n');
     }
 
-    buildOrderDetailsKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+    buildOrderDetailsKeyboard(order: SupplyWizardOrderSummary): Array<Array<{ text: string; callback_data: string }>> {
         const rows = [
-            [{ text: 'Отменить поставку', callback_data: 'wizard:orders:cancel' }],
+            [
+                {
+                    text: 'Отменить поставку',
+                    callback_data: `wizard:orders:cancel:${order.operationId ?? order.id}`,
+                },
+            ],
         ];
         return this.withNavigation(rows, { back: 'wizard:orders:list' });
     }

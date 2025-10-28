@@ -9,6 +9,8 @@ import {
     OzonFboWarehouseSearchItem,
     OzonDraftStatus,
     OzonDraftTimeslot,
+    OzonSupplyCancelStatus,
+    OzonSupplyCreateStatus,
 } from '../config/ozon-api.service';
 
 import { OzonSheetService } from '../ozon/ozon-sheet.service';
@@ -42,6 +44,8 @@ export class SupplyWizardHandler {
     private readonly readyDaysMin = 0;
     private readonly readyDaysMax = 28;
     private readonly warehousePageSize = 10;
+    private readonly cancelStatusMaxAttempts = 10;
+    private readonly cancelStatusPollDelayMs = 1_000;
     private latestDraftWarehouses: SupplyWizardDraftWarehouseOption[] = [];
     private latestDraftId?: number;
     private latestDraftOperationId?: string;
@@ -611,6 +615,7 @@ export class SupplyWizardHandler {
             ? effectiveTask.warehouseName
             : updated.selectedWarehouseName ?? effectiveTask.warehouseName;
         effectiveTask.selectedTimeslot = updated.selectedTimeslot?.data ?? effectiveTask.selectedTimeslot;
+        effectiveTask.readyInDays = readyInDays;
         if (updated.draftOperationId) {
             effectiveTask.draftOperationId = updated.draftOperationId;
         }
@@ -1262,9 +1267,12 @@ export class SupplyWizardHandler {
                 await this.safeAnswerCbQuery(ctx, chatId);
                 return;
             }
-            case 'cancel':
-                await this.safeAnswerCbQuery(ctx, chatId, 'Функция отмены скоро появится');
+            case 'cancel': {
+                const orderId = parts[1];
+                const message = await this.cancelSupplyOrder(ctx, chatId, state, orderId);
+                await this.safeAnswerCbQuery(ctx, chatId, message);
                 return;
+            }
             case 'back':
                 await this.showLanding(ctx, chatId, state);
                 await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись назад');
@@ -1531,8 +1539,212 @@ export class SupplyWizardHandler {
             chatId,
             updated,
             this.view.renderOrderDetails(order),
-            this.view.buildOrderDetailsKeyboard(),
+            this.view.buildOrderDetailsKeyboard(order),
         );
+    }
+
+    private async cancelSupplyOrder(
+        ctx: Context,
+        chatId: string,
+        state: SupplyWizardState,
+        orderId?: string,
+    ): Promise<string> {
+        const current = this.wizardStore.get(chatId) ?? state;
+        const rawTargetId = orderId ?? current.activeOrderId;
+        const targetId = rawTargetId ? rawTargetId.trim() : '';
+        if (!targetId) {
+            await ctx.reply('Поставка не найдена. Откройте её в списке и попробуйте снова.');
+            return 'Поставка не найдена';
+        }
+
+        const order =
+            current.orders.find((item) => item.id === targetId) ??
+            current.orders.find((item) => item.operationId === targetId);
+        if (!order) {
+            await ctx.reply('Поставка не найдена. Обновите список и попробуйте снова.');
+            return 'Поставка не найдена';
+        }
+
+        const credentials = await this.resolveCredentials(chatId);
+        if (!credentials) {
+            await ctx.reply('🔐 Сначала сохраните ключи через /start.');
+            return 'Нет ключей';
+        }
+
+        const operationId = order.operationId ?? order.id;
+        if (!operationId) {
+            await ctx.reply('Не удалось найти operation_id для этой поставки. Попробуйте позже.');
+            return 'operation_id отсутствует';
+        }
+
+        const aligned =
+            this.wizardStore.update(chatId, (existing) => {
+                if (!existing) return undefined;
+                return {
+                    ...existing,
+                    stage: 'orderDetails',
+                    activeOrderId: order.operationId ?? order.id,
+                };
+            }) ?? current;
+
+        const orderDetailsText = this.view.renderOrderDetails(order);
+        const progressText = [orderDetailsText, '', '⏳ Отменяю поставку...'].join('\n');
+        const progressKeyboard = this.view.withNavigation([], { back: 'wizard:orders:list' });
+
+        await this.view.updatePrompt(
+            ctx,
+            chatId,
+            aligned,
+            progressText,
+            progressKeyboard,
+        );
+
+        let createStatus: OzonSupplyCreateStatus;
+        try {
+            createStatus = await this.ozonApi.getSupplyCreateStatus(operationId, credentials);
+        } catch (error) {
+            const message = `Не удалось получить статус поставки: ${this.describeError(error)}`;
+            await ctx.reply(`❌ ${message}`);
+            await this.view.updatePrompt(
+                ctx,
+                chatId,
+                aligned,
+                orderDetailsText,
+                this.view.buildOrderDetailsKeyboard(order),
+            );
+            await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
+                `operation: ${operationId}`,
+                message,
+            ]);
+            return 'Ошибка';
+        }
+
+        const orderIds = this.extractOrderIdsFromStatus(createStatus);
+        if (!orderIds.length) {
+            await ctx.reply('❌ Ozon не вернул идентификатор заказа для этой поставки. Попробуйте позже.');
+            await this.view.updatePrompt(
+                ctx,
+                chatId,
+                aligned,
+                orderDetailsText,
+                this.view.buildOrderDetailsKeyboard(order),
+            );
+            await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
+                `operation: ${operationId}`,
+                'order_ids: []',
+            ]);
+            return 'order_id не найден';
+        }
+
+        const primaryOrderId = orderIds[0];
+
+        let cancelOperationId: string | undefined;
+        try {
+            cancelOperationId = await this.ozonApi.cancelSupplyOrder(primaryOrderId, credentials);
+        } catch (error) {
+            const message = `Не удалось отправить запрос на отмену: ${this.describeError(error)}`;
+            await ctx.reply(`❌ ${message}`);
+            await this.view.updatePrompt(
+                ctx,
+                chatId,
+                aligned,
+                orderDetailsText,
+                this.view.buildOrderDetailsKeyboard(order),
+            );
+            await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
+                `operation: ${operationId}`,
+                `order_id: ${primaryOrderId}`,
+                message,
+            ]);
+            return 'Ошибка';
+        }
+
+        if (!cancelOperationId) {
+            await ctx.reply('❌ Ozon не вернул operation_id отмены. Попробуйте позже.');
+            await this.view.updatePrompt(
+                ctx,
+                chatId,
+                aligned,
+                orderDetailsText,
+                this.view.buildOrderDetailsKeyboard(order),
+            );
+            await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
+                `operation: ${operationId}`,
+                `order_id: ${primaryOrderId}`,
+                'cancel operation_id missing',
+            ]);
+            return 'operation_id отсутствует';
+        }
+
+        const cancelStatus = await this.waitForCancelStatus(cancelOperationId, credentials);
+
+        if (!this.isCancelSuccessful(cancelStatus)) {
+            const reason = this.describeCancelStatus(cancelStatus);
+            await ctx.reply(`❌ Не удалось подтвердить отмену поставки. ${reason}`);
+            await this.view.updatePrompt(
+                ctx,
+                chatId,
+                aligned,
+                orderDetailsText,
+                this.view.buildOrderDetailsKeyboard(order),
+            );
+            await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
+                `operation: ${operationId}`,
+                `order_id: ${primaryOrderId}`,
+                `cancel_operation: ${cancelOperationId}`,
+                `status: ${reason}`,
+            ]);
+            return 'Отмена не подтверждена';
+        }
+
+        await this.orderStore.deleteById(chatId, order.id);
+        const refreshedOrders = await this.orderStore.list(chatId);
+
+        const updated =
+            this.wizardStore.update(chatId, (existing) => {
+                if (!existing) return undefined;
+                return {
+                    ...existing,
+                    orders: refreshedOrders,
+                    activeOrderId: undefined,
+                    stage: refreshedOrders.length ? 'ordersList' : 'landing',
+                };
+            }) ?? aligned;
+
+        const successInfo = [
+            `Поставка №${operationId} отменена ✅`,
+            cancelStatus?.result?.is_order_cancelled ? 'Заказ на стороне Ozon отмечен как отменён.' : undefined,
+        ].filter((line): line is string => Boolean(line));
+        const successText = successInfo.join('\n') || 'Поставка отменена ✅';
+
+        if (updated.stage === 'ordersList') {
+            const listText = this.view.renderOrdersList(updated);
+            await this.view.updatePrompt(
+                ctx,
+                chatId,
+                updated,
+                [successText, '', listText].join('\n'),
+                this.view.buildOrdersListKeyboard(updated),
+            );
+        } else {
+            const landingText = this.view.renderLanding(updated);
+            await this.view.updatePrompt(
+                ctx,
+                chatId,
+                updated,
+                [successText, '', landingText].join('\n'),
+                this.view.buildLandingKeyboard(updated),
+                { parseMode: 'HTML' },
+            );
+        }
+
+        await this.notifyAdmin(ctx, 'wizard.orderCancelled', [
+            `operation: ${operationId}`,
+            `order_id: ${primaryOrderId}`,
+            `cancel_operation: ${cancelOperationId}`,
+        ]);
+
+        return 'Поставка отменена';
     }
 
     private async handleSupplySuccess(
@@ -1631,6 +1843,116 @@ export class SupplyWizardHandler {
         if (!message) return undefined;
         const match = /operation_id=([\w-]+)/i.exec(message);
         return match ? match[1] : undefined;
+    }
+
+    private extractOrderIdsFromStatus(status: OzonSupplyCreateStatus | undefined): number[] {
+        if (!status) {
+            return [];
+        }
+
+        const collected: Array<number | string> = [];
+        const direct = (status as any)?.order_ids;
+        if (Array.isArray(direct)) {
+            collected.push(...direct);
+        }
+        const nested = status.result?.order_ids;
+        if (Array.isArray(nested)) {
+            collected.push(...nested);
+        }
+
+        return collected
+            .map((value) => {
+                if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+                    return Math.trunc(value);
+                }
+                if (typeof value === 'string') {
+                    const parsed = Number(value.trim());
+                    return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : undefined;
+                }
+                return undefined;
+            })
+            .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
+    }
+
+    private async waitForCancelStatus(
+        operationId: string,
+        credentials: OzonCredentials,
+    ): Promise<OzonSupplyCancelStatus | undefined> {
+        let lastStatus: OzonSupplyCancelStatus | undefined;
+
+        for (let attempt = 0; attempt < this.cancelStatusMaxAttempts; attempt++) {
+            try {
+                lastStatus = await this.ozonApi.getSupplyCancelStatus(operationId, credentials);
+            } catch (error) {
+                this.logger.warn(
+                    `cancel status ${operationId} attempt ${attempt + 1}/${this.cancelStatusMaxAttempts} failed: ${this.describeError(error)}`,
+                );
+            }
+
+            if (this.isCancelSuccessful(lastStatus)) {
+                return lastStatus;
+            }
+
+            if (attempt < this.cancelStatusMaxAttempts - 1) {
+                await this.sleep(this.cancelStatusPollDelayMs);
+            }
+        }
+
+        return lastStatus;
+    }
+
+    private isCancelSuccessful(status?: OzonSupplyCancelStatus): boolean {
+        if (!status) {
+            return false;
+        }
+
+        if ((status.status ?? '').toUpperCase() === 'SUCCESS') {
+            return true;
+        }
+
+        if (status.result?.is_order_cancelled) {
+            return true;
+        }
+
+        return (status.result?.supplies ?? []).some((item) => item?.is_supply_cancelled);
+    }
+
+    private describeCancelStatus(status?: OzonSupplyCancelStatus): string {
+        if (!status) {
+            return 'Ответ сервиса пустой';
+        }
+
+        const parts: string[] = [];
+
+        if (status.status) {
+            parts.push(`status=${status.status}`);
+        }
+
+        if (typeof status.result?.is_order_cancelled === 'boolean') {
+            parts.push(`is_order_cancelled=${status.result.is_order_cancelled ? 'true' : 'false'}`);
+        }
+
+        const supplies = status.result?.supplies ?? [];
+        if (supplies.length) {
+            const supplyParts = supplies.map((entry) => {
+                const supplyId = entry?.supply_id ?? 'n/a';
+                const state = entry?.is_supply_cancelled ? 'cancelled' : 'active';
+                const errors = (entry?.error_reasons ?? [])
+                    .map((reason) => `${reason?.code ?? 'n/a'}:${reason?.message ?? '—'}`)
+                    .join(',');
+                return errors ? `${supplyId}:${state}(${errors})` : `${supplyId}:${state}`;
+            });
+            parts.push(`supplies=${supplyParts.join(';')}`);
+        }
+
+        if (status.error_reasons?.length) {
+            const errors = status.error_reasons
+                .map((reason) => `${reason?.code ?? 'n/a'}:${reason?.message ?? '—'}`)
+                .join(', ');
+            parts.push(`errors=${errors}`);
+        }
+
+        return parts.length ? parts.join(', ') : 'Ответ без подробностей';
     }
 
     private describeTimeslot(slot?: OzonDraftTimeslot): string | undefined {
