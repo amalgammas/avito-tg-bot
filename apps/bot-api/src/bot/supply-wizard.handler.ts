@@ -1697,6 +1697,9 @@ export class SupplyWizardHandler {
             return 'Отмена не подтверждена';
         }
 
+        if (order.operationId) {
+            await this.orderStore.deleteByOperationId(chatId, order.operationId);
+        }
         await this.orderStore.deleteById(chatId, order.id);
         const refreshedOrders = await this.orderStore.list(chatId);
 

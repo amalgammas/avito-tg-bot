@@ -153,6 +153,10 @@ export class SupplyOrderStore {
     await this.repository.delete({ chatId, taskId });
   }
 
+  async deleteByOperationId(chatId: string, operationId: string): Promise<void> {
+    await this.repository.delete({ chatId, operationId });
+  }
+
   async listTaskSummaries(chatId: string): Promise<SupplyWizardOrderSummary[]> {
     const tasks = await this.listTasks({ chatId, status: 'task' });
     return tasks.map((task) => this.mapEntityToSummary(task));
