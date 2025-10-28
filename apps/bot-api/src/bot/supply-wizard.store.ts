@@ -79,6 +79,7 @@ export type SupplyWizardStage =
   | 'authApiKey'
   | 'authClientId'
   | 'landing'
+  | 'support'
   | 'awaitSpreadsheet'
   | 'awaitDropOffQuery'
   | 'clusterPrompt'

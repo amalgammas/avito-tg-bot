@@ -128,11 +128,24 @@ export class SupplyWizardViewService {
         const rows: Array<Array<{ text: string; callback_data: string }>> = [
             [{ text: 'Новая поставка', callback_data: 'wizard:landing:start' }],
             [{ text: 'Мои задачи', callback_data: 'wizard:tasks:list' }],
+            [{ text: 'Поддержка', callback_data: 'wizard:support' }],
         ];
         if (state.orders.length) {
             rows.push([{ text: 'Мои поставки', callback_data: 'wizard:orders:list' }]);
         }
         return rows;
+    }
+
+    renderSupportInfo(): string {
+        return [
+            '<b>Поддержка</b>',
+            '',
+            'Вопросы, замечания, предложения пишите в Telegram  https://t.me/dmitry_smartstocker',
+        ].join('\n');
+    }
+
+    buildSupportKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+        return this.withNavigation([], { back: 'wizard:landing:back' });
     }
 
     renderUploadPrompt(): string {
@@ -141,7 +154,7 @@ export class SupplyWizardViewService {
             '',
             'Бот использует формат Ozon для создания поставок.',
             '',
-            'https://disk.yandex.ru/i/a0vDXZdlImtPUA',
+            '<a href="https://disk.yandex.ru/i/a0vDXZdlImtPUA">Скачать шаблон поставки</a>',
             '',
             'На листе 3 столбца: артикул, имя (необязательно), количество',
             '',
@@ -190,7 +203,9 @@ export class SupplyWizardViewService {
             ],
         ];
 
-        return this.withCancel(rows);
+        const keyboard = this.withNavigation(rows, { back: 'wizard:ready:back' });
+        keyboard.push([{ text: 'Отмена', callback_data: 'wizard:cancel' }]);
+        return keyboard;
     }
 
     renderOrdersList(state: SupplyWizardState): string {

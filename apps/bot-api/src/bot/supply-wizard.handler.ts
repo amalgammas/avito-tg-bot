@@ -39,7 +39,7 @@ export class SupplyWizardHandler {
     private readonly draftPollMaxAttempts = 1_000;
     private readonly draftRecreateMaxAttempts = 1_000;
     private readonly draftLifetimeMs = 30 * 60 * 1000;
-    private readonly readyDaysMin = 2;
+    private readonly readyDaysMin = 0;
     private readonly readyDaysMax = 28;
     private readonly warehousePageSize = 10;
     private latestDraftWarehouses: SupplyWizardDraftWarehouseOption[] = [];
@@ -442,14 +442,14 @@ export class SupplyWizardHandler {
         const normalizedText = text.trim().replace(',', '.');
         const parsed = Number(normalizedText);
         if (!Number.isFinite(parsed)) {
-            await ctx.reply('Введите число: 0 или значение от 2 до 28.');
+            await ctx.reply('Введите число: 0 или значение от 1 до 28.');
             return;
         }
 
         const readyInDays = Math.floor(parsed);
         const handled = await this.applyReadyDays(ctx, chatId, state, readyInDays);
         if (!handled) {
-            await ctx.reply('Используйте 0 для первого доступного слота или число от 2 до 28.');
+            await ctx.reply('Используйте 0 для первого доступного слота или число от 1 до 28.');
         }
     }
 
@@ -801,6 +801,9 @@ export class SupplyWizardHandler {
             case 'landing':
                 await this.onLandingCallback(ctx, chatId, state, rest);
                 return;
+            case 'support':
+                await this.onSupportCallback(ctx, chatId, state, rest);
+                return;
             case 'orders':
                 await this.onOrdersCallback(ctx, chatId, state, rest);
                 return;
@@ -1019,6 +1022,153 @@ export class SupplyWizardHandler {
                 await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
                 return;
         }
+    }
+
+    private async onSupportCallback(
+        ctx: Context,
+        chatId: string,
+        state: SupplyWizardState,
+        parts: string[],
+    ): Promise<void> {
+        const action = parts[0];
+
+        if (!action) {
+            await this.showSupportInfo(ctx, chatId, state);
+            await this.safeAnswerCbQuery(ctx, chatId);
+            return;
+        }
+
+        if (action === 'back') {
+            await this.showLanding(ctx, chatId, state);
+            await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись назад');
+            return;
+        }
+
+        await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
+    }
+
+    private async showSupportInfo(
+        ctx: Context,
+        chatId: string,
+        fallback: SupplyWizardState,
+    ): Promise<void> {
+        const state =
+            this.wizardStore.update(chatId, (current) => {
+                if (!current) return undefined;
+                return {
+                    ...current,
+                    stage: 'support',
+                };
+            }) ?? fallback;
+
+        await this.view.updatePrompt(
+            ctx,
+            chatId,
+            state,
+            this.view.renderSupportInfo(),
+            this.view.buildSupportKeyboard(),
+            { parseMode: 'HTML' },
+        );
+    }
+
+    private async handleReadyBack(
+        ctx: Context,
+        chatId: string,
+        fallback: SupplyWizardState,
+    ): Promise<void> {
+        const latest = this.wizardStore.get(chatId) ?? fallback;
+        if (!latest) {
+            await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
+            return;
+        }
+
+        if (latest.draftWarehouses?.length) {
+            await this.showDraftWarehouseSelectionPrompt(ctx, chatId, latest);
+            await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись к выбору склада');
+            return;
+        }
+
+        if (latest.selectedClusterId && latest.selectedDropOffId) {
+            const updated =
+                this.wizardStore.update(chatId, (current) => {
+                    if (!current) return undefined;
+                    return {
+                        ...current,
+                        stage: 'warehouseSelect',
+                        readyInDays: undefined,
+                        selectedTimeslot: undefined,
+                        draftTimeslots: [],
+                    };
+                }) ?? latest;
+
+            await this.showWarehouseSelection(ctx, chatId, updated);
+            await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись к выбору склада');
+            return;
+        }
+
+        await this.showLanding(ctx, chatId, latest);
+        await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись назад');
+    }
+
+    private async showDraftWarehouseSelectionPrompt(
+        ctx: Context,
+        chatId: string,
+        fallback: SupplyWizardState,
+    ): Promise<void> {
+        const state =
+            this.wizardStore.update(chatId, (current) => {
+                if (!current) return undefined;
+                return {
+                    ...current,
+                    stage: 'draftWarehouseSelect',
+                    readyInDays: undefined,
+                    selectedTimeslot: undefined,
+                    draftTimeslots: [],
+                };
+            }) ?? fallback;
+
+        const warehouses = state.draftWarehouses ?? [];
+
+        if (!warehouses.length) {
+            await this.view.updatePrompt(
+                ctx,
+                chatId,
+                state,
+                'Список складов пока пуст. Подождите пару секунд и попробуйте снова.',
+                this.view.withCancel(),
+            );
+            return;
+        }
+
+        const headerLines = ['Черновик готов ✅'];
+        if (state.draftOperationId) {
+            headerLines.push(`operation_id: ${state.draftOperationId}`);
+        }
+        if (typeof state.draftId === 'number') {
+            headerLines.push(`draft_id: ${state.draftId}`);
+        }
+        if (state.draftExpiresAt) {
+            headerLines.push(`Действителен примерно до ${this.formatDraftExpiresAt(state.draftExpiresAt)}.`);
+        }
+
+        const summaryLines = this.view.formatDraftWarehouseSummary(warehouses);
+
+        const promptText = [
+            ...headerLines,
+            '',
+            'Склады, готовые принять поставку:',
+            ...summaryLines,
+            '',
+            'Выберите склад кнопкой ниже, чтобы продолжить.',
+        ].join('\n');
+
+        await this.view.updatePrompt(
+            ctx,
+            chatId,
+            state,
+            promptText,
+            this.view.buildDraftWarehouseKeyboard(state),
+        );
     }
 
     private async showLanding(
@@ -1313,6 +1463,10 @@ export class SupplyWizardHandler {
                         await this.promptReadyDays(ctx, chatId, latest);
                     }
                 }
+                return;
+            }
+            case 'back': {
+                await this.handleReadyBack(ctx, chatId, state);
                 return;
             }
             default:
