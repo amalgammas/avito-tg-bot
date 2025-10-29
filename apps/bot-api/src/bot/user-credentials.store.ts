@@ -34,14 +34,7 @@ export class UserCredentialsStore {
   }
 
   async clear(chatId: string): Promise<void> {
-    await this.repository.update(
-      { chatId },
-      {
-        clientId: null,
-        apiKey: null,
-        verifiedAt: null,
-      },
-    );
+    await this.repository.delete({ chatId });
   }
 
   async has(chatId: string): Promise<boolean> {

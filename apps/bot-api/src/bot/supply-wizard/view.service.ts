@@ -133,6 +133,7 @@ export class SupplyWizardViewService {
             rows.push([{ text: 'Мои поставки', callback_data: 'wizard:orders:list' }]);
         }
 
+        rows.push([{ text: 'Сбросить авторизацию', callback_data: 'wizard:authReset:prompt' }]);
         rows.push([{ text: 'Поддержка', callback_data: 'wizard:support' }]);
         return rows;
     }
@@ -209,6 +210,23 @@ export class SupplyWizardViewService {
         return keyboard;
     }
 
+    renderAuthResetPrompt(): string {
+        return [
+            '<b>Сбросить авторизацию?</b>',
+        '',
+            'Это удалит все сохранённые ключи пользователя. Продолжить?'
+        ].join('\n');
+    }
+
+    buildAuthResetKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+        return [
+            [
+                { text: 'Да, удалить', callback_data: 'wizard:authReset:confirm' },
+                { text: 'Нет', callback_data: 'wizard:authReset:cancel' },
+            ],
+        ];
+    }
+
     renderOrdersList(state: SupplyWizardState): string {
         if (!state.orders.length) {
             return 'Список поставок пуст. Создайте новую поставку.';
@@ -239,6 +257,7 @@ export class SupplyWizardViewService {
     renderOrderDetails(order: SupplyWizardOrderSummary): string {
         const lines = [
             `Поставка №${order.orderId ?? order.operationId ?? order.id}`,
+            '\n',
             order.clusterName ? `Кластер: ${order.clusterName}` : undefined,
             order.dropOffName ? `Пункт сдачи: ${order.dropOffName}` : undefined,
             order.warehouse ? `Склад: ${order.warehouse}` : undefined,
@@ -247,9 +266,11 @@ export class SupplyWizardViewService {
                 : order.arrival
                     ? `Время отгрузки: ${order.arrival}`
                     : undefined,
-            '',
+            '\n',
             'Товары:',
             ...order.items.map((item) => `• ${item.article} × ${item.quantity}`),
+            '\n',
+            'Посмотреть поставку в ЛК Ozon: <a href=`https://seller.ozon.ru/app/supply/orders/${order.orderId}`>ссылка</a>'
         ].filter((value): value is string => Boolean(value));
         return lines.join('\n');
     }

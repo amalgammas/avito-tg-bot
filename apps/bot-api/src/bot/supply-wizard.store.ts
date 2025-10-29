@@ -93,6 +93,7 @@ export type SupplyWizardStage =
   | 'orderDetails'
   | 'tasksList'
   | 'taskDetails'
+  | 'authResetConfirm'
   | 'awaitReadyDays'
   | 'processing';
 

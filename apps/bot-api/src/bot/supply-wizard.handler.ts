@@ -809,6 +809,9 @@ export class SupplyWizardHandler {
             case 'support':
                 await this.onSupportCallback(ctx, chatId, state, rest);
                 return;
+            case 'authReset':
+                await this.onAuthResetCallback(ctx, chatId, state, rest);
+                return;
             case 'orders':
                 await this.onOrdersCallback(ctx, chatId, state, rest);
                 return;
@@ -1050,6 +1053,74 @@ export class SupplyWizardHandler {
         }
 
         await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
+    }
+
+    private async onAuthResetCallback(
+        ctx: Context,
+        chatId: string,
+        state: SupplyWizardState,
+        parts: string[],
+    ): Promise<void> {
+        const action = parts[0];
+
+        switch (action) {
+            case 'prompt': {
+                await this.promptAuthReset(ctx, chatId, state);
+                await this.safeAnswerCbQuery(ctx, chatId);
+                return;
+            }
+            case 'confirm': {
+                await this.safeAnswerCbQuery(ctx, chatId, 'Удаляем ключи…');
+                await this.handleAuthResetConfirm(ctx, chatId);
+                return;
+            }
+            case 'cancel': {
+                await this.showLanding(ctx, chatId, state);
+                await this.safeAnswerCbQuery(ctx, chatId, 'Отменено');
+                return;
+            }
+            default:
+                await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
+                return;
+        }
+    }
+
+    private async promptAuthReset(
+        ctx: Context,
+        chatId: string,
+        fallback: SupplyWizardState,
+    ): Promise<void> {
+        const updated =
+            this.wizardStore.update(chatId, (current) => {
+                if (!current) return undefined;
+                return {
+                    ...current,
+                    stage: 'authResetConfirm',
+                };
+            }) ?? fallback;
+
+        await this.view.updatePrompt(
+            ctx,
+            chatId,
+            updated,
+            this.view.renderAuthResetPrompt(),
+            this.view.buildAuthResetKeyboard(),
+            { parseMode: 'HTML' },
+        );
+    }
+
+    private async handleAuthResetConfirm(ctx: Context, chatId: string): Promise<void> {
+        await this.credentialsStore.clear(chatId);
+        this.wizardStore.clear(chatId);
+
+        await ctx.reply('✅ Ключи удалены из базы бота.');
+
+        await this.adminNotifier.notifyWizardEvent({
+            ctx,
+            event: 'auth.cleared',
+        });
+
+        await this.start(ctx);
     }
 
     private async showSupportInfo(
