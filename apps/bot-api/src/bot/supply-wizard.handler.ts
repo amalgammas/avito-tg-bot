@@ -44,6 +44,8 @@ export class SupplyWizardHandler {
     private readonly readyDaysMin = 0;
     private readonly readyDaysMax = 28;
     private readonly warehousePageSize = 10;
+    private readonly orderIdPollAttempts = 5;
+    private readonly orderIdPollDelayMs = 1_000;
     private readonly cancelStatusMaxAttempts = 10;
     private readonly cancelStatusPollDelayMs = 1_000;
     private latestDraftWarehouses: SupplyWizardDraftWarehouseOption[] = [];
@@ -629,8 +631,6 @@ export class SupplyWizardHandler {
             (typeof updated.selectedWarehouseId === 'number' ? `Склад ${updated.selectedWarehouseId}` : '—');
 
         const summaryLines = [
-            `Задача поиска запущена. Проверяйте задачи в разделе «Мои задачи».`,
-            ``,
             `Кластер: ${updated.selectedClusterName ?? '—'}`,
             `Склад: ${warehouseLabel}`,
             `Пункт сдачи: ${updated.selectedDropOffName ?? updated.selectedDropOffId ?? '—'}`,
@@ -793,7 +793,7 @@ export class SupplyWizardHandler {
 
         const state = this.wizardStore.get(chatId);
         if (!state) {
-            await this.safeAnswerCbQuery(ctx, chatId, 'Мастер не запущен');
+            await this.safeAnswerCbQuery(ctx, chatId, 'Перезапустите бота, нажав /start');
             return;
         }
 
@@ -1577,17 +1577,77 @@ export class SupplyWizardHandler {
             return 'operation_id отсутствует';
         }
 
+        let resolvedOrderId = order.orderId;
+        if (!resolvedOrderId) {
+            let status: OzonSupplyCreateStatus | undefined;
+            try {
+                status = await this.ozonApi.getSupplyCreateStatus(operationId, credentials);
+            } catch (error) {
+                const message = `Не удалось получить статус поставки: ${this.describeError(error)}`;
+                await ctx.reply(`❌ ${message}`);
+                await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
+                    `operation: ${operationId}`,
+                    message,
+                ]);
+                return 'Ошибка';
+            }
+
+            const ids = this.extractOrderIdsFromStatus(status);
+            resolvedOrderId = ids[0];
+            if (!resolvedOrderId) {
+                await ctx.reply('❌ Ozon не вернул идентификатор заказа для этой поставки. Попробуйте позже.');
+                await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
+                    `operation: ${operationId}`,
+                    'order_ids: []',
+                ]);
+                return 'order_id не найден';
+            }
+
+            await this.orderStore.setOrderId(chatId, order.operationId ?? operationId, resolvedOrderId);
+            this.wizardStore.update(chatId, (existing) => {
+                if (!existing) return undefined;
+                const orders = existing.orders.map((item) => {
+                    if (
+                        (item.operationId && item.operationId === order.operationId) ||
+                        item.id === order.id
+                    ) {
+                        return {
+                            ...item,
+                            orderId: resolvedOrderId,
+                            id: String(resolvedOrderId),
+                        };
+                    }
+                    return item;
+                });
+                return {
+                    ...existing,
+                    orders,
+                };
+            });
+        }
+
+        if (!resolvedOrderId) {
+            await ctx.reply('❌ Не удалось определить order_id для этой поставки.');
+            return 'order_id не найден';
+        }
+
+        const refreshedState = this.wizardStore.get(chatId) ?? current;
+        const normalizedOrder =
+            refreshedState.orders.find((item) => item.orderId === resolvedOrderId) ??
+            refreshedState.orders.find((item) => item.operationId === order.operationId) ??
+            order;
+
         const aligned =
             this.wizardStore.update(chatId, (existing) => {
                 if (!existing) return undefined;
                 return {
                     ...existing,
                     stage: 'orderDetails',
-                    activeOrderId: order.operationId ?? order.id,
+                    activeOrderId: normalizedOrder.id,
                 };
-            }) ?? current;
+            }) ?? refreshedState;
 
-        const orderDetailsText = this.view.renderOrderDetails(order);
+        const orderDetailsText = this.view.renderOrderDetails(normalizedOrder);
         const progressText = [orderDetailsText, '', '⏳ Отменяю поставку...'].join('\n');
         const progressKeyboard = this.view.withNavigation([], { back: 'wizard:orders:list' });
 
@@ -1599,48 +1659,9 @@ export class SupplyWizardHandler {
             progressKeyboard,
         );
 
-        let createStatus: OzonSupplyCreateStatus;
-        try {
-            createStatus = await this.ozonApi.getSupplyCreateStatus(operationId, credentials);
-        } catch (error) {
-            const message = `Не удалось получить статус поставки: ${this.describeError(error)}`;
-            await ctx.reply(`❌ ${message}`);
-            await this.view.updatePrompt(
-                ctx,
-                chatId,
-                aligned,
-                orderDetailsText,
-                this.view.buildOrderDetailsKeyboard(order),
-            );
-            await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
-                `operation: ${operationId}`,
-                message,
-            ]);
-            return 'Ошибка';
-        }
-
-        const orderIds = this.extractOrderIdsFromStatus(createStatus);
-        if (!orderIds.length) {
-            await ctx.reply('❌ Ozon не вернул идентификатор заказа для этой поставки. Попробуйте позже.');
-            await this.view.updatePrompt(
-                ctx,
-                chatId,
-                aligned,
-                orderDetailsText,
-                this.view.buildOrderDetailsKeyboard(order),
-            );
-            await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
-                `operation: ${operationId}`,
-                'order_ids: []',
-            ]);
-            return 'order_id не найден';
-        }
-
-        const primaryOrderId = orderIds[0];
-
         let cancelOperationId: string | undefined;
         try {
-            cancelOperationId = await this.ozonApi.cancelSupplyOrder(primaryOrderId, credentials);
+            cancelOperationId = await this.ozonApi.cancelSupplyOrder(resolvedOrderId, credentials);
         } catch (error) {
             const message = `Не удалось отправить запрос на отмену: ${this.describeError(error)}`;
             await ctx.reply(`❌ ${message}`);
@@ -1649,11 +1670,11 @@ export class SupplyWizardHandler {
                 chatId,
                 aligned,
                 orderDetailsText,
-                this.view.buildOrderDetailsKeyboard(order),
+                this.view.buildOrderDetailsKeyboard(normalizedOrder),
             );
             await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
                 `operation: ${operationId}`,
-                `order_id: ${primaryOrderId}`,
+                `order_id: ${resolvedOrderId}`,
                 message,
             ]);
             return 'Ошибка';
@@ -1666,11 +1687,11 @@ export class SupplyWizardHandler {
                 chatId,
                 aligned,
                 orderDetailsText,
-                this.view.buildOrderDetailsKeyboard(order),
+                this.view.buildOrderDetailsKeyboard(normalizedOrder),
             );
             await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
                 `operation: ${operationId}`,
-                `order_id: ${primaryOrderId}`,
+                `order_id: ${resolvedOrderId}`,
                 'cancel operation_id missing',
             ]);
             return 'operation_id отсутствует';
@@ -1686,11 +1707,11 @@ export class SupplyWizardHandler {
                 chatId,
                 aligned,
                 orderDetailsText,
-                this.view.buildOrderDetailsKeyboard(order),
+                this.view.buildOrderDetailsKeyboard(normalizedOrder),
             );
             await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
                 `operation: ${operationId}`,
-                `order_id: ${primaryOrderId}`,
+                `order_id: ${resolvedOrderId}`,
                 `cancel_operation: ${cancelOperationId}`,
                 `status: ${reason}`,
             ]);
@@ -1699,8 +1720,10 @@ export class SupplyWizardHandler {
 
         if (order.operationId) {
             await this.orderStore.deleteByOperationId(chatId, order.operationId);
+            await this.orderStore.deleteById(chatId, order.operationId);
+        } else {
+            await this.orderStore.deleteById(chatId, normalizedOrder.id);
         }
-        await this.orderStore.deleteById(chatId, order.id);
         const refreshedOrders = await this.orderStore.list(chatId);
 
         const updated =
@@ -1715,8 +1738,8 @@ export class SupplyWizardHandler {
             }) ?? aligned;
 
         const successInfo = [
-            `Поставка №${operationId} отменена ✅`,
-            cancelStatus?.result?.is_order_cancelled ? 'Заказ на стороне Ozon отмечен как отменён.' : undefined,
+            `Поставка №${resolvedOrderId} отменена ✅`,
+            cancelStatus?.result?.is_order_cancelled ? 'Поставка в ЛК Ozon отменена.' : undefined,
         ].filter((line): line is string => Boolean(line));
         const successText = successInfo.join('\n') || 'Поставка отменена ✅';
 
@@ -1743,7 +1766,7 @@ export class SupplyWizardHandler {
 
         await this.notifyAdmin(ctx, 'wizard.orderCancelled', [
             `operation: ${operationId}`,
-            `order_id: ${primaryOrderId}`,
+            `order_id: ${resolvedOrderId}`,
             `cancel_operation: ${cancelOperationId}`,
         ]);
 
@@ -1766,6 +1789,15 @@ export class SupplyWizardHandler {
             state.selectedDropOffName ??
             state.selectedDropOffId?.toString();
 
+        const credentials = await this.resolveCredentials(chatId);
+        let orderId: number | undefined;
+        if (credentials && operationId) {
+            orderId = await this.fetchOrderIdWithRetries(operationId, credentials);
+            if (!orderId) {
+                this.logger.warn(`Не удалось получить order_id для ${operationId} после ${this.orderIdPollAttempts} попыток`);
+            }
+        }
+
         const items: SupplyWizardSupplyItem[] = task.items.map((item) => ({
             article: item.article,
             quantity: item.quantity,
@@ -1773,7 +1805,8 @@ export class SupplyWizardHandler {
         }));
 
         const entry: SupplyWizardOrderSummary = {
-            id: operationId,
+            id: orderId ? String(orderId) : operationId,
+            orderId,
             taskId: task.taskId,
             operationId,
             status: 'supply',
@@ -1789,7 +1822,15 @@ export class SupplyWizardHandler {
         const updated =
             this.wizardStore.update(chatId, (current) => {
                 if (!current) return undefined;
-                const withoutDuplicate = current.orders.filter((order) => order.id !== entry.id);
+                const withoutDuplicate = current.orders.filter((order) => {
+                    if (entry.orderId && order.orderId && order.orderId === entry.orderId) {
+                        return false;
+                    }
+                    if (order.operationId && order.operationId === entry.operationId) {
+                        return false;
+                    }
+                    return order.id !== entry.id;
+                });
                 return {
                     ...current,
                     orders: [...withoutDuplicate, entry],
@@ -1812,6 +1853,7 @@ export class SupplyWizardHandler {
         await this.orderStore.completeTask(chatId, {
             taskId: task.taskId,
             operationId,
+            orderId,
             arrival: entry.arrival,
             warehouse: entry.warehouse,
             dropOffName: entry.dropOffName,
@@ -1836,7 +1878,7 @@ export class SupplyWizardHandler {
         );
 
         await this.notifyAdmin(ctx, 'wizard.supplyDone', [
-            `order: ${entry.id}`,
+            orderId ? `order: ${orderId}` : `operation: ${operationId}`,
             entry.arrival ? `arrival: ${entry.arrival}` : undefined,
             entry.warehouse ? `warehouse: ${entry.warehouse}` : undefined,
         ]);
@@ -1902,6 +1944,31 @@ export class SupplyWizardHandler {
         }
 
         return lastStatus;
+    }
+
+    private async fetchOrderIdWithRetries(
+        operationId: string,
+        credentials: OzonCredentials,
+    ): Promise<number | undefined> {
+        for (let attempt = 0; attempt < this.orderIdPollAttempts; attempt++) {
+            try {
+                const status = await this.ozonApi.getSupplyCreateStatus(operationId, credentials);
+                const orderId = this.extractOrderIdsFromStatus(status)[0];
+                if (orderId) {
+                    return orderId;
+                }
+            } catch (error) {
+                this.logger.warn(
+                    `Не удалось получить order_id для ${operationId} (попытка ${attempt + 1}/${this.orderIdPollAttempts}): ${this.describeError(error)}`,
+                );
+            }
+
+            if (attempt < this.orderIdPollAttempts - 1) {
+                await this.sleep(this.orderIdPollDelayMs);
+            }
+        }
+
+        return undefined;
     }
 
     private isCancelSuccessful(status?: OzonSupplyCancelStatus): boolean {

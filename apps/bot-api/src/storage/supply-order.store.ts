@@ -18,11 +18,13 @@ export interface SupplyOrderTaskPayload {
   timeslotLabel?: string;
   warehouseAutoSelect?: boolean;
   timeslotAutoSelect?: boolean;
+  orderId?: number;
 }
 
 export interface SupplyOrderCompletionPayload {
   taskId: string;
   operationId: string;
+  orderId?: number;
   arrival?: string;
   warehouse?: string;
   dropOffName?: string;
@@ -102,6 +104,7 @@ export class SupplyOrderStore {
     entity.completedAt = undefined;
     entity.warehouseAutoSelect = payload.warehouseAutoSelect ?? false;
     entity.timeslotAutoSelect = payload.timeslotAutoSelect ?? true;
+    entity.orderId = payload.orderId ?? entity.orderId;
     entity.arrival = payload.timeslotAutoSelect
       ? payload.timeslotLabel ?? entity.arrival
       : entity.arrival;
@@ -125,6 +128,12 @@ export class SupplyOrderStore {
     entity.status = 'supply';
     entity.taskId = payload.taskId;
     entity.operationId = payload.operationId;
+    entity.orderId = payload.orderId ?? entity.orderId;
+    if (payload.orderId) {
+      entity.id = String(payload.orderId);
+    } else if (!entity.id) {
+      entity.id = payload.operationId ?? payload.taskId;
+    }
     entity.arrival = payload.arrival ?? entity.arrival;
     entity.warehouse = payload.warehouse ?? entity.warehouse;
     entity.dropOffName = payload.dropOffName ?? entity.dropOffName;
@@ -157,6 +166,25 @@ export class SupplyOrderStore {
     await this.repository.delete({ chatId, operationId });
   }
 
+  async setOrderId(chatId: string, operationId: string | undefined, orderId: number): Promise<void> {
+    if (!operationId) return;
+
+    let entity =
+      (await this.repository.findOne({ where: { chatId, operationId } })) ??
+      (await this.repository.findOne({ where: { chatId, id: operationId } }));
+
+    if (!entity) {
+      return;
+    }
+
+    entity.orderId = orderId;
+    entity.id = String(orderId);
+    entity.operationId = entity.operationId ?? operationId;
+    entity.updatedAt = Date.now();
+
+    await this.repository.save(entity);
+  }
+
   async listTaskSummaries(chatId: string): Promise<SupplyWizardOrderSummary[]> {
     const tasks = await this.listTasks({ chatId, status: 'task' });
     return tasks.map((task) => this.mapEntityToSummary(task));
@@ -169,8 +197,11 @@ export class SupplyOrderStore {
       sku: item.sku,
     }));
 
+    const summaryId = record.orderId ? String(record.orderId) : record.operationId ?? record.id;
+
     return {
-      id: record.operationId ?? record.id,
+      id: summaryId,
+      orderId: record.orderId ?? undefined,
       taskId: record.taskId ?? record.id,
       operationId: record.operationId,
       status: record.status ?? 'supply',

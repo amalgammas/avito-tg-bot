@@ -29,6 +29,9 @@ export class SupplyOrderEntity {
   @Column({ type: 'text', nullable: true })
   operationId?: string;
 
+  @Column({ type: 'integer', nullable: true })
+  orderId?: number;
+
   @Column({ type: 'text', nullable: true })
   arrival?: string;
 

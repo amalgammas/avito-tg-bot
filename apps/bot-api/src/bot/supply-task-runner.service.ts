@@ -12,6 +12,7 @@ import { SupplyOrderStore } from '../storage/supply-order.store';
 import type { SupplyOrderEntity } from '../storage/entities/supply-order.entity';
 import { UserCredentialsStore } from './user-credentials.store';
 import { AdminNotifierService } from './admin-notifier.service';
+import { OzonApiService, OzonCredentials, OzonSupplyCreateStatus } from '@bot/config/ozon-api.service';
 
 @Injectable()
 export class SupplyTaskRunnerService implements OnApplicationBootstrap {
@@ -22,6 +23,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     private readonly credentialsStore: UserCredentialsStore,
     private readonly supplyService: OzonSupplyService,
     private readonly adminNotifier: AdminNotifierService,
+    private readonly ozonApi: OzonApiService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -70,7 +72,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
         readyInDays,
         dropOffWarehouseId: record.dropOffId,
         skipDropOffValidation: true,
-        onEvent: async (result) => this.handleTaskEvent(record, result),
+        onEvent: async (result) => this.handleTaskEvent(record, result, credentials),
       });
     } catch (error) {
       this.logger.error(`Task ${record.taskId ?? record.id} resume failed: ${this.describeError(error)}`);
@@ -88,6 +90,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
   private async handleTaskEvent(
     record: SupplyOrderEntity,
     result: OzonSupplyProcessResult,
+    credentials: OzonCredentials,
   ): Promise<void> {
     const taskLabel = record.taskId ?? record.id;
     switch (result.event) {
@@ -98,10 +101,26 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
           `draft-${result.task.draftId ?? result.task.taskId ?? taskLabel}`;
         const arrival = record.arrival ?? this.describeTimeslot(result.task.selectedTimeslot);
         const warehouse = record.warehouse ?? record.warehouseName ?? record.dropOffName;
+        let orderId: number | undefined;
+
+        if (operationId) {
+          try {
+            const status = await this.ozonApi.getSupplyCreateStatus(operationId, credentials);
+            orderId = this.extractOrderIdsFromStatus(status)[0];
+            if (orderId) {
+              this.logger.debug(`Resolved order_id ${orderId} for task ${taskLabel}`);
+            }
+          } catch (error) {
+            this.logger.warn(
+              `Failed to resolve order_id for ${operationId}: ${this.describeError(error)}`,
+            );
+          }
+        }
 
         await this.orderStore.completeTask(record.chatId, {
           taskId: taskLabel,
           operationId,
+          orderId,
           arrival,
           warehouse,
           dropOffName: record.dropOffName,
@@ -109,13 +128,16 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
           task: result.task,
         });
 
+        const notifyLines = [
+          `task: ${taskLabel}`,
+          `operation: ${operationId}`,
+          orderId ? `order_id: ${orderId}` : undefined,
+          `chat: ${record.chatId}`,
+        ].filter((value): value is string => Boolean(value));
+
         await this.adminNotifier.notifyWizardEvent({
           event: 'task.resumedSupplyCreated',
-          lines: [
-            `task: ${taskLabel}`,
-            `operation: ${operationId}`,
-            `chat: ${record.chatId}`,
-          ],
+          lines: notifyLines,
         });
         break;
       }
@@ -162,5 +184,32 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       return `${error.name}: ${error.message}`;
     }
     return String(error);
+  }
+
+  private extractOrderIdsFromStatus(status: OzonSupplyCreateStatus | undefined): number[] {
+    if (!status) return [];
+
+    const collected: Array<number | string> = [];
+    const direct = (status as any)?.order_ids;
+    if (Array.isArray(direct)) {
+      collected.push(...direct);
+    }
+    const nested = status.result?.order_ids;
+    if (Array.isArray(nested)) {
+      collected.push(...nested);
+    }
+
+    return collected
+      .map((value) => {
+        if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+          return Math.trunc(value);
+        }
+        if (typeof value === 'string') {
+          const parsed = Number(value.trim());
+          return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : undefined;
+        }
+        return undefined;
+      })
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
   }
 }

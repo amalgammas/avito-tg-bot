@@ -112,8 +112,7 @@ export class SupplyWizardViewService {
             const last = state.orders[state.orders.length - 1];
             lines.push(
                 '',
-                `Последняя поставка: № ${last.operationId ?? last.id}${last.timeslotLabel ? ` — слот ${last.timeslotLabel}` : ''}.`,
-                'История доступна в разделе «Мои поставки».',
+                'Созданные поставки доступны в разделе «Мои поставки».',
             );
         } else {
             lines.push(
@@ -127,12 +126,14 @@ export class SupplyWizardViewService {
     buildLandingKeyboard(state: SupplyWizardState): Array<Array<{ text: string; callback_data: string }>> {
         const rows: Array<Array<{ text: string; callback_data: string }>> = [
             [{ text: 'Новая поставка', callback_data: 'wizard:landing:start' }],
-            [{ text: 'Мои задачи', callback_data: 'wizard:tasks:list' }],
-            [{ text: 'Поддержка', callback_data: 'wizard:support' }],
+            [{ text: 'Мои задачи', callback_data: 'wizard:tasks:list' }]
         ];
+
         if (state.orders.length) {
             rows.push([{ text: 'Мои поставки', callback_data: 'wizard:orders:list' }]);
         }
+
+        rows.push([{ text: 'Поддержка', callback_data: 'wizard:support' }]);
         return rows;
     }
 
@@ -216,7 +217,8 @@ export class SupplyWizardViewService {
         const lines = ['Мои поставки:'];
         state.orders.forEach((order, index) => {
             const arrival = order.arrival ? ` — ${order.arrival}` : '';
-            lines.push(`${index + 1}. №${order.id}${arrival}`);
+            const label = order.orderId ?? order.operationId ?? order.id;
+            lines.push(`${index + 1}. №${label}${arrival}`);
         });
         lines.push('', 'Выберите поставку, чтобы посмотреть детали.');
         return lines.join('\n');
@@ -225,7 +227,7 @@ export class SupplyWizardViewService {
     buildOrdersListKeyboard(state: SupplyWizardState): Array<Array<{ text: string; callback_data: string }>> {
         const rows = state.orders.map((order) => [
             {
-                text: `№${order.id}${order.arrival ? ` • ${order.arrival}` : ''}`,
+                text: `№${order.orderId ?? order.operationId ?? order.id}${order.arrival ? ` • ${order.arrival}` : ''}`,
                 callback_data: `wizard:orders:details:${order.id}`,
             },
         ]);
@@ -236,7 +238,7 @@ export class SupplyWizardViewService {
 
     renderOrderDetails(order: SupplyWizardOrderSummary): string {
         const lines = [
-            `Поставка №${order.operationId ?? order.id}`,
+            `Поставка №${order.orderId ?? order.operationId ?? order.id}`,
             order.clusterName ? `Кластер: ${order.clusterName}` : undefined,
             order.dropOffName ? `Пункт сдачи: ${order.dropOffName}` : undefined,
             order.warehouse ? `Склад: ${order.warehouse}` : undefined,
@@ -257,7 +259,7 @@ export class SupplyWizardViewService {
             [
                 {
                     text: 'Отменить поставку',
-                    callback_data: `wizard:orders:cancel:${order.operationId ?? order.id}`,
+                    callback_data: `wizard:orders:cancel:${order.id}`,
                 },
             ],
         ];
@@ -311,13 +313,13 @@ export class SupplyWizardViewService {
 
         const lines = [
             `Задача ${this.formatTaskName(task.operationId ?? task.id)}`,
-            '',
+            '\n',
             task.dropOffName ? `Пункт сдачи: ${task.dropOffName}` : undefined,
             task.clusterName ? `Кластер: ${task.clusterName}` : undefined,
             task.warehouse ? `Склад: ${task.warehouse}` : undefined,
             '',
             task.timeslotLabel ? `Таймслот: ${task.timeslotLabel}` : undefined,
-            '',
+            '\n',
             'Товары:',
             ...displayedItems.map((item) => `• ${item.article} × ${item.quantity}`),
             ...(totalItems > limit
@@ -339,7 +341,7 @@ export class SupplyWizardViewService {
     renderSupplySuccess(order: SupplyWizardOrderSummary): string {
         const lines = [
             'Поставка создана ✅',
-            `ID: ${order.id}`,
+            `ID: ${order.orderId ?? order.id}`,
             order.timeslotLabel ? `Таймслот: ${order.timeslotLabel}` : order.arrival ? `Время отгрузки: ${order.arrival}` : undefined,
             order.warehouse ? `Склад: ${order.warehouse}` : undefined,
         ].filter((value): value is string => Boolean(value));

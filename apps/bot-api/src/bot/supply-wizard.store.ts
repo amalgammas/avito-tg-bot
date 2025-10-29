@@ -59,6 +59,7 @@ export interface SupplyWizardSupplyItem {
 
 export interface SupplyWizardOrderSummary {
   id: string;
+  orderId?: number;
   taskId?: string;
   operationId?: string;
   status?: SupplyOrderStatus;
