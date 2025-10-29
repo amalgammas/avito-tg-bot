@@ -8,6 +8,7 @@ import { InjectBot } from 'nestjs-telegraf';
 export class AdminNotifierService {
   private readonly logger = new Logger(AdminNotifierService.name);
   private readonly adminChatIds: string[];
+  private readonly broadcastChatId?: string;
 
   constructor(
     private readonly config: ConfigService,
@@ -15,13 +16,22 @@ export class AdminNotifierService {
   ) {
     const ids = this.config.get<string[]>('telegram.adminIds') ?? [];
     this.adminChatIds = ids.filter((value) => value.trim().length > 0);
+    this.broadcastChatId = this.config.get<string>('telegram.botAdminId')?.trim();
+    if (this.broadcastChatId && !/^[-]?\d+$/.test(this.broadcastChatId)) {
+      this.logger.warn(
+        `TELEGRAM_BOT_ADMIN expected to be chat id (integer), got "${this.broadcastChatId}". Messages may fail.`,
+      );
+    }
     if (!this.adminChatIds.length) {
       this.logger.log('Admin notifications disabled: TELEGRAM_ADMIN_IDS is empty');
+    }
+    if (!this.broadcastChatId) {
+      this.logger.log('Broadcast channel is not set (TELEGRAM_BOT_ADMIN). Logs will be delivered only to admins list.');
     }
   }
 
   isEnabled(): boolean {
-    return this.adminChatIds.length > 0;
+    return Boolean(this.broadcastChatId || this.adminChatIds.length);
   }
 
   async notifyWizardEvent(params: {
@@ -51,20 +61,36 @@ export class AdminNotifierService {
       messageLines.push('', ...lines);
     }
 
-    await this.broadcast(messageLines.join('\n'));
+    const text = messageLines.join('\n');
+
+    await this.broadcast(text);
   }
 
   private async broadcast(text: string): Promise<void> {
+    if (this.broadcastChatId) {
+      await this.sendMessage(this.broadcastChatId, text);
+    }
+
     for (const chatId of this.adminChatIds) {
-      try {
-        await this.bot.telegram.sendMessage(chatId, text);
-      } catch (error) {
-        if (error instanceof TelegramError && error.code === 403) {
-          this.logger.warn(`Unable to deliver admin notification to ${chatId}: ${error.message}`);
-          continue;
-        }
-        this.logger.error(`Failed to deliver admin notification to ${chatId}: ${error}`);
+      if (this.broadcastChatId && chatId === this.broadcastChatId) {
+        continue;
       }
+      const personalText = this.broadcastChatId
+        ? `${text}\n\n(Лог продублирован в канале ${this.broadcastChatId})`
+        : text;
+      await this.sendMessage(chatId, personalText);
+    }
+  }
+
+  private async sendMessage(chatId: string, text: string): Promise<void> {
+    try {
+      await this.bot.telegram.sendMessage(chatId, text);
+    } catch (error) {
+      if (error instanceof TelegramError && error.code === 403) {
+        this.logger.warn(`Unable to deliver admin notification to ${chatId}: ${error.message}`);
+        return;
+      }
+      this.logger.error(`Failed to deliver admin notification to ${chatId}: ${error}`);
     }
   }
 

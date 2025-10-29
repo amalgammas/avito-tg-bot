@@ -10,6 +10,7 @@ export interface AppConfig {
     webhookDomain?: string;
     webhookPath?: string;
     adminIds: string[];
+    botAdminId?: string;
     useWebhook?: boolean;
   };
 
@@ -44,6 +45,7 @@ export const configuration = (): AppConfig => ({
       .split(',')
       .map((value) => value.trim())
       .filter((value) => value.length > 0),
+    botAdminId: process.env.TELEGRAM_BOT_ADMIN ?? undefined,
     useWebhook:
       process.env.TELEGRAM_USE_WEBHOOK && process.env.TELEGRAM_USE_WEBHOOK.length
         ? !/^false$/i.test(process.env.TELEGRAM_USE_WEBHOOK)
