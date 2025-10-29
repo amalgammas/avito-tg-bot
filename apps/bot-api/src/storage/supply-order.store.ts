@@ -27,7 +27,12 @@ export interface SupplyOrderCompletionPayload {
   orderId?: number;
   arrival?: string;
   warehouse?: string;
+  warehouseName?: string;
+  warehouseId?: number;
   dropOffName?: string;
+  dropOffId?: number;
+  timeslotFrom?: string;
+  timeslotTo?: string;
   items: SupplyWizardSupplyItem[];
   task?: OzonSupplyTask;
 }
@@ -75,6 +80,10 @@ export class SupplyOrderStore {
     const existing = await this.repository.findOne({ where: { chatId, taskId } });
     const now = Date.now();
 
+    if (existing && existing.status === 'supply') {
+      return existing;
+    }
+
     const entity = existing ?? this.repository.create({
       id: taskId,
       chatId,
@@ -119,7 +128,7 @@ export class SupplyOrderStore {
 
     if (!entity) {
       entity = this.repository.create({
-        id: payload.operationId ?? payload.taskId,
+        id: payload.orderId ? String(payload.orderId) : payload.operationId ?? payload.taskId,
         chatId,
         createdAt: now,
       });
@@ -129,14 +138,15 @@ export class SupplyOrderStore {
     entity.taskId = payload.taskId;
     entity.operationId = payload.operationId;
     entity.orderId = payload.orderId ?? entity.orderId;
-    if (payload.orderId) {
-      entity.id = String(payload.orderId);
-    } else if (!entity.id) {
-      entity.id = payload.operationId ?? payload.taskId;
-    }
     entity.arrival = payload.arrival ?? entity.arrival;
-    entity.warehouse = payload.warehouse ?? entity.warehouse;
+    const warehouseDisplay = payload.warehouse ?? payload.warehouseName;
+    entity.warehouse = warehouseDisplay ?? entity.warehouse;
+    entity.warehouseId = payload.warehouseId ?? entity.warehouseId;
+    entity.warehouseName = payload.warehouseName ?? entity.warehouseName;
     entity.dropOffName = payload.dropOffName ?? entity.dropOffName;
+    entity.dropOffId = payload.dropOffId ?? entity.dropOffId;
+    entity.timeslotFrom = payload.timeslotFrom ?? entity.timeslotFrom;
+    entity.timeslotTo = payload.timeslotTo ?? entity.timeslotTo;
     entity.items = this.cloneSummaryItems(payload.items);
     entity.updatedAt = now;
     entity.completedAt = now;

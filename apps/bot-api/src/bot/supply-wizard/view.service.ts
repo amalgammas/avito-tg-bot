@@ -233,19 +233,20 @@ export class SupplyWizardViewService {
         }
 
         const lines = ['Мои поставки:'];
-        state.orders.forEach((order, index) => {
-            const arrival = order.arrival ? ` — ${order.arrival}` : '';
-            const label = order.orderId ?? order.operationId ?? order.id;
-            lines.push(`${index + 1}. №${label}${arrival}`);
-        });
-        lines.push('', 'Выберите поставку, чтобы посмотреть детали.');
+
+        // state.orders.forEach((order, index) => {
+        //     const arrival = order.arrival ? ` — ${order.arrival}` : '';
+        //     const label = order.orderId ?? order.operationId ?? order.id;
+        //     lines.push(`${index + 1}. №${label}${arrival}`);
+        // });
+        //lines.push('', 'Выберите поставку, чтобы посмотреть детали.');
         return lines.join('\n');
     }
 
     buildOrdersListKeyboard(state: SupplyWizardState): Array<Array<{ text: string; callback_data: string }>> {
         const rows = state.orders.map((order) => [
             {
-                text: `№${order.orderId ?? order.operationId ?? order.id}${order.arrival ? ` • ${order.arrival}` : ''}`,
+                text: `№${order.orderId ?? order.operationId ?? order.id}`,
                 callback_data: `wizard:orders:details:${order.id}`,
             },
         ]);
@@ -257,7 +258,7 @@ export class SupplyWizardViewService {
     renderOrderDetails(order: SupplyWizardOrderSummary): string {
         const lines = [
             `Поставка №${order.orderId ?? order.operationId ?? order.id}`,
-            '\n',
+            '',
             order.clusterName ? `Кластер: ${order.clusterName}` : undefined,
             order.dropOffName ? `Пункт сдачи: ${order.dropOffName}` : undefined,
             order.warehouse ? `Склад: ${order.warehouse}` : undefined,
@@ -266,11 +267,12 @@ export class SupplyWizardViewService {
                 : order.arrival
                     ? `Время отгрузки: ${order.arrival}`
                     : undefined,
-            '\n',
+            '',
             'Товары:',
             ...order.items.map((item) => `• ${item.article} × ${item.quantity}`),
             '\n',
-            'Посмотреть поставку в ЛК Ozon: <a href=`https://seller.ozon.ru/app/supply/orders/${order.orderId}`>ссылка</a>'
+            'Посмотреть поставку в ЛК Ozon 👇🏻',
+            `https://seller.ozon.ru/app/supply/orders/${order.orderId}`
         ].filter((value): value is string => Boolean(value));
         return lines.join('\n');
     }
@@ -296,21 +298,21 @@ export class SupplyWizardViewService {
         }
 
         const lines = ['Мои задачи:'];
-        pendingTasks.forEach((task, index) => {
-            let items = 0;
-            task.items.map((item) => items += item.quantity)
-
-            const desc = `${this.formatTaskName(task.id)}: ${items}шт. ${task.items.length} товаров`
-            const dropOff = task.dropOffName ? task.dropOffName : '';
-            const cluster = task.clusterName ? task.clusterName : '';
-            const warehouse = task.warehouse ? task.warehouse : '';
-
-            lines.push(`${index + 1}. ${desc}. ${dropOff} → ${cluster} → ${warehouse}`);
-        });
-        lines.push(
-            '',
-            'Выберите задачу, чтобы посмотреть детали или отменить её.'
-        );
+        // pendingTasks.forEach((task, index) => {
+        //     let items = 0;
+        //     task.items.map((item) => items += item.quantity)
+        //
+        //     const desc = `${this.formatTaskName(task.id)}: ${items}шт. ${task.items.length} товаров`
+        //     const dropOff = task.dropOffName ? task.dropOffName : '';
+        //     const cluster = task.clusterName ? task.clusterName : '';
+        //     const warehouse = task.warehouse ? task.warehouse : '';
+        //
+        //     lines.push(`${index + 1}. ${desc}. ${dropOff} → ${cluster} → ${warehouse}`);
+        // });
+        // lines.push(
+        //     '',
+        //     'Выберите задачу, чтобы посмотреть детали или отменить её.'
+        // );
 
         return lines.join('\n');
     }
@@ -868,7 +870,8 @@ export class SupplyWizardViewService {
             case 'draftError':
                 return `${prefix} Ошибка статуса черновика.${result.message ? ` ${result.message}` : ''}`;
             case 'timeslotMissing':
-                return `${prefix} Свободных таймслотов нет.`;
+                //return `${prefix} Свободных таймслотов нет.`;
+                return ``;
             case 'supplyCreated':
                 return `${prefix} ✅ Поставка создана. ${result.message ?? ''}`.trim();
             case 'supplyStatus':

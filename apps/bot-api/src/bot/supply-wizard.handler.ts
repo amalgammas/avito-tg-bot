@@ -33,6 +33,18 @@ import {
 import { AdminNotifierService } from './admin-notifier.service';
 import { SupplyWizardViewService } from './supply-wizard/view.service';
 
+interface SupplyOrderDetails {
+    dropOffId?: number;
+    dropOffName?: string;
+    dropOffAddress?: string;
+    storageWarehouseId?: number;
+    storageWarehouseName?: string;
+    storageWarehouseAddress?: string;
+    timeslotFrom?: string;
+    timeslotTo?: string;
+    timeslotLabel?: string;
+}
+
 @Injectable()
 export class SupplyWizardHandler {
     private readonly logger = new Logger(SupplyWizardHandler.name);
@@ -51,7 +63,7 @@ export class SupplyWizardHandler {
     private latestDraftWarehouses: SupplyWizardDraftWarehouseOption[] = [];
     private latestDraftId?: number;
     private latestDraftOperationId?: string;
-    private readonly taskAbortControllers = new Map<string, { controller: AbortController; taskId: string }>();
+    private readonly taskAbortControllers = new Map<string, { controller: AbortController; chatId: string }>();
 
     constructor(
         private readonly credentialsStore: UserCredentialsStore,
@@ -606,7 +618,7 @@ export class SupplyWizardHandler {
 
         if (!updated) {
             await ctx.reply('Мастер закрыт. Запустите заново.');
-            this.clearAbortController(chatId, task.taskId);
+            this.clearAbortController(task.taskId);
             return;
         }
 
@@ -637,7 +649,6 @@ export class SupplyWizardHandler {
         ];
 
         summaryLines.push(`Готовность к отгрузке: ${readyInDays} дн.`);
-        summaryLines.push('Таймслот и доступный склад будут выбраны автоматически.');
 
         try {
             await this.orderStore.saveTask(chatId, {
@@ -662,7 +673,7 @@ export class SupplyWizardHandler {
             });
 
             if (!this.wizardStore.get(chatId)) {
-                this.clearAbortController(chatId, task.taskId);
+                this.clearAbortController(task.taskId);
                 await this.orderStore.deleteByTaskId(chatId, task.taskId);
                 return;
             }
@@ -680,7 +691,7 @@ export class SupplyWizardHandler {
             ].join('\n');
 
             if (!this.wizardStore.get(chatId)) {
-                this.clearAbortController(chatId, task.taskId);
+                this.clearAbortController(task.taskId);
                 await this.orderStore.deleteByTaskId(chatId, task.taskId);
                 return;
             }
@@ -695,12 +706,12 @@ export class SupplyWizardHandler {
             );
             await this.notifyAdmin(ctx, 'wizard.supplyProcessing', summaryLines);
             if (!this.wizardStore.get(chatId)) {
-                this.clearAbortController(chatId, task.taskId);
+                this.clearAbortController(task.taskId);
                 await this.orderStore.deleteByTaskId(chatId, task.taskId);
                 return;
             }
         } catch (error) {
-            this.clearAbortController(chatId, task.taskId);
+            this.clearAbortController(task.taskId);
             throw error;
         }
 
@@ -755,7 +766,7 @@ export class SupplyWizardHandler {
             await this.view.sendErrorDetails(ctx, this.extractErrorPayload(error));
             await this.notifyAdmin(ctx, 'wizard.supplyError', [this.describeError(error)]);
         } finally {
-            this.clearAbortController(chatId, task.taskId);
+            this.clearAbortController(task.taskId);
         }
     }
 
@@ -1852,22 +1863,43 @@ export class SupplyWizardHandler {
         result?: OzonSupplyProcessResult,
     ): Promise<void> {
         const operationId = result?.operationId ?? this.extractOperationIdFromMessage(result?.message) ?? task.draftOperationId ?? `draft-${task.draftId ?? task.taskId}`;
-        const arrival = state.selectedTimeslot?.label ?? this.describeTimeslot(task.selectedTimeslot);
-        const warehouse =
-            state.selectedWarehouseName ??
-            task.warehouseName ??
-            (typeof state.selectedWarehouseId === 'number' ? `Склад ${state.selectedWarehouseId}` : undefined) ??
-            state.selectedDropOffName ??
-            state.selectedDropOffId?.toString();
 
         const credentials = await this.resolveCredentials(chatId);
         let orderId: number | undefined;
+        let orderDetails: SupplyOrderDetails | undefined;
         if (credentials && operationId) {
             orderId = await this.fetchOrderIdWithRetries(operationId, credentials);
             if (!orderId) {
                 this.logger.warn(`Не удалось получить order_id для ${operationId} после ${this.orderIdPollAttempts} попыток`);
+            } else {
+                orderDetails = await this.fetchSupplyOrderDetails(orderId, credentials);
             }
         }
+
+        const dropOffName =
+            orderDetails?.dropOffName ??
+            state.selectedDropOffName ??
+            state.selectedDropOffId?.toString();
+
+        const dropOffId = orderDetails?.dropOffId ?? state.selectedDropOffId ?? undefined;
+
+        const warehouseId = orderDetails?.storageWarehouseId ?? state.selectedWarehouseId ?? task.warehouseId;
+
+        const warehouseNameDetailed =
+            orderDetails?.storageWarehouseName ??
+            state.selectedWarehouseName ??
+            task.warehouseName ??
+            (typeof warehouseId === 'number' ? `Склад ${warehouseId}` : undefined);
+
+        const warehouseDisplay = warehouseNameDetailed ?? dropOffName;
+
+        const timeslotLabel =
+            orderDetails?.timeslotLabel ??
+            state.selectedTimeslot?.label ??
+            this.describeTimeslot(task.selectedTimeslot);
+
+        const timeslotFrom = orderDetails?.timeslotFrom ?? task.selectedTimeslot?.from_in_timezone;
+        const timeslotTo = orderDetails?.timeslotTo ?? task.selectedTimeslot?.to_in_timezone;
 
         const items: SupplyWizardSupplyItem[] = task.items.map((item) => ({
             article: item.article,
@@ -1881,11 +1913,11 @@ export class SupplyWizardHandler {
             taskId: task.taskId,
             operationId,
             status: 'supply',
-            arrival: arrival ?? undefined,
-            warehouse: warehouse ?? undefined,
-            dropOffName: state.selectedDropOffName ?? state.selectedDropOffId?.toString(),
+            arrival: timeslotLabel ?? undefined,
+            warehouse: warehouseDisplay ?? undefined,
+            dropOffName: dropOffName,
             clusterName: state.selectedClusterName,
-            timeslotLabel: arrival ?? undefined,
+            timeslotLabel: timeslotLabel ?? undefined,
             items,
             createdAt: Date.now(),
         };
@@ -1927,7 +1959,12 @@ export class SupplyWizardHandler {
             orderId,
             arrival: entry.arrival,
             warehouse: entry.warehouse,
-            dropOffName: entry.dropOffName,
+            warehouseName: warehouseNameDetailed,
+            warehouseId: warehouseId,
+            dropOffName: dropOffName,
+            dropOffId: dropOffId,
+            timeslotFrom,
+            timeslotTo,
             items,
             task,
         });
@@ -2042,6 +2079,43 @@ export class SupplyWizardHandler {
         return undefined;
     }
 
+    private async fetchSupplyOrderDetails(
+        orderId: number,
+        credentials: OzonCredentials,
+    ): Promise<SupplyOrderDetails | undefined> {
+        try {
+            const orders = await this.ozonApi.getSupplyOrders([orderId], credentials);
+            const order = orders?.[0];
+            if (!order) {
+                return undefined;
+            }
+
+            const dropOff = order.drop_off_warehouse;
+            const supply = order.supplies?.[0];
+            const storage = supply?.storage_warehouse;
+            const timeslot = order.timeslot?.timeslot;
+            const timezone = order.timeslot?.timezone_info?.iana_name;
+
+            const timeslotFrom = timeslot?.from ?? undefined;
+            const timeslotTo = timeslot?.to ?? undefined;
+
+            return {
+                dropOffId: this.parseWarehouseId(dropOff?.warehouse_id),
+                dropOffName: dropOff?.name ?? dropOff?.address,
+                dropOffAddress: dropOff?.address,
+                storageWarehouseId: this.parseWarehouseId(storage?.warehouse_id),
+                storageWarehouseName: storage?.name ?? storage?.address,
+                storageWarehouseAddress: storage?.address,
+                timeslotFrom,
+                timeslotTo,
+                timeslotLabel: this.formatTimeslotRange(timeslotFrom, timeslotTo, timezone),
+            };
+        } catch (error) {
+            this.logger.warn(`getSupplyOrders failed for ${orderId}: ${this.describeError(error)}`);
+            return undefined;
+        }
+    }
+
     private isCancelSuccessful(status?: OzonSupplyCancelStatus): boolean {
         if (!status) {
             return false;
@@ -2094,6 +2168,41 @@ export class SupplyWizardHandler {
         }
 
         return parts.length ? parts.join(', ') : 'Ответ без подробностей';
+    }
+
+    private formatTimeslotRange(fromIso?: string, toIso?: string, timezone?: string): string | undefined {
+        if (!fromIso || !toIso) {
+            return undefined;
+        }
+
+        try {
+            const options: Intl.DateTimeFormatOptions = {
+                day: '2-digit',
+                month: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+            };
+            const formatter = new Intl.DateTimeFormat('ru-RU', timezone ? { ...options, timeZone: timezone } : options);
+            const fromText = formatter.format(new Date(fromIso));
+            const toText = formatter.format(new Date(toIso));
+            return timezone ? `${fromText} — ${toText} (${timezone})` : `${fromText} — ${toText}`;
+        } catch (error) {
+            this.logger.debug(`formatTimeslotRange failed: ${this.describeError(error)}`);
+            return `${fromIso} — ${toIso}`;
+        }
+    }
+
+    private parseWarehouseId(value: unknown): number | undefined {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return Math.trunc(value);
+        }
+        if (typeof value === 'string' && value.trim().length) {
+            const parsed = Number(value.trim());
+            if (Number.isFinite(parsed)) {
+                return Math.trunc(parsed);
+            }
+        }
+        return undefined;
     }
 
     private describeTimeslot(slot?: OzonDraftTimeslot): string | undefined {
@@ -3928,36 +4037,36 @@ export class SupplyWizardHandler {
     }
 
     private registerAbortController(chatId: string, taskId: string): AbortController {
-        const existing = this.taskAbortControllers.get(chatId);
+        const existing = this.taskAbortControllers.get(taskId);
         if (existing) {
             existing.controller.abort();
         }
         const controller = new AbortController();
-        this.taskAbortControllers.set(chatId, { controller, taskId });
+        this.taskAbortControllers.set(taskId, { controller, chatId });
         return controller;
     }
 
     private abortActiveTask(chatId: string, taskId?: string): void {
-        const entry = this.taskAbortControllers.get(chatId);
-        if (!entry) {
+        if (taskId) {
+            const entry = this.taskAbortControllers.get(taskId);
+            if (!entry || entry.chatId !== chatId) {
+                return;
+            }
+            entry.controller.abort();
+            this.taskAbortControllers.delete(taskId);
             return;
         }
-        if (taskId && entry.taskId !== taskId) {
-            return;
+
+        for (const [key, entry] of this.taskAbortControllers.entries()) {
+            if (entry.chatId === chatId) {
+                entry.controller.abort();
+                this.taskAbortControllers.delete(key);
+            }
         }
-        entry.controller.abort();
-        this.taskAbortControllers.delete(chatId);
     }
 
-    private clearAbortController(chatId: string, taskId?: string): void {
-        const entry = this.taskAbortControllers.get(chatId);
-        if (!entry) {
-            return;
-        }
-        if (taskId && entry.taskId !== taskId) {
-            return;
-        }
-        this.taskAbortControllers.delete(chatId);
+    private clearAbortController(taskId: string): void {
+        this.taskAbortControllers.delete(taskId);
     }
 
     private isAbortError(error: unknown): boolean {

@@ -148,6 +148,42 @@ export interface OzonSupplyCancelStatus {
   error_reasons?: Array<{ code?: string; message?: string }>;
 }
 
+export interface OzonSupplyOrderTimeslot {
+  timeslot?: {
+    from?: string;
+    to?: string;
+  };
+  timezone_info?: {
+    offset?: string;
+    iana_name?: string;
+  };
+}
+
+export interface OzonSupplyOrderWarehouse {
+  warehouse_id?: number;
+  address?: string;
+  name?: string;
+}
+
+export interface OzonSupplyOrderSupply {
+  state?: string;
+  supply_id?: number;
+  storage_warehouse?: OzonSupplyOrderWarehouse;
+  bundle_id?: string;
+}
+
+export interface OzonSupplyOrder {
+  order_id?: number;
+  order_number?: string;
+  created_date?: string;
+  state?: string;
+  state_updated_date?: string;
+  data_filling_deadline?: string;
+  drop_off_warehouse?: OzonSupplyOrderWarehouse;
+  timeslot?: OzonSupplyOrderTimeslot;
+  supplies?: OzonSupplyOrderSupply[];
+}
+
 @Injectable()
 export class OzonApiService {
   private readonly logger = new Logger(OzonApiService.name);
@@ -554,6 +590,29 @@ export class OzonApiService {
       credentials,
     );
     return response.data;
+  }
+
+  async getSupplyOrders(
+    orderIds: Array<number | string>,
+    credentials?: OzonCredentials,
+  ): Promise<OzonSupplyOrder[]> {
+    const numericIds = orderIds
+      .map((value) => (typeof value === 'string' ? Number(value.trim()) : Number(value)))
+      .filter((value) => Number.isFinite(value) && value > 0)
+      .map((value) => Math.trunc(value));
+
+    if (!numericIds.length) {
+      return [];
+    }
+
+    const response = await this.post<{ orders?: OzonSupplyOrder[] }>(
+      '/v3/supply-order/get',
+      { order_ids: numericIds },
+      undefined,
+      credentials,
+    );
+
+    return response.data?.orders ?? [];
   }
 
   private resolveUrl(baseUrl: string, url?: string): string | undefined {

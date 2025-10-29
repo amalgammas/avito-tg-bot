@@ -402,6 +402,7 @@ export class OzonSupplyService {
       if (!timeslot) {
         return { task, event: 'timeslotMissing', message: 'Свободных таймслотов нет' };
       }
+
       task.selectedTimeslot = timeslot;
 
       const operationId = await this.ozonApi.createSupply(
