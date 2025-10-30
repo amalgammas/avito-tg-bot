@@ -4,11 +4,7 @@ import { InjectBot } from 'nestjs-telegraf';
 import { Telegraf } from 'telegraf';
 
 import { WizardNotifierService } from './wizard-notifier.service';
-
-interface WizardNotificationOptions {
-  ctx?: Context;
-  lines?: Array<string | undefined>;
-}
+import { WizardEvent, WizardEventPayload } from './wizard-event.types';
 
 interface UserNotificationOptions {
   parseMode?: 'HTML' | 'MarkdownV2';
@@ -25,7 +21,7 @@ export class NotificationService {
     @InjectBot() private readonly bot: Telegraf<Context>,
   ) {}
 
-  async notifyWizard(event: string, options: WizardNotificationOptions = {}): Promise<void> {
+  async notifyWizard(event: WizardEvent, options: WizardEventPayload & { ctx?: Context } = {}): Promise<void> {
     await this.wizardNotifier.emit(event, options);
   }
 

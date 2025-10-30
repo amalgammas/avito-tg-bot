@@ -33,8 +33,9 @@ import {
 } from './supply-wizard.store';
 
 import { SupplyProcessService, SupplyOrderDetails } from './services/supply-process.service';
-import { SupplyTaskOrchestratorService } from './services/supply-task-orchestrator.service';
 import { NotificationService } from './services/notification.service';
+import { SupplyProcessingCoordinatorService } from './services/supply-processing-coordinator.service';
+import { WizardEvent } from './services/wizard-event.types';
 import { SupplyWizardViewService } from './supply-wizard/view.service';
 
 @Injectable()
@@ -65,7 +66,7 @@ export class SupplyWizardHandler {
         private readonly process: SupplyProcessService,
         private readonly wizardStore: SupplyWizardStore,
         private readonly sessions: UserSessionService,
-        private readonly orchestrator: SupplyTaskOrchestratorService,
+        private readonly processing: SupplyProcessingCoordinatorService,
         private readonly notifications: NotificationService,
         private readonly view: SupplyWizardViewService,
         private readonly orderStore: SupplyOrderStore,
@@ -135,7 +136,7 @@ export class SupplyWizardHandler {
                     this.view.buildAuthWelcomeKeyboard(),
                     { parseMode: 'HTML' },
                 );
-                await this.notifications.notifyWizard('wizard.start', { ctx, lines: [`stage: ${landingState.stage}`] });
+                await this.notifications.notifyWizard(WizardEvent.Start, { ctx, lines: [`stage: ${landingState.stage}`] });
                 return;
             }
 
@@ -147,7 +148,7 @@ export class SupplyWizardHandler {
                 this.view.buildLandingKeyboard(landingState),
                 { parseMode: 'HTML' },
             );
-            await this.notifications.notifyWizard('wizard.start', { ctx, lines: [`stage: ${landingState.stage}`] });
+            await this.notifications.notifyWizard(WizardEvent.Start, { ctx, lines: [`stage: ${landingState.stage}`] });
         } catch (error) {
             this.logger.error(`start wizard failed: ${this.describeError(error)}`);
             await ctx.reply(`❌ Не удалось инициализировать мастер: ${this.describeError(error)}`);
@@ -190,7 +191,7 @@ export class SupplyWizardHandler {
             );
             const buffer = await this.downloadTelegramFile(ctx, document.file_id);
             await this.processSpreadsheet(ctx, chatId, state, { buffer, label: document.file_name ?? 'файл' });
-            await this.notifications.notifyWizard('wizard.documentUploaded', {
+            await this.notifications.notifyWizard(WizardEvent.DocumentUploaded, {
                 ctx,
                 lines: [
                     `file: ${document.file_name ?? 'unknown'}`,
@@ -201,7 +202,7 @@ export class SupplyWizardHandler {
             this.logger.error(`handleDocument failed: ${this.describeError(error)}`);
             await ctx.reply(`❌ Не удалось обработать файл: ${this.describeError(error)}`);
             await ctx.reply('Пришлите Excel-файл (Артикул, Количество) повторно.');
-            await this.notifications.notifyWizard('wizard.documentError', { ctx, lines: [this.describeError(error)] });
+            await this.notifications.notifyWizard(WizardEvent.DocumentError, { ctx, lines: [this.describeError(error)] });
         }
     }
 
@@ -285,7 +286,7 @@ export class SupplyWizardHandler {
             { parseMode: "HTML" }
         );
 
-        await this.notifications.notifyWizard('wizard.authCompleted', {
+        await this.notifications.notifyWizard(WizardEvent.AuthCompleted, {
             ctx,
             lines: [`client_id: ${this.maskSecret(clientId)}`],
         });
@@ -320,11 +321,11 @@ export class SupplyWizardHandler {
                 this.view.buildUploadKeyboard(),
             );
             await this.processSpreadsheet(ctx, chatId, state, { spreadsheet: trimmed, label: trimmed });
-            await this.notifications.notifyWizard('wizard.spreadsheetLink', { ctx, lines: [`link: ${trimmed}`] });
+            await this.notifications.notifyWizard(WizardEvent.SpreadsheetLink, { ctx, lines: [`link: ${trimmed}`] });
         } catch (error) {
             this.logger.error(`handleSpreadsheetLink failed: ${this.describeError(error)}`);
             await ctx.reply(`❌ Не удалось обработать таблицу: ${this.describeError(error)}`);
-            await this.notifications.notifyWizard('wizard.spreadsheetError', { ctx, lines: [this.describeError(error)] });
+            await this.notifications.notifyWizard(WizardEvent.SpreadsheetError, { ctx, lines: [this.describeError(error)] });
         }
     }
 
@@ -798,7 +799,7 @@ export class SupplyWizardHandler {
                 this.view.buildLandingKeyboard(landingState),
                 { parseMode: "HTML" }
             );
-            await this.notifications.notifyWizard('wizard.supplyProcessing', { ctx, lines: summaryLines });
+            await this.notifications.notifyWizard(WizardEvent.SupplyProcessing, { ctx, lines: summaryLines });
             if (!this.wizardStore.get(chatId)) {
                 this.clearAbortController(task.taskId);
                 await this.orderStore.deleteByTaskId(chatId, task.taskId);
@@ -809,56 +810,33 @@ export class SupplyWizardHandler {
             throw error;
         }
 
-        void this.processSupplyTask({
-            ctx,
-            chatId,
-            state: updated,
+        void this.processing.run({
             task: effectiveTask,
-            readyInDays,
             credentials,
+            readyInDays,
+            dropOffWarehouseId: updated.selectedDropOffId,
             abortController,
-        });
-    }
-
-    private async processSupplyTask(params: {
-        ctx: Context;
-        chatId: string;
-        state: SupplyWizardState;
-        task: OzonSupplyTask;
-        readyInDays: number;
-        credentials: OzonCredentials;
-        abortController: AbortController;
-    }): Promise<void> {
-        const { ctx, chatId, state, task, readyInDays, credentials, abortController } = params;
-
-        try {
-            await this.orchestrator.run({
-                task,
-                credentials,
-                readyInDays,
-                dropOffWarehouseId: state.selectedDropOffId,
-                abortController,
-                callbacks: {
-                    onEvent: async (result) => {
-                        await this.sendSupplyEvent(ctx, result);
-                    },
-                    onWindowExpired: async () => {
-                        await this.handleWindowExpired(ctx, chatId, state, task);
-                    },
-                    onSupplyCreated: async (result) => {
-                        await this.handleSupplySuccess(ctx, chatId, state, task, result);
-                    },
-                    onError: async (error) => {
-                        await this.handleSupplyFailure(ctx, chatId, state, error);
-                    },
-                    onAbort: async () => {
-                        this.logger.log(`[${chatId}] обработка поставки отменена пользователем`);
-                    },
+            callbacks: {
+                onEvent: async (result) => {
+                    await this.sendSupplyEvent(ctx, result);
                 },
-            });
-        } finally {
-            this.clearAbortController(task.taskId);
-        }
+                onWindowExpired: async () => {
+                    await this.handleWindowExpired(ctx, chatId, updated, task);
+                },
+                onSupplyCreated: async (result) => {
+                    await this.handleSupplySuccess(ctx, chatId, updated, task, result);
+                },
+                onError: async (error) => {
+                    await this.handleSupplyFailure(ctx, chatId, updated, error);
+                },
+                onAbort: async () => {
+                    this.logger.log(`[${chatId}] обработка поставки отменена пользователем`);
+                },
+                onFinally: async () => {
+                    this.clearAbortController(task.taskId);
+                },
+            },
+        });
     }
 
     private createTaskContext(options: {
@@ -990,7 +968,7 @@ export class SupplyWizardHandler {
         const latestState = this.wizardStore.get(chatId) ?? fallback;
         await this.presentLandingAfterCancel(ctx, chatId, latestState);
 
-        await this.notifications.notifyWizard('wizard.taskExpired', {
+        await this.notifications.notifyWizard(WizardEvent.TaskExpired, {
             ctx,
             lines: [
                 `task: ${task.taskId ?? 'unknown'}`,
@@ -1113,7 +1091,7 @@ export class SupplyWizardHandler {
             };
         });
         this.wizardStore.removeTaskContext(chatId, taskId);
-        await this.notifications.notifyWizard('wizard.taskCancelled', { ctx, lines: [`task: ${taskId}`] });
+        await this.notifications.notifyWizard(WizardEvent.TaskCancelled, { ctx, lines: [`task: ${taskId}`] });
     }
 
     async handleCallback(ctx: Context, data: string): Promise<void> {
@@ -1447,7 +1425,7 @@ export class SupplyWizardHandler {
 
         await ctx.reply('✅ Ключи удалены из базы бота.');
 
-        await this.notifications.notifyWizard('auth.cleared', { ctx });
+        await this.notifications.notifyWizard(WizardEvent.AuthCleared, { ctx });
 
         await this.start(ctx);
     }
@@ -1984,7 +1962,7 @@ export class SupplyWizardHandler {
             } catch (error) {
                 const message = `Не удалось получить статус поставки: ${this.describeError(error)}`;
                 await ctx.reply(`❌ ${message}`);
-                await this.notifications.notifyWizard('wizard.orderCancelFailed', {
+                await this.notifications.notifyWizard(WizardEvent.OrderCancelFailed, {
                     ctx,
                     lines: [
                         `operation: ${operationId}`,
@@ -1998,7 +1976,7 @@ export class SupplyWizardHandler {
             resolvedOrderId = ids[0];
             if (!resolvedOrderId) {
                 await ctx.reply('❌ Ozon не вернул идентификатор заказа для этой поставки. Попробуйте позже.');
-                await this.notifications.notifyWizard('wizard.orderCancelFailed', {
+                await this.notifications.notifyWizard(WizardEvent.OrderCancelFailed, {
                     ctx,
                     lines: [
                         `operation: ${operationId}`,
@@ -2077,7 +2055,7 @@ export class SupplyWizardHandler {
                 orderDetailsText,
                 this.view.buildOrderDetailsKeyboard(normalizedOrder),
             );
-            await this.notifications.notifyWizard('wizard.orderCancelFailed', {
+            await this.notifications.notifyWizard(WizardEvent.OrderCancelFailed, {
                 ctx,
                 lines: [
                     `operation: ${operationId}`,
@@ -2097,7 +2075,7 @@ export class SupplyWizardHandler {
                 orderDetailsText,
                 this.view.buildOrderDetailsKeyboard(normalizedOrder),
             );
-            await this.notifications.notifyWizard('wizard.orderCancelFailed', {
+            await this.notifications.notifyWizard(WizardEvent.OrderCancelFailed, {
                 ctx,
                 lines: [
                     `operation: ${operationId}`,
@@ -2123,7 +2101,7 @@ export class SupplyWizardHandler {
                 orderDetailsText,
                 this.view.buildOrderDetailsKeyboard(normalizedOrder),
             );
-            await this.notifications.notifyWizard('wizard.orderCancelFailed', {
+            await this.notifications.notifyWizard(WizardEvent.OrderCancelFailed, {
                 ctx,
                 lines: [
                     `operation: ${operationId}`,
@@ -2181,7 +2159,7 @@ export class SupplyWizardHandler {
             );
         }
 
-        await this.notifications.notifyWizard('wizard.orderCancelled', {
+        await this.notifications.notifyWizard(WizardEvent.OrderCancelled, {
             ctx,
             lines: [
                 `operation: ${operationId}`,
@@ -2203,7 +2181,7 @@ export class SupplyWizardHandler {
         await this.view.updatePrompt(ctx, chatId, state, 'Мастер завершён с ошибкой ❌');
         await ctx.reply(`❌ Ошибка при обработке: ${this.describeError(error)}`);
         await this.view.sendErrorDetails(ctx, this.extractErrorPayload(error));
-        await this.notifications.notifyWizard('wizard.supplyError', { ctx, lines: [this.describeError(error)] });
+        await this.notifications.notifyWizard(WizardEvent.SupplyError, { ctx, lines: [this.describeError(error)] });
     }
 
     private async handleSupplySuccess(
@@ -2340,7 +2318,7 @@ export class SupplyWizardHandler {
             { parseMode: "HTML" }
         );
 
-        await this.notifications.notifyWizard('wizard.supplyDone', {
+        await this.notifications.notifyWizard(WizardEvent.SupplyDone, {
             ctx,
             lines: [
                 orderId ? `order: ${orderId}` : `operation: ${operationId}`,
@@ -2672,7 +2650,7 @@ export class SupplyWizardHandler {
 
         const dropOffLabel = updated.selectedDropOffName ??
             (updated.selectedDropOffId ? String(updated.selectedDropOffId) : undefined);
-        await this.notifications.notifyWizard('wizard.clusterSelected', {
+        await this.notifications.notifyWizard(WizardEvent.ClusterSelected, {
             ctx,
             lines: [
                 `cluster: ${cluster.name} (${cluster.id})`,
@@ -2984,7 +2962,7 @@ export class SupplyWizardHandler {
             }));
         }
 
-        await this.notifications.notifyWizard('wizard.dropOffSelected', {
+        await this.notifications.notifyWizard(WizardEvent.DropOffSelected, {
             ctx,
             lines: [
                 `drop-off: ${option.name} (${option.warehouse_id})`,
@@ -3246,7 +3224,7 @@ export class SupplyWizardHandler {
         const skipReadyPrompt = options.skipReadyPrompt ?? false;
         const summaryLines = this.view.describeWarehouseSelection(option, state);
 
-        await this.notifications.notifyWizard('wizard.warehouseSelected', { ctx, lines: summaryLines });
+        await this.notifications.notifyWizard(WizardEvent.WarehouseSelected, { ctx, lines: summaryLines });
 
         if (!skipReadyPrompt) {
             await this.view.updatePrompt(
@@ -3398,7 +3376,7 @@ export class SupplyWizardHandler {
         const selectedTimeslot = stored.selectedTimeslot;
 
         if (selectedTimeslot) {
-            await this.notifications.notifyWizard('wizard.timeslotSelected', {
+            await this.notifications.notifyWizard(WizardEvent.TimeslotSelected, {
                 ctx,
                 lines: [`timeslot: ${selectedTimeslot.label}`],
             });
@@ -3477,7 +3455,7 @@ export class SupplyWizardHandler {
             }));
         }
 
-        await this.notifications.notifyWizard('wizard.timeslotSelected', { ctx, lines: [`timeslot: ${option.label}`] });
+        await this.notifications.notifyWizard(WizardEvent.TimeslotSelected, { ctx, lines: [`timeslot: ${option.label}`] });
         await this.safeAnswerCbQuery(ctx, chatId, 'Таймслот выбран');
 
         const summary = [
@@ -3792,7 +3770,7 @@ export class SupplyWizardHandler {
             return;
         }
 
-        await this.notifications.notifyWizard('wizard.callbackExpired', { ctx, lines: [`stage: ${current.stage}`] });
+        await this.notifications.notifyWizard(WizardEvent.CallbackExpired, { ctx, lines: [`stage: ${current.stage}`] });
 
         if (current.stage === 'warehouseSelect') {
             const view = this.computeWarehouseView(chatId, current);
@@ -4206,7 +4184,7 @@ export class SupplyWizardHandler {
         ].join('\n');
 
         await this.view.updatePrompt(ctx, chatId, updated, message, this.view.withCancel());
-        await this.notifications.notifyWizard('wizard.draftError', { ctx, lines: [reason] });
+        await this.notifications.notifyWizard(WizardEvent.DraftError, { ctx, lines: [reason] });
         this.latestDraftOperationId = undefined;
     }
 
@@ -4229,17 +4207,46 @@ export class SupplyWizardHandler {
         if (!chatId) return;
 
         const eventType = result.event?.type ?? OzonSupplyEventType.Error;
+        const wizardEvent = this.mapSupplyEvent(eventType);
 
         const text = this.view.formatSupplyEvent({
             taskId: result.task.taskId,
             event: eventType,
             message: result.message,
         });
-        if (!text) {
-            return;
-        }
 
-        await this.notifications.notifyWizard(`wizard.${eventType}`, { ctx, lines: [text] });
+        const lines = text ? [text] : [];
+        await this.notifications.notifyWizard(wizardEvent, { ctx, lines });
+    }
+
+    private mapSupplyEvent(type: OzonSupplyEventType): WizardEvent {
+        switch (type) {
+            case OzonSupplyEventType.DraftCreated:
+                return WizardEvent.DraftCreated;
+            case OzonSupplyEventType.DraftValid:
+                return WizardEvent.DraftValid;
+            case OzonSupplyEventType.DraftExpired:
+                return WizardEvent.DraftExpired;
+            case OzonSupplyEventType.DraftInvalid:
+                return WizardEvent.DraftInvalid;
+            case OzonSupplyEventType.DraftError:
+                return WizardEvent.DraftError;
+            case OzonSupplyEventType.TimeslotMissing:
+                return WizardEvent.TimeslotMissing;
+            case OzonSupplyEventType.WarehousePending:
+                return WizardEvent.WarehousePending;
+            case OzonSupplyEventType.WindowExpired:
+                return WizardEvent.WindowExpired;
+            case OzonSupplyEventType.SupplyCreated:
+                return WizardEvent.SupplyCreated;
+            case OzonSupplyEventType.SupplyStatus:
+                return WizardEvent.SupplyStatus;
+            case OzonSupplyEventType.NoCredentials:
+                return WizardEvent.NoCredentials;
+            case OzonSupplyEventType.Error:
+            default:
+                return WizardEvent.Error;
+        }
     }
 
     private extractChatId(ctx: Context): string | undefined {

@@ -7,6 +7,7 @@ import { SupplyOrderStore } from '../storage/supply-order.store';
 import type { SupplyOrderEntity } from '../storage/entities/supply-order.entity';
 import { UserCredentialsStore } from './user-credentials.store';
 import { NotificationService } from './services/notification.service';
+import { WizardEvent } from './services/wizard-event.types';
 import { OzonCredentials } from '@bot/config/ozon-api.service';
 import { SupplyProcessService, SupplyOrderDetails } from './services/supply-process.service';
 
@@ -90,7 +91,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       }
     }
 
-    await this.notifications.notifyWizard('tasks.summary', { lines });
+    await this.notifications.notifyWizard(WizardEvent.TaskSummary, { lines });
   }
 
   private async resumeSingleTask(record: SupplyOrderEntity): Promise<void> {
@@ -122,7 +123,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       });
     } catch (error) {
       this.logger.error(`Task ${record.taskId ?? record.id} resume failed: ${this.describeError(error)}`);
-      await this.notifications.notifyWizard('task.resumeFailed', {
+      await this.notifications.notifyWizard(WizardEvent.TaskResumeFailed, {
         lines: [
           `task: ${record.taskId ?? record.id}`,
           `chat: ${record.chatId}`,
@@ -198,7 +199,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
           `chat: ${record.chatId}`,
         ].filter((value): value is string => Boolean(value));
 
-        await this.notifications.notifyWizard('task.resumedSupplyCreated', { lines: notifyLines });
+        await this.notifications.notifyWizard(WizardEvent.TaskResumedSupplyCreated, { lines: notifyLines });
         break;
       }
       case OzonSupplyEventType.Error:

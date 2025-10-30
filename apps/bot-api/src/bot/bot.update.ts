@@ -6,6 +6,7 @@ import { SupplyWizardHandler } from './supply-wizard.handler';
 import { UserCredentialsStore } from './user-credentials.store';
 import { OzonCredentials } from '../config/ozon-api.service';
 import { NotificationService } from './services/notification.service';
+import { WizardEvent } from './services/wizard-event.types';
 
 @Update()
 export class BotUpdate {
@@ -68,7 +69,7 @@ export class BotUpdate {
       ].join('\n'),
     );
 
-    await this.notifications.notifyWizard('auth.saved', {
+    await this.notifications.notifyWizard(WizardEvent.AuthSaved, {
       ctx,
       lines: [`client_id: ${this.maskValue(clientId)}`],
     });
@@ -94,7 +95,7 @@ export class BotUpdate {
     await ctx.reply('✅ Ключи удалены из базы бота.');
     await this.wizard.start(ctx)
 
-    await this.notifications.notifyWizard('auth.cleared', { ctx });
+    await this.notifications.notifyWizard(WizardEvent.AuthCleared, { ctx });
   }
 
   @Command('ozon_keys')

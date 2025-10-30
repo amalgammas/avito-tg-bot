@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Context } from 'telegraf';
 
 import { AdminNotifierService } from '../admin-notifier.service';
+import { WizardEvent, WizardEventPayload } from './wizard-event.types';
 
 @Injectable()
 export class WizardNotifierService {
@@ -13,7 +14,7 @@ export class WizardNotifierService {
     return this.adminNotifier.isEnabled();
   }
 
-  async emit(event: string, options: { ctx?: Context; lines?: Array<string | undefined> } = {}): Promise<void> {
+  async emit(event: WizardEvent, options: { ctx?: Context } & WizardEventPayload = {}): Promise<void> {
     if (!this.isEnabled()) {
       return;
     }

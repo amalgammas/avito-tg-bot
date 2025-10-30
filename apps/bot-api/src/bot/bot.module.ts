@@ -18,6 +18,7 @@ import { WizardFlowService } from './services/wizard-flow.service';
 import { SupplyProcessService } from './services/supply-process.service';
 import { SupplyRunnerService } from './services/supply-runner.service';
 import { SupplyTaskOrchestratorService } from './services/supply-task-orchestrator.service';
+import { SupplyProcessingCoordinatorService } from './services/supply-processing-coordinator.service';
 import { WizardNotifierService } from './services/wizard-notifier.service';
 import { NotificationService } from './services/notification.service';
 
@@ -39,6 +40,7 @@ import { NotificationService } from './services/notification.service';
     SupplyProcessService,
     SupplyRunnerService,
     SupplyTaskOrchestratorService,
+    SupplyProcessingCoordinatorService,
     WizardNotifierService,
     UserSessionService,
     NotificationService,

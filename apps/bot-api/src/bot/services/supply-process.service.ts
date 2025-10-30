@@ -8,6 +8,12 @@ import type {
   OzonSupplyOrder,
 } from '@bot/config/ozon-api.service';
 import type { OzonSupplyItem, OzonSupplyTask } from '@bot/ozon/ozon-supply.types';
+import {
+  addUtcDays,
+  describeTimeslot as describeTimeslotText,
+  formatTimeslotRange as formatTimeslotRangeText,
+  toOzonIso,
+} from '@bot/utils/time.utils';
 
 import type { SupplyWizardSupplyItem } from '../supply-wizard.store';
 import { WizardFlowService } from './wizard-flow.service';
@@ -118,46 +124,23 @@ export class SupplyProcessService {
 
   computeTimeslotWindow(options: TimeslotWindowOptions): { fromIso: string; toIso: string } {
     const { fromDays, toDays, now = new Date() } = options;
-    const start = this.addUtcDays(now, fromDays);
-    const end = this.addUtcDays(now, toDays);
+    const start = addUtcDays(now, fromDays);
+    const end = addUtcDays(now, toDays);
     return {
-      fromIso: this.toOzonIso(start),
-      toIso: this.toOzonIso(end),
+      fromIso: toOzonIso(start),
+      toIso: toOzonIso(end),
     };
   }
 
   describeTimeslot(slot?: OzonDraftTimeslot): string | undefined {
-    if (!slot) {
-      return undefined;
-    }
-    const from = slot.from_in_timezone;
-    const to = slot.to_in_timezone;
-    if (!from || !to) {
-      return undefined;
-    }
-    return `${from} — ${to}`;
+    return describeTimeslotText({
+      from: slot?.from_in_timezone,
+      to: slot?.to_in_timezone,
+    });
   }
 
   formatTimeslotRange(fromIso?: string, toIso?: string, timezone?: string): string | undefined {
-    if (!fromIso || !toIso) {
-      return undefined;
-    }
-
-    try {
-      const options: Intl.DateTimeFormatOptions = {
-        day: '2-digit',
-        month: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-      };
-      const formatter = new Intl.DateTimeFormat('ru-RU', timezone ? { ...options, timeZone: timezone } : options);
-      const fromText = formatter.format(new Date(fromIso));
-      const toText = formatter.format(new Date(toIso));
-      return timezone ? `${fromText} — ${toText} (${timezone})` : `${fromText} — ${toText}`;
-    } catch (error) {
-      this.logger.debug(`formatTimeslotRange failed: ${String(error)}`);
-      return `${fromIso} — ${toIso}`;
-    }
+    return formatTimeslotRangeText(fromIso, toIso, timezone);
   }
 
   extractOrderIdsFromStatus(status: OzonSupplyCreateStatus | undefined): number[] {
@@ -352,16 +335,6 @@ export class SupplyProcessService {
       }
     }
     return undefined;
-  }
-
-  private addUtcDays(date: Date, days: number): Date {
-    const copy = new Date(date.getTime());
-    copy.setUTCDate(copy.getUTCDate() + days);
-    return copy;
-  }
-
-  private toOzonIso(date: Date): string {
-    return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
   }
 
   private async sleep(ms: number): Promise<void> {

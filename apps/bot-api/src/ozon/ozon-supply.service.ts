@@ -11,6 +11,13 @@ import {
   OzonDraftStatus,
 } from '../config/ozon-api.service';
 import {
+  addUtcDays,
+  endOfUtcDay,
+  parseIsoDate,
+  startOfUtcDay,
+  toOzonIso,
+} from '@bot/utils/time.utils';
+import {
   OzonSupplyEventType,
   OzonSupplyProcessOptions,
   OzonSupplyProcessResult,
@@ -668,35 +675,27 @@ export class OzonSupplyService {
     };
   }
 
-  private toOzonIso(date: Date): string {
-    return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
-  }
-
   private computeTimeslotUpperBound(): string {
-    return this.toOzonIso(this.computeTimeslotUpperBoundDate());
+    return toOzonIso(this.computeTimeslotUpperBoundDate());
   }
 
   private computeTimeslotUpperBoundDate(): Date {
-    const upper = new Date();
-    upper.setUTCDate(upper.getUTCDate() + this.timeslotWindowMaxDays);
-    upper.setUTCHours(23, 59, 59, 0);
-    return upper;
+    const upper = addUtcDays(new Date(), this.timeslotWindowMaxDays);
+    return endOfUtcDay(upper);
   }
 
   private computeTimeslotWindow(task: OzonSupplyTask): { dateFromIso: string; dateToIso: string; expired: boolean } {
     const readyInDays = this.resolveReadyInDays(task);
-    const from = new Date();
-    from.setUTCHours(0, 0, 0, 0);
-    from.setUTCDate(from.getUTCDate() + readyInDays);
+    const from = startOfUtcDay(addUtcDays(new Date(), readyInDays));
 
-    const deadline = this.parseDeadline(task.lastDay) ?? this.computeTimeslotUpperBoundDate();
+    const deadline = parseIsoDate(task.lastDay) ?? this.computeTimeslotUpperBoundDate();
     const to = new Date(deadline.getTime());
 
     const expired = from.getTime() > to.getTime();
 
     return {
-      dateFromIso: this.toOzonIso(from),
-      dateToIso: this.toOzonIso(to),
+      dateFromIso: toOzonIso(from),
+      dateToIso: toOzonIso(to),
       expired,
     };
   }
@@ -739,8 +738,7 @@ export class OzonSupplyService {
       return undefined;
     }
 
-    const baseline = new Date();
-    baseline.setUTCHours(0, 0, 0, 0);
+    const baseline = startOfUtcDay(new Date());
     const diffMs = parsed.getTime() - baseline.getTime();
     if (!Number.isFinite(diffMs)) {
       return undefined;
@@ -752,14 +750,6 @@ export class OzonSupplyService {
     }
 
     return diffDays;
-  }
-
-  private parseDeadline(value?: string): Date | undefined {
-    if (!value) {
-      return undefined;
-    }
-    const parsed = new Date(value);
-    return Number.isNaN(parsed.getTime()) ? undefined : parsed;
   }
 
   private cloneTask(task: OzonSupplyTask): OzonSupplyTask {
