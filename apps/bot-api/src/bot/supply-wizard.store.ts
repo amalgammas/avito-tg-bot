@@ -133,6 +133,38 @@ export interface SupplyWizardState {
   autoWarehouseSelection?: boolean;
   warehouseSearchQuery?: string;
   warehousePage?: number;
+  taskContexts?: Record<string, SupplyWizardTaskContext>;
+  taskOrder?: string[];
+}
+
+export interface SupplyWizardTaskContext {
+  taskId: string;
+  stage: SupplyWizardStage;
+  draftStatus: SupplyWizardDraftStatus;
+  draftOperationId?: string;
+  draftId?: number;
+  draftCreatedAt?: number;
+  draftExpiresAt?: number;
+  draftError?: string;
+  draftWarehouses: SupplyWizardDraftWarehouseOption[];
+  draftTimeslots: SupplyWizardTimeslotOption[];
+  selectedClusterId?: number;
+  selectedClusterName?: string;
+  selectedWarehouseId?: number;
+  selectedWarehouseName?: string;
+  selectedDropOffId?: number;
+  selectedDropOffName?: string;
+  selectedTimeslot?: SupplyWizardTimeslotOption;
+  readyInDays?: number;
+  autoWarehouseSelection?: boolean;
+  warehouseSearchQuery?: string;
+  warehousePage?: number;
+  dropOffSearchQuery?: string;
+  promptMessageId?: number;
+  task: OzonSupplyTask;
+  summaryItems: SupplyWizardSupplyItem[];
+  createdAt: number;
+  updatedAt?: number;
 }
 
 @Injectable()
@@ -174,6 +206,8 @@ export class SupplyWizardStore {
       autoWarehouseSelection: false,
       warehouseSearchQuery: undefined,
       warehousePage: 0,
+      taskContexts: {},
+      taskOrder: [],
     };
     this.storage.set(chatId, this.cloneState(state));
     return this.get(chatId) ?? state;
@@ -203,9 +237,91 @@ export class SupplyWizardStore {
       draftStatus: next.draftStatus ?? 'idle',
       warehousePage:
         typeof next.warehousePage === 'number' ? next.warehousePage : current?.warehousePage ?? 0,
+      taskContexts: this.cloneTaskContexts(next.taskContexts ?? current?.taskContexts ?? {}),
+      taskOrder: [...(next.taskOrder ?? current?.taskOrder ?? [])],
     });
     this.storage.set(chatId, normalized);
     return this.cloneState(normalized);
+  }
+
+  getTaskContext(chatId: string, taskId: string): SupplyWizardTaskContext | undefined {
+    const state = this.storage.get(chatId);
+    if (!state?.taskContexts) return undefined;
+    const context = state.taskContexts[taskId];
+    return context ? this.cloneTaskContext(context) : undefined;
+  }
+
+  listTaskContexts(chatId: string): SupplyWizardTaskContext[] {
+    const state = this.storage.get(chatId);
+    if (!state?.taskContexts) return [];
+    const order = state.taskOrder ?? Object.keys(state.taskContexts);
+    return order
+      .map((taskId) => state.taskContexts?.[taskId])
+      .filter((value): value is SupplyWizardTaskContext => Boolean(value))
+      .map((context) => this.cloneTaskContext(context));
+  }
+
+  upsertTaskContext(
+    chatId: string,
+    taskId: string,
+    updater: (context: SupplyWizardTaskContext | undefined) => SupplyWizardTaskContext | undefined,
+  ): SupplyWizardTaskContext | undefined {
+    const current = this.storage.get(chatId);
+    if (!current) {
+      throw new Error(`SupplyWizardStore: chat ${chatId} не инициализирован`);
+    }
+
+    const existing = current.taskContexts?.[taskId];
+    const next = updater(existing ? this.cloneTaskContext(existing) : undefined);
+
+    if (!next) {
+      if (current.taskContexts) {
+        delete current.taskContexts[taskId];
+      }
+      current.taskOrder = (current.taskOrder ?? []).filter((value) => value !== taskId);
+      this.storage.set(chatId, this.cloneState(current));
+      return undefined;
+    }
+
+    const normalized = this.cloneTaskContext({
+      ...next,
+      taskId,
+      draftStatus: next.draftStatus ?? 'idle',
+      createdAt: next.createdAt ?? existing?.createdAt ?? Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const contexts = { ...(current.taskContexts ?? {}) };
+    contexts[taskId] = normalized;
+
+    const order = current.taskOrder ?? [];
+    const filtered = order.filter((value) => value !== taskId);
+    filtered.push(taskId);
+
+    const nextState: SupplyWizardState = {
+      ...current,
+      taskContexts: contexts,
+      taskOrder: filtered,
+    };
+
+    this.storage.set(chatId, this.cloneState(nextState));
+    return this.cloneTaskContext(normalized);
+  }
+
+  removeTaskContext(chatId: string, taskId: string): void {
+    const current = this.storage.get(chatId);
+    if (!current?.taskContexts?.[taskId]) {
+      return;
+    }
+
+    delete current.taskContexts[taskId];
+    current.taskOrder = (current.taskOrder ?? []).filter((value) => value !== taskId);
+
+    if (current.activeTaskId === taskId) {
+      current.activeTaskId = current.taskOrder?.[current.taskOrder.length - 1];
+    }
+
+    this.storage.set(chatId, this.cloneState(current));
   }
 
   clear(chatId: string): void {
@@ -301,6 +417,42 @@ export class SupplyWizardStore {
             data: state.selectedTimeslot.data ? { ...state.selectedTimeslot.data } : state.selectedTimeslot.data,
           }
         : undefined,
+      taskContexts: this.cloneTaskContexts(state.taskContexts ?? {}),
+      taskOrder: [...(state.taskOrder ?? [])],
+    };
+  }
+
+  private cloneTaskContexts(source: Record<string, SupplyWizardTaskContext>): Record<string, SupplyWizardTaskContext> {
+    const result: Record<string, SupplyWizardTaskContext> = {};
+    for (const [taskId, context] of Object.entries(source ?? {})) {
+      result[taskId] = this.cloneTaskContext(context);
+    }
+    return result;
+  }
+
+  private cloneTaskContext(source: SupplyWizardTaskContext): SupplyWizardTaskContext {
+    return {
+      ...source,
+      draftWarehouses: this.cloneDraftWarehouses(source.draftWarehouses),
+      draftTimeslots: this.cloneDraftTimeslots(source.draftTimeslots),
+      selectedTimeslot: source.selectedTimeslot
+        ? {
+            ...source.selectedTimeslot,
+            data: source.selectedTimeslot.data
+              ? { ...source.selectedTimeslot.data }
+              : source.selectedTimeslot.data,
+          }
+        : undefined,
+      task: this.cloneSingleTask(source.task),
+      summaryItems: source.summaryItems.map((item) => ({ ...item })),
+    };
+  }
+
+  private cloneSingleTask(task: OzonSupplyTask): OzonSupplyTask {
+    return {
+      ...task,
+      items: task.items.map((item) => ({ ...item })),
+      selectedTimeslot: task.selectedTimeslot ? { ...task.selectedTimeslot } : undefined,
     };
   }
 }

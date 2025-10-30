@@ -2,23 +2,11 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 
-import type { SupplyWizardState } from './supply-wizard.store';
+import type { SupplyWizardState, SupplyWizardTaskContext, SupplyWizardTimeslotOption, SupplyWizardSupplyItem } from './supply-wizard.store';
 import type { OzonSupplyTask } from '../ozon/ozon-supply.types';
 import { WizardSessionEntity } from '../storage/entities/wizard-session.entity';
 
-interface StoredTaskContext {
-  task: OzonSupplyTask;
-  stage: string;
-  readyInDays?: number;
-  selectedClusterId?: number;
-  selectedClusterName?: string;
-  selectedDropOffId?: number;
-  selectedDropOffName?: string;
-  selectedWarehouseId?: number;
-  selectedWarehouseName?: string;
-  selectedTimeslot?: SupplyWizardState['selectedTimeslot'];
-  autoWarehouseSelection?: boolean;
-}
+type StoredTaskContext = SupplyWizardTaskContext;
 
 @Injectable()
 export class UserSessionService {
@@ -76,23 +64,28 @@ export class UserSessionService {
   }
 
   private async syncTaskSessions(chatId: string, state: SupplyWizardState, timestamp: number): Promise<void> {
-    const tasks = state.tasks ?? [];
+    const contexts = state.taskContexts ?? {};
+    const hasContexts = Object.keys(contexts).length > 0;
+    const tasks = hasContexts
+      ? Object.values(contexts)
+      : (state.tasks ?? []).map((task) => this.makeLegacyTaskContext(state, task));
     const targetIds: string[] = [];
     const entities: WizardSessionEntity[] = [];
 
-    for (const task of tasks) {
-      if (!task?.taskId) {
+    for (const context of tasks) {
+      const taskId = context?.taskId ?? context?.task?.taskId;
+      if (!taskId) {
         continue;
       }
-      const id = this.buildId(chatId, task.taskId);
+      const id = this.buildId(chatId, taskId);
       targetIds.push(id);
-      const payload = this.makeTaskSnapshot(state, task);
+      const payload = this.cloneForStorage(context);
       const existing = await this.repository.findOne({ where: { id } });
       entities.push({
         id,
         chatId,
-        taskId: task.taskId,
-        stage: state.stage,
+        taskId,
+        stage: context.stage,
         payload,
         createdAt: existing?.createdAt ?? timestamp,
         updatedAt: timestamp,
@@ -121,19 +114,41 @@ export class UserSessionService {
     }
   }
 
-  private makeTaskSnapshot(state: SupplyWizardState, task: OzonSupplyTask): StoredTaskContext {
+  private makeLegacyTaskContext(state: SupplyWizardState, task: OzonSupplyTask): SupplyWizardTaskContext {
     return {
-      task: this.cloneForStorage(task),
+      taskId: task.taskId,
       stage: state.stage,
-      readyInDays: state.readyInDays,
+      draftStatus: state.draftStatus,
+      draftOperationId: state.draftOperationId,
+      draftId: state.draftId,
+      draftCreatedAt: state.draftCreatedAt,
+      draftExpiresAt: state.draftExpiresAt,
+      draftError: state.draftError,
+      draftWarehouses: this.cloneForStorage(state.draftWarehouses ?? []),
+      draftTimeslots: this.cloneForStorage(state.draftTimeslots ?? []),
       selectedClusterId: state.selectedClusterId,
       selectedClusterName: state.selectedClusterName,
-      selectedDropOffId: state.selectedDropOffId,
-      selectedDropOffName: state.selectedDropOffName,
       selectedWarehouseId: state.selectedWarehouseId ?? task.warehouseId,
       selectedWarehouseName: state.selectedWarehouseName ?? task.warehouseName,
-      selectedTimeslot: this.cloneForStorage(state.selectedTimeslot),
+      selectedDropOffId: state.selectedDropOffId,
+      selectedDropOffName: state.selectedDropOffName,
+      selectedTimeslot: this.cloneForStorage(state.selectedTimeslot) as SupplyWizardTimeslotOption | undefined,
+      readyInDays: state.readyInDays,
       autoWarehouseSelection: state.autoWarehouseSelection,
+      warehouseSearchQuery: state.warehouseSearchQuery,
+      warehousePage: state.warehousePage,
+      dropOffSearchQuery: state.dropOffSearchQuery,
+      promptMessageId: state.promptMessageId,
+      task: this.cloneForStorage(task),
+      summaryItems: this.cloneForStorage(
+        (task.items ?? []).map((item) => ({
+          article: item.article,
+          quantity: item.quantity,
+          sku: item.sku,
+        })),
+      ) as SupplyWizardSupplyItem[],
+      createdAt: state.createdAt,
+      updatedAt: Date.now(),
     };
   }
 

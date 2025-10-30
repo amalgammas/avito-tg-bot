@@ -29,6 +29,7 @@ import {
     SupplyWizardTimeslotOption,
     SupplyWizardOrderSummary,
     SupplyWizardSupplyItem,
+    SupplyWizardTaskContext,
 } from './supply-wizard.store';
 
 import { SupplyProcessService, SupplyOrderDetails } from './services/supply-process.service';
@@ -801,6 +802,7 @@ export class SupplyWizardHandler {
                 activeTaskId: current.activeTaskId === task.taskId ? undefined : current.activeTaskId,
             };
         });
+        this.wizardStore.removeTaskContext(chatId, task.taskId);
 
         const dropOffLabel =
             entity?.dropOffName ??
@@ -853,6 +855,9 @@ export class SupplyWizardHandler {
         updater: (state: SupplyWizardState | undefined) => SupplyWizardState | undefined,
     ): SupplyWizardState | undefined {
         const next = this.wizardStore.update(chatId, updater);
+        if (next) {
+            this.syncActiveTaskContext(chatId, next);
+        }
         this.persistState(chatId, next);
         return next;
     }
@@ -870,6 +875,87 @@ export class SupplyWizardHandler {
         });
     }
 
+    private syncActiveTaskContext(chatId: string, state: SupplyWizardState): void {
+        const context = this.buildActiveTaskContext(state);
+        const taskId = context?.taskId;
+        if (!taskId) {
+            return;
+        }
+
+        try {
+            this.wizardStore.upsertTaskContext(chatId, taskId, () => context);
+        } catch (error) {
+            this.logger.warn(`[${chatId}] failed to sync task context ${taskId}: ${this.describeError(error)}`);
+        }
+    }
+
+    private buildActiveTaskContext(state: SupplyWizardState): SupplyWizardTaskContext | undefined {
+        const tasks = state.tasks ?? [];
+        if (!tasks.length) {
+            return undefined;
+        }
+
+        const activeTaskId = state.selectedTaskId;
+        let active = activeTaskId ? tasks.find((task) => task.taskId === activeTaskId) : undefined;
+        if (!active) {
+            active = tasks[0];
+        }
+        if (!active?.taskId) {
+            return undefined;
+        }
+
+        const clonedTask = this.cloneTask(active);
+        const summaryItems: SupplyWizardSupplyItem[] = clonedTask.items.map((item) => ({
+            article: item.article,
+            quantity: item.quantity,
+            sku: item.sku,
+        }));
+
+        const draftWarehouses = (state.draftWarehouses ?? []).map((item) => ({ ...item }));
+        const draftTimeslots = (state.draftTimeslots ?? []).map((item) => ({
+            ...item,
+            data: item.data ? { ...item.data } : item.data,
+        }));
+        const selectedTimeslot = state.selectedTimeslot
+            ? {
+                  ...state.selectedTimeslot,
+                  data: state.selectedTimeslot.data
+                      ? { ...state.selectedTimeslot.data }
+                      : state.selectedTimeslot.data,
+              }
+            : undefined;
+
+        return {
+            taskId: clonedTask.taskId,
+            stage: state.stage,
+            draftStatus: state.draftStatus,
+            draftOperationId: state.draftOperationId,
+            draftId: state.draftId,
+            draftCreatedAt: state.draftCreatedAt,
+            draftExpiresAt: state.draftExpiresAt,
+            draftError: state.draftError,
+            draftWarehouses,
+            draftTimeslots,
+            selectedClusterId: state.selectedClusterId,
+            selectedClusterName: state.selectedClusterName,
+            selectedWarehouseId: state.selectedWarehouseId,
+            selectedWarehouseName: state.selectedWarehouseName,
+            selectedDropOffId: state.selectedDropOffId,
+            selectedDropOffName: state.selectedDropOffName,
+            selectedTimeslot,
+            readyInDays: state.readyInDays,
+            autoWarehouseSelection: state.autoWarehouseSelection,
+            warehouseSearchQuery: state.warehouseSearchQuery,
+            warehousePage: state.warehousePage,
+            dropOffSearchQuery: state.dropOffSearchQuery,
+            promptMessageId: state.promptMessageId,
+            task: clonedTask,
+            summaryItems,
+            createdAt: state.createdAt,
+            updatedAt: Date.now(),
+        };
+    }
+
     private async cancelPendingTask(ctx: Context, chatId: string, taskId: string): Promise<void> {
         this.abortActiveTask(chatId, taskId);
         await this.orderStore.deleteByTaskId(chatId, taskId);
@@ -883,6 +969,7 @@ export class SupplyWizardHandler {
                 autoWarehouseSelection: false,
             };
         });
+        this.wizardStore.removeTaskContext(chatId, taskId);
         await this.notifications.notifyWizard('wizard.taskCancelled', { ctx, lines: [`task: ${taskId}`] });
     }
 
@@ -2076,6 +2163,8 @@ export class SupplyWizardHandler {
                     spreadsheet: undefined,
                 };
             }) ?? state;
+
+        this.wizardStore.removeTaskContext(chatId, task.taskId);
 
         await this.orderStore.completeTask(chatId, {
             taskId: task.taskId,
