@@ -12,10 +12,11 @@ import { SupplyOrderStore } from '../storage/supply-order.store';
 import type { SupplyOrderEntity } from '../storage/entities/supply-order.entity';
 import { UserCredentialsStore } from './user-credentials.store';
 import { AdminNotifierService } from './admin-notifier.service';
-import { OzonApiService, OzonCredentials, OzonSupplyCreateStatus } from '@bot/config/ozon-api.service';
+import { OzonCredentials, OzonSupplyCreateStatus } from '@bot/config/ozon-api.service';
 import { InjectBot } from 'nestjs-telegraf';
 import { Telegraf } from 'telegraf';
 import { Context, TelegramError } from 'telegraf';
+import { WizardFlowService } from './services/wizard-flow.service';
 
 interface SupplyOrderDetails {
   dropOffId?: number;
@@ -39,7 +40,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     private readonly credentialsStore: UserCredentialsStore,
     private readonly supplyService: OzonSupplyService,
     private readonly adminNotifier: AdminNotifierService,
-    private readonly ozonApi: OzonApiService,
+    private readonly flow: WizardFlowService,
     @InjectBot() private readonly bot: Telegraf<Context>,
   ) {}
 
@@ -169,7 +170,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
 
         if (operationId) {
           try {
-            const status = await this.ozonApi.getSupplyCreateStatus(operationId, credentials);
+            const status = await this.flow.getSupplyCreateStatus(operationId, credentials);
             orderId = this.extractOrderIdsFromStatus(status)[0];
             if (orderId) {
               orderDetails = await this.fetchSupplyOrderDetails(orderId, credentials);
@@ -347,7 +348,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     credentials: OzonCredentials,
   ): Promise<SupplyOrderDetails | undefined> {
     try {
-      const orders = await this.ozonApi.getSupplyOrders([orderId], credentials);
+      const orders = await this.flow.getSupplyOrders([orderId], credentials);
       const order = orders?.[0];
       if (!order) {
         return undefined;

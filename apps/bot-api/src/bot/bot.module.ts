@@ -12,6 +12,8 @@ import { SupplyWizardHandler } from './supply-wizard.handler';
 import { AdminNotifierService } from './admin-notifier.service';
 import { SupplyWizardViewService } from './supply-wizard/view.service';
 import { SupplyTaskRunnerService } from './supply-task-runner.service';
+import { WizardFlowService } from './services/wizard-flow.service';
+import { WizardNotifierService } from './services/wizard-notifier.service';
 
 @Module({
   imports: [
@@ -27,6 +29,8 @@ import { SupplyTaskRunnerService } from './supply-task-runner.service';
     SupplyWizardViewService,
     SupplyOrderStore,
     SupplyTaskRunnerService,
+    WizardFlowService,
+    WizardNotifierService,
   ],
 })
 export class BotModule {}

@@ -871,6 +871,8 @@ export class SupplyWizardViewService {
                 return `${prefix} Ошибка статуса черновика.${result.message ? ` ${result.message}` : ''}`;
             case 'warehousePending':
                 return result.message ? `${prefix} ${result.message}` : undefined;
+            case 'windowExpired':
+                return `${prefix} Временное окно истекло, задача остановлена.`;
             case 'timeslotMissing':
                 //return `${prefix} Свободных таймслотов нет.`;
                 return ``;

@@ -13,9 +13,9 @@ import {
   OzonSupplyProcessOptions,
   OzonSupplyProcessResult,
   OzonSupplyTask,
-  OzonSupplyTaskMap,
-  OzonSupplyItem,
+  OzonSupplyTaskMap
 } from './ozon-supply.types';
+
 import { OzonSheetService } from './ozon-sheet.service';
 
 interface PrepareTasksOptions {
