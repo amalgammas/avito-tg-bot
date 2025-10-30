@@ -112,7 +112,7 @@ export class AdminNotifierService {
     if (user.first_name || user.last_name) {
       parts.push(`${user.first_name ?? ''} ${user.last_name ?? ''}`.trim());
     }
-    parts.push(`id=${user.id}`);
+
     return parts.filter(Boolean).join(' ');
   }
 }
