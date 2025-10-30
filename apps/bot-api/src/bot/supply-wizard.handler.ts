@@ -33,7 +33,7 @@ import {
 } from './supply-wizard.store';
 
 import { SupplyProcessService, SupplyOrderDetails } from './services/supply-process.service';
-import { SupplyRunnerService } from './services/supply-runner.service';
+import { SupplyTaskOrchestratorService } from './services/supply-task-orchestrator.service';
 import { NotificationService } from './services/notification.service';
 import { SupplyWizardViewService } from './supply-wizard/view.service';
 
@@ -65,7 +65,7 @@ export class SupplyWizardHandler {
         private readonly process: SupplyProcessService,
         private readonly wizardStore: SupplyWizardStore,
         private readonly sessions: UserSessionService,
-        private readonly runner: SupplyRunnerService,
+        private readonly orchestrator: SupplyTaskOrchestratorService,
         private readonly notifications: NotificationService,
         private readonly view: SupplyWizardViewService,
         private readonly orderStore: SupplyOrderStore,
@@ -756,7 +756,7 @@ export class SupplyWizardHandler {
         const { ctx, chatId, state, task, readyInDays, credentials, abortController } = params;
 
         try {
-            await this.runner.run({
+            await this.orchestrator.run({
                 task,
                 credentials,
                 readyInDays,
@@ -775,11 +775,65 @@ export class SupplyWizardHandler {
                     onError: async (error) => {
                         await this.handleSupplyFailure(ctx, chatId, state, error);
                     },
+                    onAbort: async () => {
+                        this.logger.log(`[${chatId}] обработка поставки отменена пользователем`);
+                    },
                 },
             });
         } finally {
             this.clearAbortController(task.taskId);
         }
+    }
+
+    private createTaskContext(options: {
+        task: OzonSupplyTask;
+        stage: SupplyWizardTaskContext['stage'];
+        createdAt?: number;
+        overrides?: Partial<SupplyWizardTaskContext>;
+    }): SupplyWizardTaskContext {
+        const { task, stage, createdAt, overrides = {} } = options;
+        const summaryItems: SupplyWizardSupplyItem[] = task.items.map((item) => ({
+            article: item.article,
+            quantity: item.quantity,
+            sku: item.sku,
+        }));
+
+        return {
+            taskId: task.taskId ?? `${Date.now()}`,
+            stage,
+            draftStatus: overrides.draftStatus ?? 'idle',
+            draftOperationId: overrides.draftOperationId,
+            draftId: overrides.draftId,
+            draftCreatedAt: overrides.draftCreatedAt,
+            draftExpiresAt: overrides.draftExpiresAt,
+            draftError: overrides.draftError,
+            draftWarehouses: overrides.draftWarehouses?.map((item) => ({ ...item })) ?? [],
+            draftTimeslots: overrides.draftTimeslots?.map((item) => ({ ...item })) ?? [],
+            selectedClusterId: overrides.selectedClusterId,
+            selectedClusterName: overrides.selectedClusterName,
+            selectedWarehouseId: overrides.selectedWarehouseId,
+            selectedWarehouseName: overrides.selectedWarehouseName,
+            selectedDropOffId: overrides.selectedDropOffId,
+            selectedDropOffName: overrides.selectedDropOffName,
+            selectedTimeslot: overrides.selectedTimeslot
+                ? {
+                      ...overrides.selectedTimeslot,
+                      data: overrides.selectedTimeslot.data
+                          ? { ...overrides.selectedTimeslot.data }
+                          : overrides.selectedTimeslot.data,
+                  }
+                : undefined,
+            readyInDays: overrides.readyInDays,
+            autoWarehouseSelection: overrides.autoWarehouseSelection,
+            warehouseSearchQuery: overrides.warehouseSearchQuery,
+            warehousePage: overrides.warehousePage,
+            dropOffSearchQuery: overrides.dropOffSearchQuery,
+            promptMessageId: overrides.promptMessageId,
+            task: this.cloneTask(task),
+            summaryItems,
+            createdAt: createdAt ?? Date.now(),
+            updatedAt: overrides.updatedAt,
+        };
     }
 
     private async handleWindowExpired(
@@ -2252,6 +2306,21 @@ export class SupplyWizardHandler {
         await this.process.resolveSkus(clonedTasks[0], credentials);
 
         const summary = this.view.formatItemsSummary(clonedTasks[0]);
+        const createdContexts: SupplyWizardTaskContext[] = [];
+
+        const now = Date.now();
+
+        for (const [index, task] of clonedTasks.entries()) {
+            const context = this.createTaskContext({
+                task,
+                stage: 'awaitDropOffQuery',
+                createdAt: now + index,
+            });
+            if (task.taskId) {
+                this.wizardStore.upsertTaskContext(chatId, task.taskId, () => context);
+                createdContexts.push(context);
+            }
+        }
 
         let clusters: OzonCluster[] = [];
         try {
@@ -2272,12 +2341,13 @@ export class SupplyWizardHandler {
 
         const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
+            const selectedTaskId = createdContexts[0]?.taskId ?? current.selectedTaskId;
             return {
                 ...current,
                 stage: 'awaitDropOffQuery',
                 spreadsheet: source.label,
                 tasks: clonedTasks,
-                selectedTaskId: clonedTasks[0]?.taskId,
+                selectedTaskId,
                 clusters: options.clusters,
                 warehouses: options.warehouses,
                 dropOffs: [],
