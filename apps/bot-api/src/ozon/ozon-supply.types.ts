@@ -19,6 +19,8 @@ export interface OzonSupplyTask {
   clusterId?: string | number;
   warehouseId?: number;
   selectedTimeslot?: OzonDraftTimeslot;
+  warehouseAutoSelect?: boolean;
+  warehouseSelectionPendingNotified?: boolean;
 }
 
 export type OzonSupplyTaskMap = Map<string, OzonSupplyTask>;
@@ -37,6 +39,8 @@ export type OzonSupplyEvent =
   | 'draftInvalid'
   | 'draftError'
   | 'timeslotMissing'
+  | 'warehousePending'
+  | 'windowExpired'
   | 'supplyCreated'
   | 'supplyStatus'
   | 'noCredentials'

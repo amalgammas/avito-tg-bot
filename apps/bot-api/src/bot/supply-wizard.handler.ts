@@ -630,6 +630,8 @@ export class SupplyWizardHandler {
             : updated.selectedWarehouseName ?? effectiveTask.warehouseName;
         effectiveTask.selectedTimeslot = updated.selectedTimeslot?.data ?? effectiveTask.selectedTimeslot;
         effectiveTask.readyInDays = readyInDays;
+        effectiveTask.warehouseAutoSelect = wasAutoWarehouseSelection;
+        effectiveTask.warehouseSelectionPendingNotified = false;
         if (updated.draftOperationId) {
             effectiveTask.draftOperationId = updated.draftOperationId;
         }
@@ -738,6 +740,7 @@ export class SupplyWizardHandler {
         const { ctx, chatId, state, task, readyInDays, credentials, abortController } = params;
 
         let supplyResult: OzonSupplyProcessResult | undefined;
+        let windowExpiredResult: OzonSupplyProcessResult | undefined;
 
         try {
             await this.supplyService.runSingleTask(task, {
@@ -750,10 +753,20 @@ export class SupplyWizardHandler {
                     if (result.event === 'supplyCreated') {
                         supplyResult = result;
                     }
+                    if (result.event === 'windowExpired') {
+                        windowExpiredResult = result;
+                    }
                     await this.sendSupplyEvent(ctx, result);
                 },
             });
-            await this.handleSupplySuccess(ctx, chatId, state, task, supplyResult);
+            if (windowExpiredResult) {
+                await this.handleWindowExpired(ctx, chatId, state, task);
+                return;
+            }
+
+            if (supplyResult) {
+                await this.handleSupplySuccess(ctx, chatId, state, task, supplyResult);
+            }
         } catch (error) {
             if (this.isAbortError(error)) {
                 this.logger.log(`[${chatId}] обработка поставки отменена пользователем`);
@@ -768,6 +781,58 @@ export class SupplyWizardHandler {
         } finally {
             this.clearAbortController(task.taskId);
         }
+    }
+
+    private async handleWindowExpired(
+        ctx: Context,
+        chatId: string,
+        fallback: SupplyWizardState,
+        task: OzonSupplyTask,
+    ): Promise<void> {
+        const entity = task.taskId ? await this.orderStore.findTask(chatId, task.taskId) : null;
+
+        await this.orderStore.deleteByTaskId(chatId, task.taskId);
+        await this.syncPendingTasks(chatId);
+
+        this.wizardStore.update(chatId, (current) => {
+            if (!current) return undefined;
+            return {
+                ...current,
+                tasks: current.tasks?.filter((entry) => entry.taskId !== task.taskId),
+                pendingTasks: current.pendingTasks?.filter((entry) => entry.taskId !== task.taskId),
+                activeTaskId: current.activeTaskId === task.taskId ? undefined : current.activeTaskId,
+            };
+        });
+
+        const dropOffLabel =
+            entity?.dropOffName ??
+            fallback.selectedDropOffName ??
+            (typeof fallback.selectedDropOffId === 'number' ? String(fallback.selectedDropOffId) : '—');
+        const warehouseLabel =
+            entity?.warehouse ??
+            fallback.selectedWarehouseName ??
+            (typeof fallback.selectedWarehouseId === 'number' ? `Склад ${fallback.selectedWarehouseId}` : '—');
+        const totalItems = task.items.reduce((sum, item) => sum + (item.quantity ?? 0), 0);
+        const skuCount = task.items.length;
+
+        const messageLines = [
+            `Задача ${task.taskId ?? '—'} остановлена ⛔️`,
+            `Откуда: ${dropOffLabel ?? '—'}`,
+            `Куда: ${warehouseLabel ?? '—'}`,
+            `Товаров: ${skuCount} SKU / ${totalItems} шт.`,
+            'Слот не был найден в заданном временном диапазоне. Пересоздайте задачу.',
+        ];
+
+        await ctx.reply(messageLines.join('\n'));
+
+        const latestState = this.wizardStore.get(chatId) ?? fallback;
+        await this.presentLandingAfterCancel(ctx, chatId, latestState);
+
+        await this.notifyAdmin(ctx, 'wizard.taskExpired', [
+            `task: ${task.taskId ?? 'unknown'}`,
+            `dropOff: ${dropOffLabel ?? 'n/a'}`,
+            `warehouse: ${warehouseLabel ?? 'n/a'}`,
+        ]);
     }
 
     private async syncPendingTasks(chatId: string): Promise<SupplyWizardOrderSummary[]> {

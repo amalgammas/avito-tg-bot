@@ -378,14 +378,29 @@ export class OzonSupplyService {
     this.ensureNotAborted(abortSignal);
 
     if (info.status === 'CALCULATION_STATUS_SUCCESS') {
-      const warehouseChoice = this.resolveWarehouseFromDraft(info, task.warehouseId, task.warehouseName);
+      const strictWarehouse = task.warehouseAutoSelect === false && typeof task.warehouseId === 'number';
+      const warehouseChoice = this.resolveWarehouseFromDraft(info, task.warehouseId, task.warehouseName, {
+        strict: strictWarehouse,
+      });
       if (!warehouseChoice) {
+        if (strictWarehouse) {
+          const message = task.warehouseSelectionPendingNotified
+            ? undefined
+            : `Ждём склад ${task.warehouseId}. Ozon пока его не подтвердил.`;
+          task.warehouseSelectionPendingNotified = true;
+          return {
+            task,
+            event: 'warehousePending',
+            message,
+          };
+        }
         return {
           task,
           event: 'draftError',
           message: 'Черновик не содержит доступных складов для отгрузки',
         };
       }
+      task.warehouseSelectionPendingNotified = false;
 
       const selectedWarehouseId = warehouseChoice.warehouseId;
       const selectedWarehouseName = warehouseChoice.name;
@@ -397,7 +412,18 @@ export class OzonSupplyService {
       task.draftId = info.draft_id ?? task.draftId;
       this.rememberDraft(task, info.draft_id ?? task.draftId);
       this.ensureNotAborted(abortSignal);
-      const timeslot = await this.pickTimeslot(task, credentials, abortSignal);
+
+      const window = this.computeTimeslotWindow(task);
+      if (window.expired) {
+        task.orderFlag = 1;
+        return {
+          task,
+          event: 'windowExpired',
+          message: 'Временной диапазон для поиска таймслотов истёк.',
+        };
+      }
+
+      const timeslot = await this.pickTimeslot(task, credentials, window, abortSignal);
 
       if (!timeslot) {
         return { task, event: 'timeslotMissing', message: 'Свободных таймслотов нет' };
@@ -503,6 +529,7 @@ export class OzonSupplyService {
   private async pickTimeslot(
     task: OzonSupplyTask,
     credentials: OzonCredentials,
+    window: { dateFromIso: string; dateToIso: string },
     abortSignal?: AbortSignal,
   ): Promise<OzonDraftTimeslot | undefined> {
     if (task.selectedTimeslot) {
@@ -513,14 +540,12 @@ export class OzonSupplyService {
       return undefined;
     }
 
-    const { dateFromIso, dateToIso } = this.computeTimeslotWindow(task);
-
     const response = await this.ozonApi.getDraftTimeslots(
       {
         draftId: task.draftId,
         warehouseIds: [task.warehouseId!],
-        dateFrom: dateFromIso,
-        dateTo: dateToIso,
+        dateFrom: window.dateFromIso,
+        dateTo: window.dateToIso,
       },
       credentials,
     );
@@ -543,18 +568,27 @@ export class OzonSupplyService {
     info: OzonDraftStatus,
     preferredWarehouseId: number | undefined,
     preferredWarehouseName: string | undefined,
+    options: { strict?: boolean } = {},
   ): { warehouseId: number; name?: string } | undefined {
     const warehouses = this.collectDraftWarehouses(info);
     if (!warehouses.length) {
       return undefined;
     }
 
+    const strict = options.strict === true;
+
     if (typeof preferredWarehouseId === 'number') {
       const match = warehouses.find(
-        (entry) => entry.warehouseId === preferredWarehouseId && entry.isAvailable !== false,
+        (entry) => entry.warehouseId === preferredWarehouseId,
       );
       if (match) {
+        if (strict && match.isAvailable === false) {
+          return undefined;
+        }
         return { warehouseId: match.warehouseId, name: match.name ?? preferredWarehouseName };
+      }
+      if (strict) {
+        return undefined;
       }
     }
 
@@ -621,29 +655,31 @@ export class OzonSupplyService {
   }
 
   private computeTimeslotUpperBound(): string {
+    return this.toOzonIso(this.computeTimeslotUpperBoundDate());
+  }
+
+  private computeTimeslotUpperBoundDate(): Date {
     const upper = new Date();
     upper.setUTCDate(upper.getUTCDate() + this.timeslotWindowMaxDays);
     upper.setUTCHours(23, 59, 59, 0);
-    return this.toOzonIso(upper);
+    return upper;
   }
 
-  private computeTimeslotWindow(task: OzonSupplyTask): { dateFromIso: string; dateToIso: string } {
+  private computeTimeslotWindow(task: OzonSupplyTask): { dateFromIso: string; dateToIso: string; expired: boolean } {
     const readyInDays = this.resolveReadyInDays(task);
     const from = new Date();
     from.setUTCHours(0, 0, 0, 0);
     from.setUTCDate(from.getUTCDate() + readyInDays);
 
-    const to = new Date();
-    to.setUTCDate(to.getUTCDate() + this.timeslotWindowMaxDays);
-    to.setUTCHours(23, 59, 59, 0);
+    const deadline = this.parseDeadline(task.lastDay) ?? this.computeTimeslotUpperBoundDate();
+    const to = new Date(deadline.getTime());
 
-    if (from.getTime() > to.getTime()) {
-      from.setTime(to.getTime());
-    }
+    const expired = from.getTime() > to.getTime();
 
     return {
       dateFromIso: this.toOzonIso(from),
       dateToIso: this.toOzonIso(to),
+      expired,
     };
   }
 
@@ -698,6 +734,14 @@ export class OzonSupplyService {
     }
 
     return diffDays;
+  }
+
+  private parseDeadline(value?: string): Date | undefined {
+    if (!value) {
+      return undefined;
+    }
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? undefined : parsed;
   }
 
   private cloneTask(task: OzonSupplyTask): OzonSupplyTask {

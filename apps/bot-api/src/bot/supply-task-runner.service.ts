@@ -30,6 +30,9 @@ interface SupplyOrderDetails {
 @Injectable()
 export class SupplyTaskRunnerService implements OnApplicationBootstrap {
   private readonly logger = new Logger(SupplyTaskRunnerService.name);
+  private readonly summaryIntervalMs = 5 * 60 * 1000;
+  private summaryTimer?: NodeJS.Timeout;
+  private summaryRunning = false;
 
   constructor(
     private readonly orderStore: SupplyOrderStore,
@@ -42,6 +45,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
 
   onApplicationBootstrap(): void {
     void this.resumePendingTasks();
+    this.startSummaryLoop();
   }
 
   private async resumePendingTasks(): Promise<void> {
@@ -53,12 +57,59 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       }
 
       this.logger.log(`Resuming ${pending.length} pending supply task(s)`);
-      for (const record of pending) {
-        await this.resumeSingleTask(record);
-      }
+      await Promise.all(pending.map((record) => this.resumeSingleTask(record)));
     } catch (error) {
       this.logger.error(`Failed to resume supply tasks: ${this.describeError(error)}`);
     }
+  }
+
+  private startSummaryLoop(): void {
+    const handler = async () => {
+      if (this.summaryRunning) return;
+      this.summaryRunning = true;
+      try {
+        await this.publishTasksSummary();
+      } catch (error) {
+        this.logger.warn(`Failed to publish tasks summary: ${this.describeError(error)}`);
+      } finally {
+        this.summaryRunning = false;
+      }
+    };
+
+    void handler();
+    this.summaryTimer = setInterval(handler, this.summaryIntervalMs);
+  }
+
+  private async publishTasksSummary(): Promise<void> {
+    const tasks = await this.orderStore.listTasks({ status: 'task' });
+    const lines: string[] = [];
+
+    if (!tasks.length) {
+      lines.push('Активных задач нет.');
+    } else {
+      lines.push(`Всего активных задач: ${tasks.length}`);
+      const limit = 20;
+      const sample = tasks.slice(0, limit);
+      sample.forEach((task, index) => {
+        const parts: string[] = [];
+        parts.push(`#${index + 1}`);
+        parts.push(`chat=${task.chatId}`);
+        const taskLabel = task.taskId ?? task.id;
+        if (taskLabel) parts.push(`task=${taskLabel}`);
+        if (task.dropOffName) parts.push(`drop-off=${task.dropOffName}`);
+        if (task.warehouseName) parts.push(`склад=${task.warehouseName}`);
+        if (task.readyInDays !== undefined) parts.push(`готовность=${task.readyInDays}д`);
+        lines.push(parts.join(' • '));
+      });
+      if (tasks.length > sample.length) {
+        lines.push(`… и ещё ${tasks.length - sample.length} задач`);
+      }
+    }
+
+    await this.adminNotifier.notifyWizardEvent({
+      event: 'tasks.summary',
+      lines,
+    });
   }
 
   private async resumeSingleTask(record: SupplyOrderEntity): Promise<void> {

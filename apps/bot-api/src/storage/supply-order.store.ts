@@ -71,6 +71,10 @@ export class SupplyOrderStore {
     return this.repository.find({ where, order: { createdAt: 'ASC' } });
   }
 
+  async findTask(chatId: string, taskId: string): Promise<SupplyOrderEntity | null> {
+    return this.repository.findOne({ where: { chatId, taskId } });
+  }
+
   async saveTask(chatId: string, payload: SupplyOrderTaskPayload): Promise<SupplyOrderEntity> {
     const taskId = payload.task.taskId;
     if (!taskId) {

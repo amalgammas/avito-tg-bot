@@ -869,6 +869,8 @@ export class SupplyWizardViewService {
                 return `${prefix} Черновик невалидный, пересоздаём.`;
             case 'draftError':
                 return `${prefix} Ошибка статуса черновика.${result.message ? ` ${result.message}` : ''}`;
+            case 'warehousePending':
+                return result.message ? `${prefix} ${result.message}` : undefined;
             case 'timeslotMissing':
                 //return `${prefix} Свободных таймслотов нет.`;
                 return ``;
