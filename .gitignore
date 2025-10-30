@@ -138,3 +138,6 @@ vite.config.ts.timestamp-*
 
 #database
 data
+
+#idea
+.idea

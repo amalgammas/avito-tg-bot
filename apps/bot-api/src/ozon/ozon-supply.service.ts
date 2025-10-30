@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { AxiosError } from 'axios';
 
 import {
   OzonApiService,
@@ -377,7 +378,21 @@ export class OzonSupplyService {
     abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult> {
     this.ensureNotAborted(abortSignal);
-    const info = await this.ozonApi.getDraftInfo(task.draftOperationId, credentials);
+    let info: OzonDraftStatus;
+    try {
+      info = await this.ozonApi.getDraftInfo(task.draftOperationId, credentials);
+    } catch (error) {
+      const axiosError = error as AxiosError<any>;
+      const response = axiosError?.response;
+      const data = response?.data as { code?: number };
+      if (response?.status === 404 && data?.code === 5) {
+        task.draftOperationId = '';
+        task.draftId = 0;
+        this.draftCache.delete(this.getTaskHash(task));
+        return { task, event: { type: OzonSupplyEventType.DraftExpired }, message: 'Черновик не найден, создаём заново' };
+      }
+      throw error;
+    }
     this.ensureNotAborted(abortSignal);
 
     if (info.status === 'CALCULATION_STATUS_SUCCESS') {
