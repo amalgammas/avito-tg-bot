@@ -120,6 +120,7 @@ export class BotUpdate {
       'Сохранённые ключи (маскированы):',
       `• client_id: ${this.maskValue(credentials.clientId)}`,
       `• api_key: ${this.maskValue(credentials.apiKey)}`,
+      `• user: ${chatId}`,
       `• обновлено: ${updated}`,
     ];
 
