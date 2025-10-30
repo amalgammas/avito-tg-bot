@@ -366,6 +366,8 @@ export class SupplyWizardHandler {
         }
 
         const options = this.mapDropOffSearchResults(warehouses);
+        const activeTaskId = this.resolveActiveTaskId(chatId, state);
+
         if (!options.length) {
             const hasExistingSelection = Boolean(state.selectedDropOffId);
             const updated = this.updateWizardState(chatId, (current) => {
@@ -383,6 +385,20 @@ export class SupplyWizardHandler {
                         : { selectedDropOffId: undefined, selectedDropOffName: undefined }),
                 };
             });
+
+            if (activeTaskId) {
+                this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                    ...context,
+                    stage: hasExistingSelection ? 'clusterPrompt' : 'awaitDropOffQuery',
+                    dropOffSearchQuery: query,
+                    draftWarehouses: [],
+                    draftTimeslots: [],
+                    selectedTimeslot: undefined,
+                    selectedDropOffId: hasExistingSelection ? context.selectedDropOffId : undefined,
+                    selectedDropOffName: hasExistingSelection ? context.selectedDropOffName : undefined,
+                    updatedAt: Date.now(),
+                }));
+            }
 
             const targetState = updated ?? state;
             await this.view.updatePrompt(
@@ -416,17 +432,33 @@ export class SupplyWizardHandler {
                 draftCreatedAt: undefined,
                 draftExpiresAt: undefined,
                 draftError: undefined,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    draftOperationId: '',
-                    draftId: 0,
-                })),
             };
         });
 
         if (!updated) {
             await ctx.reply('Мастер закрыт. Запустите /start, чтобы начать заново.');
             return;
+        }
+
+        const targetTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (targetTaskId) {
+            this.updateTaskContext(chatId, targetTaskId, (context) => ({
+                ...context,
+                stage: 'dropOffSelect',
+                selectedDropOffId: undefined,
+                selectedDropOffName: undefined,
+                draftWarehouses: [],
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                dropOffSearchQuery: query,
+                updatedAt: Date.now(),
+            }));
         }
 
         const lines = limited.map((option, index) => {
@@ -536,6 +568,16 @@ export class SupplyWizardHandler {
                 };
             }) ?? fallback;
 
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: 'awaitReadyDays',
+                readyInDays: undefined,
+                updatedAt: Date.now(),
+            }));
+        }
+
         const summarySource = options.summaryLines && options.summaryLines.length
             ? options.summaryLines
             : this.buildReadyContext(updated);
@@ -584,7 +626,7 @@ export class SupplyWizardHandler {
         state: SupplyWizardState,
         readyInDays: number,
     ): Promise<void> {
-        const task = state.tasks?.[0];
+        const task = this.getSelectedTask(chatId, state);
         if (!task) {
             await ctx.reply('Не найдены товары для обработки. Запустите мастер заново.');
             this.wizardStore.clear(chatId);
@@ -667,6 +709,40 @@ export class SupplyWizardHandler {
         ];
 
         summaryLines.push(`Готовность к отгрузке: ${readyInDays} дн.`);
+
+        if (task.taskId) {
+            this.updateTaskContext(chatId, task.taskId, (context) => {
+                const nextTask = this.cloneTask(effectiveTask);
+                return {
+                    ...context,
+                    stage: 'processing',
+                    selectedClusterId: updated.selectedClusterId,
+                    selectedClusterName: updated.selectedClusterName,
+                    selectedWarehouseId: updated.selectedWarehouseId,
+                    selectedWarehouseName: updated.selectedWarehouseName,
+                    selectedDropOffId: updated.selectedDropOffId,
+                    selectedDropOffName: updated.selectedDropOffName,
+                    selectedTimeslot: updated.selectedTimeslot,
+                    readyInDays,
+                    autoWarehouseSelection: wasAutoWarehouseSelection,
+                    draftOperationId: updated.draftOperationId,
+                    draftId: updated.draftId,
+                    draftStatus: updated.draftStatus,
+                    draftCreatedAt: updated.draftCreatedAt,
+                    draftExpiresAt: updated.draftExpiresAt,
+                    draftError: updated.draftError,
+                    draftWarehouses: updated.draftWarehouses,
+                    draftTimeslots: updated.draftTimeslots,
+                    task: nextTask,
+                    summaryItems: nextTask.items.map((item) => ({
+                        article: item.article,
+                        quantity: item.quantity,
+                        sku: item.sku,
+                    })),
+                    updatedAt: Date.now(),
+                };
+            });
+        }
 
         try {
             await this.orderStore.saveTask(chatId, {
@@ -825,8 +901,6 @@ export class SupplyWizardHandler {
                 : undefined,
             readyInDays: overrides.readyInDays,
             autoWarehouseSelection: overrides.autoWarehouseSelection,
-            warehouseSearchQuery: overrides.warehouseSearchQuery,
-            warehousePage: overrides.warehousePage,
             dropOffSearchQuery: overrides.dropOffSearchQuery,
             promptMessageId: overrides.promptMessageId,
             task: this.cloneTask(task),
@@ -834,6 +908,41 @@ export class SupplyWizardHandler {
             createdAt: createdAt ?? Date.now(),
             updatedAt: overrides.updatedAt,
         };
+    }
+
+    private resolveActiveTaskId(chatId: string, state: SupplyWizardState): string | undefined {
+        const selected = state.selectedTaskId;
+        if (selected) {
+            const context = this.wizardStore.getTaskContext(chatId, selected);
+            if (context) {
+                return context.taskId;
+            }
+        }
+
+        const contexts = this.wizardStore.listTaskContexts(chatId);
+        if (contexts.length) {
+            return contexts[0].taskId;
+        }
+
+        if (selected) {
+            return selected;
+        }
+
+    }
+
+    private updateTaskContext(
+        chatId: string,
+        taskId: string,
+        updater: (context: SupplyWizardTaskContext) => SupplyWizardTaskContext,
+    ): void {
+        try {
+            this.wizardStore.upsertTaskContext(chatId, taskId, (existing) => {
+                if (!existing) return undefined;
+                return updater(existing);
+            });
+        } catch (error) {
+            this.logger.warn(`[${chatId}] failed to update task context ${taskId}: ${this.describeError(error)}`);
+        }
     }
 
     private async handleWindowExpired(
@@ -851,7 +960,6 @@ export class SupplyWizardHandler {
             if (!current) return undefined;
             return {
                 ...current,
-                tasks: current.tasks?.filter((entry) => entry.taskId !== task.taskId),
                 pendingTasks: current.pendingTasks?.filter((entry) => entry.taskId !== task.taskId),
                 activeTaskId: current.activeTaskId === task.taskId ? undefined : current.activeTaskId,
             };
@@ -930,7 +1038,7 @@ export class SupplyWizardHandler {
     }
 
     private syncActiveTaskContext(chatId: string, state: SupplyWizardState): void {
-        const context = this.buildActiveTaskContext(state);
+        const context = this.buildActiveTaskContext(chatId, state);
         const taskId = context?.taskId;
         if (!taskId) {
             return;
@@ -943,69 +1051,51 @@ export class SupplyWizardHandler {
         }
     }
 
-    private buildActiveTaskContext(state: SupplyWizardState): SupplyWizardTaskContext | undefined {
-        const tasks = state.tasks ?? [];
-        if (!tasks.length) {
-            return undefined;
-        }
-
+    private buildActiveTaskContext(chatId: string, state: SupplyWizardState): SupplyWizardTaskContext | undefined {
         const activeTaskId = state.selectedTaskId;
-        let active = activeTaskId ? tasks.find((task) => task.taskId === activeTaskId) : undefined;
-        if (!active) {
-            active = tasks[0];
-        }
-        if (!active?.taskId) {
-            return undefined;
-        }
-
-        const clonedTask = this.cloneTask(active);
-        const summaryItems: SupplyWizardSupplyItem[] = clonedTask.items.map((item) => ({
-            article: item.article,
-            quantity: item.quantity,
-            sku: item.sku,
-        }));
-
-        const draftWarehouses = (state.draftWarehouses ?? []).map((item) => ({ ...item }));
-        const draftTimeslots = (state.draftTimeslots ?? []).map((item) => ({
-            ...item,
-            data: item.data ? { ...item.data } : item.data,
-        }));
-        const selectedTimeslot = state.selectedTimeslot
-            ? {
-                  ...state.selectedTimeslot,
-                  data: state.selectedTimeslot.data
-                      ? { ...state.selectedTimeslot.data }
-                      : state.selectedTimeslot.data,
-              }
+        let baseContext: SupplyWizardTaskContext | undefined = activeTaskId
+            ? this.wizardStore.getTaskContext(chatId, activeTaskId)
             : undefined;
 
+        if (!baseContext) {
+            const contexts = this.wizardStore.listTaskContexts(chatId);
+            if (contexts.length) {
+                baseContext = contexts[0];
+            }
+        }
+
+        if (!baseContext) {
+            return undefined;
+        }
+
+        const contextOverride = this.wizardStore.getTaskContext(chatId, baseContext.taskId);
+        const effectiveTask = contextOverride ? this.cloneTask(contextOverride.task) : this.cloneTask(baseContext.task);
         return {
-            taskId: clonedTask.taskId,
+            ...baseContext,
             stage: state.stage,
-            draftStatus: state.draftStatus,
-            draftOperationId: state.draftOperationId,
-            draftId: state.draftId,
-            draftCreatedAt: state.draftCreatedAt,
-            draftExpiresAt: state.draftExpiresAt,
-            draftError: state.draftError,
-            draftWarehouses,
-            draftTimeslots,
-            selectedClusterId: state.selectedClusterId,
-            selectedClusterName: state.selectedClusterName,
-            selectedWarehouseId: state.selectedWarehouseId,
-            selectedWarehouseName: state.selectedWarehouseName,
-            selectedDropOffId: state.selectedDropOffId,
-            selectedDropOffName: state.selectedDropOffName,
-            selectedTimeslot,
-            readyInDays: state.readyInDays,
-            autoWarehouseSelection: state.autoWarehouseSelection,
-            warehouseSearchQuery: state.warehouseSearchQuery,
-            warehousePage: state.warehousePage,
-            dropOffSearchQuery: state.dropOffSearchQuery,
-            promptMessageId: state.promptMessageId,
-            task: clonedTask,
-            summaryItems,
-            createdAt: state.createdAt,
+            draftStatus: state.draftStatus ?? baseContext.draftStatus,
+            draftOperationId: state.draftOperationId ?? baseContext.draftOperationId,
+            draftId: state.draftId ?? baseContext.draftId,
+            draftCreatedAt: state.draftCreatedAt ?? baseContext.draftCreatedAt,
+            draftExpiresAt: state.draftExpiresAt ?? baseContext.draftExpiresAt,
+            draftError: state.draftError ?? baseContext.draftError,
+            selectedClusterId: state.selectedClusterId ?? baseContext.selectedClusterId,
+            selectedClusterName: state.selectedClusterName ?? baseContext.selectedClusterName,
+            selectedWarehouseId: state.selectedWarehouseId ?? baseContext.selectedWarehouseId,
+            selectedWarehouseName: state.selectedWarehouseName ?? baseContext.selectedWarehouseName,
+            selectedDropOffId: state.selectedDropOffId ?? baseContext.selectedDropOffId,
+            selectedDropOffName: state.selectedDropOffName ?? baseContext.selectedDropOffName,
+            selectedTimeslot: state.selectedTimeslot ?? baseContext.selectedTimeslot,
+            readyInDays: state.readyInDays ?? baseContext.readyInDays,
+            autoWarehouseSelection: state.autoWarehouseSelection ?? baseContext.autoWarehouseSelection,
+            dropOffSearchQuery: state.dropOffSearchQuery ?? baseContext.dropOffSearchQuery,
+            promptMessageId: state.promptMessageId ?? baseContext.promptMessageId,
+            task: effectiveTask,
+            summaryItems: effectiveTask.items.map((item) => ({
+                article: item.article,
+                quantity: item.quantity,
+                sku: item.sku,
+            })),
             updatedAt: Date.now(),
         };
     }
@@ -1018,7 +1108,6 @@ export class SupplyWizardHandler {
             if (!current) return undefined;
             return {
                 ...current,
-                tasks: current.tasks?.filter((task) => task.taskId !== taskId),
                 selectedTaskId: current.selectedTaskId === taskId ? undefined : current.selectedTaskId,
                 autoWarehouseSelection: false,
             };
@@ -1084,14 +1173,15 @@ export class SupplyWizardHandler {
         return;
       case 'cancel': {
         this.abortActiveTask(chatId);
-        if (state.tasks?.length) {
-          await Promise.all(
-            state.tasks
-              .map((task) => task?.taskId)
-              .filter((taskId): taskId is string => Boolean(taskId))
-              .map((taskId) => this.orderStore.deleteByTaskId(chatId, taskId)),
-          );
-          await this.syncPendingTasks(chatId);
+        const contexts = this.wizardStore.listTaskContexts(chatId);
+        if (contexts.length) {
+          const taskIds = contexts
+            .map((context) => context.taskId)
+            .filter((taskId): taskId is string => Boolean(taskId));
+          if (taskIds.length) {
+            await Promise.all(taskIds.map((taskId) => this.orderStore.deleteByTaskId(chatId, taskId)));
+            await this.syncPendingTasks(chatId);
+          }
         }
         this.wizardStore.clear(chatId);
         await this.sessions.deleteChatState(chatId);
@@ -1525,7 +1615,6 @@ export class SupplyWizardHandler {
                     ...current,
                     stage: 'awaitSpreadsheet',
                     spreadsheet: undefined,
-                    tasks: undefined,
                     selectedTaskId: undefined,
                     dropOffs: [],
                     dropOffSearchQuery: undefined,
@@ -2203,7 +2292,6 @@ export class SupplyWizardHandler {
                     ...current,
                     orders: [...withoutDuplicate, entry],
                     stage: 'landing',
-                    tasks: undefined,
                     readyInDays: undefined,
                     selectedTimeslot: undefined,
                     draftTimeslots: [],
@@ -2309,6 +2397,17 @@ export class SupplyWizardHandler {
         const createdContexts: SupplyWizardTaskContext[] = [];
 
         const now = Date.now();
+        const newTaskIds = new Set(
+            clonedTasks
+                .map((task) => task.taskId)
+                .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0),
+        );
+        const existingContexts = this.wizardStore.listTaskContexts(chatId);
+        for (const context of existingContexts) {
+            if (!newTaskIds.has(context.taskId)) {
+                this.wizardStore.removeTaskContext(chatId, context.taskId);
+            }
+        }
 
         for (const [index, task] of clonedTasks.entries()) {
             const context = this.createTaskContext({
@@ -2346,7 +2445,6 @@ export class SupplyWizardHandler {
                 ...current,
                 stage: 'awaitDropOffQuery',
                 spreadsheet: source.label,
-                tasks: clonedTasks,
                 selectedTaskId,
                 clusters: options.clusters,
                 warehouses: options.warehouses,
@@ -2415,20 +2513,34 @@ export class SupplyWizardHandler {
                 draftCreatedAt: undefined,
                 draftExpiresAt: undefined,
                 draftError: undefined,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    clusterId: undefined,
-                    warehouseId: current.selectedWarehouseId ?? task.warehouseId,
-                    warehouseName: current.selectedWarehouseName ?? task.warehouseName,
-                    draftOperationId: '',
-                    draftId: 0,
-                })),
             };
         });
 
         if (!updated) {
             await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
             return;
+        }
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: 'clusterSelect',
+                selectedClusterId: undefined,
+                selectedClusterName: undefined,
+                selectedWarehouseId: updated.selectedWarehouseId ?? context.selectedWarehouseId,
+                selectedWarehouseName: updated.selectedWarehouseName ?? context.selectedWarehouseName,
+                draftWarehouses: updated.draftWarehouses.map((item) => ({ ...item })),
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                updatedAt: Date.now(),
+            }));
         }
 
         const message = (ctx.callbackQuery as any)?.message;
@@ -2500,6 +2612,7 @@ export class SupplyWizardHandler {
         }
 
         const hasDropOffSelection = Boolean(state.selectedDropOffId);
+        const activeTaskId = this.resolveActiveTaskId(chatId, state);
 
         const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
@@ -2527,19 +2640,34 @@ export class SupplyWizardHandler {
                 warehouseSearchQuery: undefined,
                 warehousePage: 0,
                 warehouses: nextWarehouses,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    clusterId: cluster.id,
-                    draftOperationId: '',
-                    draftId: 0,
-                    selectedTimeslot: undefined,
-                })),
             };
         });
 
         if (!updated) {
             await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
             return;
+        }
+
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: hasDropOffSelection ? 'warehouseSelect' : 'dropOffSelect',
+                selectedClusterId: cluster.id,
+                selectedClusterName: cluster.name,
+                selectedWarehouseId: undefined,
+                selectedWarehouseName: undefined,
+                draftWarehouses: [],
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                autoWarehouseSelection: false,
+                updatedAt: Date.now(),
+            }));
         }
 
         const dropOffLabel = updated.selectedDropOffName ??
@@ -2721,21 +2849,38 @@ export class SupplyWizardHandler {
                 draftExpiresAt: undefined,
                 draftError: undefined,
                 autoWarehouseSelection: requestedAuto,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    clusterId: current.selectedClusterId ?? task.clusterId,
-                    warehouseId: selectedWarehouseId ?? undefined,
-                    warehouseName: selectedWarehouseName ?? task.warehouseName,
-                    draftOperationId: '',
-                    draftId: 0,
-                    selectedTimeslot: undefined,
-                })),
             };
         });
 
         if (!updated) {
             await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
             return;
+        }
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: hasDropOffSelection ? 'awaitReadyDays' : 'dropOffSelect',
+                selectedClusterId: updated.selectedClusterId ?? context.selectedClusterId,
+                selectedClusterName: updated.selectedClusterName ?? context.selectedClusterName,
+                selectedWarehouseId: requestedAuto ? undefined : warehouse.warehouse_id,
+                selectedWarehouseName: requestedAuto ? undefined : warehouse.name,
+                selectedDropOffId: updated.selectedDropOffId ?? context.selectedDropOffId,
+                selectedDropOffName: updated.selectedDropOffName ?? context.selectedDropOffName,
+                draftWarehouses: [],
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                autoWarehouseSelection: requestedAuto,
+                readyInDays: undefined,
+                updatedAt: Date.now(),
+            }));
         }
 
         if (hasDropOffSelection) {
@@ -2808,19 +2953,35 @@ export class SupplyWizardHandler {
                 autoWarehouseSelection: false,
                 warehouseSearchQuery: undefined,
                 warehousePage: 0,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    clusterId: current.selectedClusterId ?? task.clusterId,
-                    draftOperationId: '',
-                    draftId: 0,
-                    selectedTimeslot: undefined,
-                })),
             };
         });
 
         if (!updated) {
             await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
             return;
+        }
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: hasClusterSelection ? 'warehouseSelect' : 'clusterPrompt',
+                selectedDropOffId: option.warehouse_id,
+                selectedDropOffName: option.name,
+                selectedWarehouseId: undefined,
+                selectedWarehouseName: undefined,
+                draftWarehouses: [],
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                autoWarehouseSelection: false,
+                updatedAt: Date.now(),
+            }));
         }
 
         await this.notifications.notifyWizard('wizard.dropOffSelected', {
@@ -3035,12 +3196,6 @@ export class SupplyWizardHandler {
 
         const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
-            const tasks = (current.tasks ?? []).map((task) => ({
-                ...task,
-                warehouseId: option.warehouseId,
-                warehouseName: option.name ?? task.warehouseName,
-            }));
-
             return {
                 ...current,
                 stage: 'timeslotSelect',
@@ -3051,13 +3206,29 @@ export class SupplyWizardHandler {
                 draftWarehouses: current.draftWarehouses?.length ? current.draftWarehouses : this.latestDraftWarehouses,
                 draftTimeslots: [],
                 selectedTimeslot: undefined,
-                tasks,
             };
         });
 
         if (!updated) {
             await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
             return;
+        }
+
+        const targetTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (targetTaskId) {
+            this.updateTaskContext(chatId, targetTaskId, (context) => ({
+                ...context,
+                stage: 'timeslotSelect',
+                selectedWarehouseId: option.warehouseId,
+                selectedWarehouseName: option.name ?? context.selectedWarehouseName,
+                selectedClusterId: option.clusterId ?? context.selectedClusterId,
+                selectedClusterName: option.clusterName ?? context.selectedClusterName,
+                draftWarehouses: (updated.draftWarehouses ?? []).map((item) => ({ ...item })),
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                autoWarehouseSelection: false,
+                updatedAt: Date.now(),
+            }));
         }
 
         await this.presentDraftWarehouseSelection(ctx, chatId, updated, option);
@@ -3119,14 +3290,27 @@ export class SupplyWizardHandler {
                     stage: 'draftWarehouseSelect',
                     draftTimeslots: [],
                     selectedTimeslot: undefined,
-                    tasks: (current.tasks ?? []).map((task) => ({
-                        ...task,
-                        selectedTimeslot: undefined,
-                    })),
                 };
             });
 
             if (rollback) {
+                const activeTaskId = this.resolveActiveTaskId(chatId, rollback);
+                if (activeTaskId) {
+                    this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                        ...context,
+                        stage: 'draftWarehouseSelect',
+                        draftTimeslots: [],
+                        selectedTimeslot: undefined,
+                        draftStatus: rollback.draftStatus ?? context.draftStatus,
+                        draftOperationId: rollback.draftOperationId ?? context.draftOperationId,
+                        draftId: rollback.draftId ?? context.draftId,
+                        draftCreatedAt: rollback.draftCreatedAt ?? context.draftCreatedAt,
+                        draftExpiresAt: rollback.draftExpiresAt ?? context.draftExpiresAt,
+                        draftError: rollback.draftError ?? context.draftError,
+                        updatedAt: Date.now(),
+                    }));
+                }
+
                 await this.view.updatePrompt(
                     ctx,
                     chatId,
@@ -3149,10 +3333,6 @@ export class SupplyWizardHandler {
                     stage: 'draftWarehouseSelect',
                     draftTimeslots: [],
                     selectedTimeslot: undefined,
-                    tasks: (current.tasks ?? []).map((task) => ({
-                        ...task,
-                        selectedTimeslot: undefined,
-                    })),
                 };
             }
 
@@ -3163,15 +3343,35 @@ export class SupplyWizardHandler {
                 stage: 'awaitReadyDays',
                 draftTimeslots: limited,
                 selectedTimeslot: firstTimeslot,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    selectedTimeslot: firstTimeslot.data,
-                })),
             };
         });
 
         if (!stored) {
             return undefined;
+        }
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, stored);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => {
+                if (!limited.length) {
+                    return {
+                        ...context,
+                        stage: 'draftWarehouseSelect',
+                        draftTimeslots: [],
+                        selectedTimeslot: undefined,
+                        updatedAt: Date.now(),
+                    };
+                }
+
+                const [firstTimeslot] = limited;
+                return {
+                    ...context,
+                    stage: 'awaitReadyDays',
+                    draftTimeslots: limited.map((item) => ({ ...item })),
+                    selectedTimeslot: firstTimeslot ? { ...firstTimeslot, data: firstTimeslot.data ? { ...firstTimeslot.data } : firstTimeslot.data } : undefined,
+                    updatedAt: Date.now(),
+                };
+            });
         }
 
         if (!limited.length) {
@@ -3250,23 +3450,31 @@ export class SupplyWizardHandler {
 
         const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
-            const tasks = (current.tasks ?? []).map((task) => ({
-                ...task,
-                selectedTimeslot: option.data,
-            }));
-
             return {
                 ...current,
                 stage: 'awaitReadyDays',
                 selectedTimeslot: option,
                 draftTimeslots: current.draftTimeslots,
-                tasks,
             };
         });
 
         if (!updated) {
             await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
             return;
+        }
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: 'awaitReadyDays',
+                selectedTimeslot: {
+                    ...option,
+                    data: option.data ? { ...option.data } : option.data,
+                },
+                draftTimeslots: (updated.draftTimeslots ?? []).map((item) => ({ ...item })),
+                updatedAt: Date.now(),
+            }));
         }
 
         await this.notifications.notifyWizard('wizard.timeslotSelected', { ctx, lines: [`timeslot: ${option.label}`] });
@@ -3428,23 +3636,8 @@ export class SupplyWizardHandler {
             const createdAt = current.draftCreatedAt ?? Date.now();
             const expiresAt = current.draftExpiresAt ?? createdAt + this.draftLifetimeMs;
 
-            const tasks = (current.tasks ?? []).map((task) => {
-                if (task.taskId !== payload.taskId) {
-                    return { ...task };
-                }
-                return {
-                    ...task,
-                    clusterId: current.selectedClusterId ?? task.clusterId,
-                    warehouseId: current.selectedWarehouseId ?? task.warehouseId,
-                    draftOperationId: payload.operationId,
-                    draftId: payload.draftId ?? task.draftId,
-                    selectedTimeslot: undefined,
-                };
-            });
-
             return {
                 ...current,
-                tasks,
                 stage: limitedOptions.length ? 'draftWarehouseSelect' : 'awaitReadyDays',
                 draftStatus: 'success',
                 draftOperationId: payload.operationId,
@@ -3467,6 +3660,30 @@ export class SupplyWizardHandler {
         if (!updated || updated.draftOperationId !== payload.operationId) {
             return;
         }
+
+        this.updateTaskContext(chatId, payload.taskId, (context) => ({
+            ...context,
+            stage: limitedOptions.length ? 'draftWarehouseSelect' : 'awaitReadyDays',
+            draftStatus: 'success',
+            draftOperationId: payload.operationId,
+            draftId: payload.draftId ?? context.draftId,
+            draftCreatedAt: updated.draftCreatedAt ?? context.draftCreatedAt ?? Date.now(),
+            draftExpiresAt: updated.draftExpiresAt ?? context.draftExpiresAt,
+            draftError: undefined,
+            draftWarehouses: limitedOptions.map((item) => ({ ...item })),
+            draftTimeslots: [],
+            selectedTimeslot: undefined,
+            selectedClusterId: updated.selectedClusterId ?? context.selectedClusterId,
+            selectedClusterName: updated.selectedClusterName ?? context.selectedClusterName,
+            selectedWarehouseId: limitedOptions.length
+                ? undefined
+                : updated.selectedWarehouseId ?? context.selectedWarehouseId,
+            selectedWarehouseName: limitedOptions.length
+                ? undefined
+                : updated.selectedWarehouseName ?? context.selectedWarehouseName,
+            autoWarehouseSelection: context.autoWarehouseSelection,
+            updatedAt: Date.now(),
+        }));
 
         const headerLines = [
             'Черновик успешно создан ✅',
@@ -3526,14 +3743,24 @@ export class SupplyWizardHandler {
                 draftWarehouses: [],
                 draftTimeslots: [],
                 selectedTimeslot: undefined,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    draftOperationId: '',
-                    draftId: 0,
-                    selectedTimeslot: undefined,
-                })),
             };
         });
+        const contexts = this.wizardStore.listTaskContexts(chatId);
+        for (const context of contexts) {
+            this.updateTaskContext(chatId, context.taskId, (current) => ({
+                ...current,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                draftWarehouses: [],
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                updatedAt: Date.now(),
+            }));
+        }
         this.latestDraftOperationId = undefined;
     }
 
@@ -3656,7 +3883,7 @@ export class SupplyWizardHandler {
             return;
         }
 
-        const task = this.getSelectedTask(state);
+        const task = this.getSelectedTask(chatId, state);
         if (!task) {
             this.logger.warn(`[${chatId}] ensureDraftCreated: задача не найдена`);
             return;
@@ -3914,17 +4141,20 @@ export class SupplyWizardHandler {
         }
     }
 
-    private getSelectedTask(state: SupplyWizardState): OzonSupplyTask | undefined {
-        if (!state.tasks || !state.tasks.length) {
-            return undefined;
-        }
+    private getSelectedTask(chatId: string, state: SupplyWizardState): OzonSupplyTask | undefined {
         if (state.selectedTaskId) {
-            const match = state.tasks.find((task) => task.taskId === state.selectedTaskId);
-            if (match) {
-                return match;
+            const context = this.wizardStore.getTaskContext(chatId, state.selectedTaskId);
+            if (context) {
+                return this.cloneTask(context.task);
             }
         }
-        return state.tasks[0];
+
+        const contexts = this.wizardStore.listTaskContexts(chatId);
+        if (contexts.length) {
+            return this.cloneTask(contexts[0].task);
+        }
+
+        return undefined;
     }
 
     private async handleDraftCreationFailure(
@@ -3945,17 +4175,29 @@ export class SupplyWizardHandler {
                 draftWarehouses: [],
                 draftTimeslots: [],
                 selectedTimeslot: undefined,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    draftOperationId: '',
-                    draftId: 0,
-                    selectedTimeslot: undefined,
-                })),
             };
         });
 
         if (!updated) {
             return;
+        }
+
+        const targetTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (targetTaskId) {
+            this.updateTaskContext(chatId, targetTaskId, (context) => ({
+                ...context,
+                stage: updated.stage,
+                draftStatus: 'failed',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: reason,
+                draftWarehouses: [],
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                updatedAt: Date.now(),
+            }));
         }
 
         const message = [

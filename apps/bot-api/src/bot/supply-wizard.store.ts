@@ -119,7 +119,6 @@ export interface SupplyWizardState {
   selectedDropOffName?: string;
   selectedTimeslot?: SupplyWizardTimeslotOption;
   spreadsheet?: string;
-  tasks?: OzonSupplyTask[];
   selectedTaskId?: string;
   readyInDays?: number;
   promptMessageId?: number;
@@ -157,8 +156,6 @@ export interface SupplyWizardTaskContext {
   selectedTimeslot?: SupplyWizardTimeslotOption;
   readyInDays?: number;
   autoWarehouseSelection?: boolean;
-  warehouseSearchQuery?: string;
-  warehousePage?: number;
   dropOffSearchQuery?: string;
   promptMessageId?: number;
   task: OzonSupplyTask;
@@ -375,17 +372,6 @@ export class SupplyWizardStore {
     }));
   }
 
-  private cloneTasks(tasks: OzonSupplyTask[] | undefined): OzonSupplyTask[] | undefined {
-    if (!tasks) {
-      return undefined;
-    }
-    return tasks.map((task) => ({
-      ...task,
-      items: task.items.map((item) => ({ ...item })),
-      selectedTimeslot: task.selectedTimeslot ? { ...task.selectedTimeslot } : undefined,
-    }));
-  }
-
   private cloneOrders(orders: SupplyWizardOrderSummary[] = []): SupplyWizardOrderSummary[] {
     return orders.map((order) => ({
       ...order,
@@ -408,7 +394,6 @@ export class SupplyWizardStore {
       dropOffs: this.cloneDropOffs(state.dropOffs),
       draftWarehouses: this.cloneDraftWarehouses(state.draftWarehouses),
       draftTimeslots: this.cloneDraftTimeslots(state.draftTimeslots),
-      tasks: this.cloneTasks(state.tasks),
       orders: this.cloneOrders(state.orders),
       pendingTasks: this.clonePendingTasks(state.pendingTasks),
       selectedTimeslot: state.selectedTimeslot

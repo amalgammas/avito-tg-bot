@@ -66,9 +66,12 @@ export class UserSessionService {
   private async syncTaskSessions(chatId: string, state: SupplyWizardState, timestamp: number): Promise<void> {
     const contexts = state.taskContexts ?? {};
     const hasContexts = Object.keys(contexts).length > 0;
+    const legacyTasks = Array.isArray((state as any)?.tasks)
+      ? ((state as any).tasks as OzonSupplyTask[])
+      : [];
     const tasks = hasContexts
       ? Object.values(contexts)
-      : (state.tasks ?? []).map((task) => this.makeLegacyTaskContext(state, task));
+      : legacyTasks.map((task) => this.makeLegacyTaskContext(state, task));
     const targetIds: string[] = [];
     const entities: WizardSessionEntity[] = [];
 
@@ -135,8 +138,6 @@ export class UserSessionService {
       selectedTimeslot: this.cloneForStorage(state.selectedTimeslot) as SupplyWizardTimeslotOption | undefined,
       readyInDays: state.readyInDays,
       autoWarehouseSelection: state.autoWarehouseSelection,
-      warehouseSearchQuery: state.warehouseSearchQuery,
-      warehousePage: state.warehousePage,
       dropOffSearchQuery: state.dropOffSearchQuery,
       promptMessageId: state.promptMessageId,
       task: this.cloneForStorage(task),
