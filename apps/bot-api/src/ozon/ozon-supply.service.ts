@@ -10,6 +10,7 @@ import {
   OzonDraftStatus,
 } from '../config/ozon-api.service';
 import {
+  OzonSupplyEventType,
   OzonSupplyProcessOptions,
   OzonSupplyProcessResult,
   OzonSupplyTask,
@@ -126,21 +127,23 @@ export class OzonSupplyService {
         this.ensureNotAborted(abortSignal);
         try {
           const result = await this.processSingleTask(state, credentials, dropOffWarehouseId);
-          if (result.event === 'error' && /Склад отгрузки/.test(result.message ?? '')) {
+          const eventType = result.event?.type ?? OzonSupplyEventType.Error;
+
+          if (eventType === OzonSupplyEventType.Error && /Склад отгрузки/.test(result.message ?? '')) {
             const match = /Склад отгрузки (\d+)/.exec(result.message ?? '');
             const warehouseId = match ? Number(match[1]) : undefined;
             if (warehouseId && !seenUnavailableWarehouses.has(warehouseId)) {
               seenUnavailableWarehouses.add(warehouseId);
               await this.emitEvent(options.onEvent, {
                 task: state,
-                event: 'error',
+                event: { type: OzonSupplyEventType.Error },
                 message: `⚠️ Склад ${warehouseId} недоступен по данным Ozon (drop-off ${dropOffWarehouseId}). Выберите склад из списка, предложенного черновиком.`,
               });
             }
           }
           await this.emitEvent(options.onEvent, result);
 
-          if (result.event === 'supplyCreated' && result.operationId) {
+          if (eventType === OzonSupplyEventType.SupplyCreated && result.operationId) {
             await this.emitSupplyStatus(result.operationId, state, credentials, options.onEvent);
           }
 
@@ -152,7 +155,7 @@ export class OzonSupplyService {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.logger.error(`[${taskId}] Ошибка обработки: ${message}`);
-          await this.emitEvent(options.onEvent, { task: state, event: 'error', message });
+          await this.emitEvent(options.onEvent, { task: state, event: { type: OzonSupplyEventType.Error }, message });
         }
 
         try {
@@ -261,7 +264,7 @@ export class OzonSupplyService {
       const message = this.describeSupplyStatus(status);
       await this.emitEvent(handler, {
         task,
-        event: 'supplyStatus',
+        event: { type: OzonSupplyEventType.SupplyStatus },
         message,
         operationId,
       });
@@ -269,7 +272,7 @@ export class OzonSupplyService {
       this.logger.warn(`Не удалось получить статус поставки ${operationId}: ${String(error)}`);
       await this.emitEvent(handler, {
         task,
-        event: 'supplyStatus',
+        event: { type: OzonSupplyEventType.SupplyStatus },
         message: `Не удалось получить статус поставки ${operationId}: ${this.describeUnknownError(error)}`,
         operationId,
       });
@@ -352,11 +355,11 @@ export class OzonSupplyService {
     this.ensureNotAborted(abortSignal);
 
     if (!credentials && !this.ozonApiDefaultCredentialsAvailable()) {
-      return { task, event: 'noCredentials', message: 'Не заданы ключи Ozon' };
+      return { task, event: { type: OzonSupplyEventType.NoCredentials }, message: 'Не заданы ключи Ozon' };
     }
 
     if (!task.clusterId) {
-      return { task, event: 'error', message: 'Не удалось определить cluster_id' };
+      return { task, event: { type: OzonSupplyEventType.Error }, message: 'Не удалось определить cluster_id' };
     }
 
     const creds = credentials ?? this.ozonApiDefaultCredentials();
@@ -390,13 +393,13 @@ export class OzonSupplyService {
           task.warehouseSelectionPendingNotified = true;
           return {
             task,
-            event: 'warehousePending',
+            event: { type: OzonSupplyEventType.WarehousePending },
             message,
           };
         }
         return {
           task,
-          event: 'draftError',
+          event: { type: OzonSupplyEventType.DraftError },
           message: 'Черновик не содержит доступных складов для отгрузки',
         };
       }
@@ -418,7 +421,7 @@ export class OzonSupplyService {
         task.orderFlag = 1;
         return {
           task,
-          event: 'windowExpired',
+          event: { type: OzonSupplyEventType.WindowExpired },
           message: 'Временной диапазон для поиска таймслотов истёк.',
         };
       }
@@ -426,7 +429,7 @@ export class OzonSupplyService {
       const timeslot = await this.pickTimeslot(task, credentials, window, abortSignal);
 
       if (!timeslot) {
-        return { task, event: 'timeslotMissing', message: 'Свободных таймслотов нет' };
+        return { task, event: { type: OzonSupplyEventType.TimeslotMissing }, message: 'Свободных таймслотов нет' };
       }
 
       task.selectedTimeslot = timeslot;
@@ -448,32 +451,32 @@ export class OzonSupplyService {
         }
         return {
           task,
-          event: 'supplyCreated',
+          event: { type: OzonSupplyEventType.SupplyCreated },
           message: messageParts.join(', '),
           operationId,
         };
       }
 
-      return { task, event: 'error', message: 'Ответ без operation_id при создании поставки' };
+      return { task, event: { type: OzonSupplyEventType.Error }, message: 'Ответ без operation_id при создании поставки' };
     }
 
     if (info.code === 5) {
       task.draftOperationId = '';
       task.draftId = 0;
       this.draftCache.delete(this.getTaskHash(task));
-      return { task, event: 'draftExpired', message: 'Черновик устарел, создадим заново' };
+      return { task, event: { type: OzonSupplyEventType.DraftExpired }, message: 'Черновик устарел, создадим заново' };
     }
 
     if (info.code === 1) {
       task.draftOperationId = '';
       task.draftId = 0;
       this.draftCache.delete(this.getTaskHash(task));
-      return { task, event: 'draftInvalid', message: 'Черновик невалидный' };
+      return { task, event: { type: OzonSupplyEventType.DraftInvalid }, message: 'Черновик невалидный' };
     }
 
     return {
       task,
-      event: 'draftError',
+      event: { type: OzonSupplyEventType.DraftError },
       message: `Неожиданный ответ статуса черновика: ${JSON.stringify(info)}`,
     };
   }
@@ -492,7 +495,7 @@ export class OzonSupplyService {
       task.draftId = cached.draftId ?? task.draftId;
       return {
         task,
-        event: 'draftValid',
+        event: { type: OzonSupplyEventType.DraftValid },
         message: `Используем существующий черновик ${cached.operationId}`,
       };
     }
@@ -513,7 +516,7 @@ export class OzonSupplyService {
     this.ensureNotAborted(abortSignal);
 
     if (!operationId) {
-      return { task, event: 'error', message: 'Черновик не создан: пустой operation_id' };
+      return { task, event: { type: OzonSupplyEventType.Error }, message: 'Черновик не создан: пустой operation_id' };
     }
 
     task.draftOperationId = operationId;
@@ -523,7 +526,7 @@ export class OzonSupplyService {
       expiresAt: Date.now() + this.draftTtlMs,
     });
 
-    return { task, event: 'draftCreated', message: `Создан черновик ${operationId}` };
+    return { task, event: { type: OzonSupplyEventType.DraftCreated }, message: `Создан черновик ${operationId}` };
   }
 
   private async pickTimeslot(

@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { Context } from 'telegraf';
 
+import { OzonSupplyEventType } from '@bot/ozon/ozon-supply.types';
+
 import {
     SupplyWizardClusterOption,
     SupplyWizardDraftWarehouseOption,
@@ -11,7 +13,6 @@ import {
     SupplyWizardWarehouseOption,
     SupplyWizardStore,
 } from '../supply-wizard.store';
-import { it } from "node:test";
 
 @Injectable()
 export class SupplyWizardViewService {
@@ -856,32 +857,32 @@ export class SupplyWizardViewService {
         ].join('\n');
     }
 
-    formatSupplyEvent(result: { taskId: string; event: string; message?: string }): string | undefined {
+    formatSupplyEvent(result: { taskId: string; event: OzonSupplyEventType; message?: string }): string | undefined {
         const prefix = `[${result.taskId}]`;
         switch (result.event) {
-            case 'draftCreated':
+            case OzonSupplyEventType.DraftCreated:
                 return `${prefix} Черновик создан. ${result.message ?? ''}`.trim();
-            case 'draftValid':
+            case OzonSupplyEventType.DraftValid:
                 return `${prefix} Используем существующий черновик. ${result.message ?? ''}`.trim();
-            case 'draftExpired':
+            case OzonSupplyEventType.DraftExpired:
                 return `${prefix} Черновик устарел, создаём заново.`;
-            case 'draftInvalid':
+            case OzonSupplyEventType.DraftInvalid:
                 return `${prefix} Черновик невалидный, пересоздаём.`;
-            case 'draftError':
+            case OzonSupplyEventType.DraftError:
                 return `${prefix} Ошибка статуса черновика.${result.message ? ` ${result.message}` : ''}`;
-            case 'warehousePending':
+            case OzonSupplyEventType.WarehousePending:
                 return result.message ? `${prefix} ${result.message}` : undefined;
-            case 'windowExpired':
+            case OzonSupplyEventType.WindowExpired:
                 return `${prefix} Временное окно истекло, задача остановлена.`;
-            case 'timeslotMissing':
+            case OzonSupplyEventType.TimeslotMissing:
                 //return `${prefix} Свободных таймслотов нет.`;
                 return ``;
-            case 'supplyCreated':
+            case OzonSupplyEventType.SupplyCreated:
                 return `${prefix} ✅ Поставка создана. ${result.message ?? ''}`.trim();
-            case 'supplyStatus':
+            case OzonSupplyEventType.SupplyStatus:
                 return `${prefix} ${result.message ?? 'Статус поставки обновлён.'}`.trim();
-            case 'noCredentials':
-            case 'error':
+            case OzonSupplyEventType.NoCredentials:
+            case OzonSupplyEventType.Error:
                 return `${prefix} ❌ ${result.message ?? 'Ошибка'}`;
             default:
                 return result.message ? `${prefix} ${result.message}` : undefined;

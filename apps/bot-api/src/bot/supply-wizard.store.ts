@@ -175,8 +175,8 @@ export class SupplyWizardStore {
       warehouseSearchQuery: undefined,
       warehousePage: 0,
     };
-    this.storage.set(chatId, state);
-    return state;
+    this.storage.set(chatId, this.cloneState(state));
+    return this.get(chatId) ?? state;
   }
 
   get(chatId: string): SupplyWizardState | undefined {
@@ -184,42 +184,7 @@ export class SupplyWizardStore {
     if (!state) {
       return undefined;
     }
-    return {
-      ...state,
-      tasks: state.tasks ? [...state.tasks] : undefined,
-      clusters: this.cloneClusters(state.clusters),
-      warehouses: this.cloneWarehouses(state.warehouses),
-      dropOffs: this.cloneDropOffs(state.dropOffs),
-      draftWarehouses: this.cloneDraftWarehouses(state.draftWarehouses),
-      draftTimeslots: this.cloneDraftTimeslots(state.draftTimeslots),
-      dropOffSearchQuery: state.dropOffSearchQuery,
-      draftStatus: state.draftStatus,
-      draftOperationId: state.draftOperationId,
-      draftId: state.draftId,
-      draftCreatedAt: state.draftCreatedAt,
-      draftExpiresAt: state.draftExpiresAt,
-      draftError: state.draftError,
-      selectedTimeslot: state.selectedTimeslot
-        ? {
-            ...state.selectedTimeslot,
-            data: state.selectedTimeslot.data ? { ...state.selectedTimeslot.data } : state.selectedTimeslot.data,
-          }
-        : undefined,
-      pendingApiKey: state.pendingApiKey,
-      pendingClientId: state.pendingClientId,
-      orders: state.orders.map((order) => ({
-        ...order,
-        items: order.items.map((item) => ({ ...item })),
-      })),
-      activeOrderId: state.activeOrderId,
-      pendingTasks: (state.pendingTasks ?? []).map((task) => ({
-        ...task,
-        items: task.items.map((item) => ({ ...item })),
-      })),
-      activeTaskId: state.activeTaskId,
-      warehouseSearchQuery: state.warehouseSearchQuery,
-      warehousePage: state.warehousePage,
-    };
+    return this.cloneState(state);
   }
 
   update(
@@ -227,83 +192,28 @@ export class SupplyWizardStore {
     updater: (state: SupplyWizardState | undefined) => SupplyWizardState | undefined,
   ): SupplyWizardState | undefined {
     const current = this.storage.get(chatId);
-    const next = updater(
-      current
-        ? {
-            ...current,
-            tasks: current.tasks ? [...current.tasks] : undefined,
-            clusters: this.cloneClusters(current.clusters),
-            warehouses: this.cloneWarehouses(current.warehouses),
-            dropOffs: this.cloneDropOffs(current.dropOffs),
-            draftWarehouses: this.cloneDraftWarehouses(current.draftWarehouses),
-            draftTimeslots: this.cloneDraftTimeslots(current.draftTimeslots),
-            dropOffSearchQuery: current.dropOffSearchQuery,
-            draftStatus: current.draftStatus,
-            draftOperationId: current.draftOperationId,
-            draftId: current.draftId,
-            draftCreatedAt: current.draftCreatedAt,
-            draftExpiresAt: current.draftExpiresAt,
-            draftError: current.draftError,
-            selectedTimeslot: current.selectedTimeslot
-              ? {
-                  ...current.selectedTimeslot,
-                  data: current.selectedTimeslot.data
-                    ? { ...current.selectedTimeslot.data }
-                    : current.selectedTimeslot.data,
-                }
-              : undefined,
-            pendingApiKey: current.pendingApiKey,
-            pendingClientId: current.pendingClientId,
-            orders: current.orders.map((order) => ({
-              ...order,
-              items: order.items.map((item) => ({ ...item })),
-            })),
-            activeOrderId: current.activeOrderId,
-          }
-        : undefined,
-    );
+    const next = updater(current ? this.cloneState(current) : undefined);
     if (!next) {
       this.storage.delete(chatId);
       return undefined;
     }
-    const normalized: SupplyWizardState = {
+    const normalized = this.cloneState({
       ...next,
-      tasks: next.tasks ? [...next.tasks] : undefined,
-      clusters: this.cloneClusters(next.clusters),
-      warehouses: this.cloneWarehouses(next.warehouses),
-      dropOffs: this.cloneDropOffs(next.dropOffs),
-      draftWarehouses: this.cloneDraftWarehouses(next.draftWarehouses),
-      draftTimeslots: this.cloneDraftTimeslots(next.draftTimeslots),
-      dropOffSearchQuery: next.dropOffSearchQuery,
-      draftStatus: next.draftStatus ?? 'idle',
-      draftOperationId: next.draftOperationId,
-      draftId: next.draftId,
-      draftCreatedAt: next.draftCreatedAt,
-      draftExpiresAt: next.draftExpiresAt,
-      draftError: next.draftError,
-      selectedTimeslot: next.selectedTimeslot
-        ? {
-            ...next.selectedTimeslot,
-            data: next.selectedTimeslot.data ? { ...next.selectedTimeslot.data } : next.selectedTimeslot.data,
-          }
-        : undefined,
-      pendingApiKey: next.pendingApiKey,
-      pendingClientId: next.pendingClientId,
-      orders: next.orders.map((order) => ({
-        ...order,
-        items: order.items.map((item) => ({ ...item })),
-      })),
-      activeOrderId: next.activeOrderId,
       createdAt: next.createdAt ?? current?.createdAt ?? Date.now(),
-      warehouseSearchQuery: next.warehouseSearchQuery ?? undefined,
-      warehousePage: typeof next.warehousePage === 'number' ? next.warehousePage : current?.warehousePage ?? 0,
-    };
+      draftStatus: next.draftStatus ?? 'idle',
+      warehousePage:
+        typeof next.warehousePage === 'number' ? next.warehousePage : current?.warehousePage ?? 0,
+    });
     this.storage.set(chatId, normalized);
-    return normalized;
+    return this.cloneState(normalized);
   }
 
   clear(chatId: string): void {
     this.storage.delete(chatId);
+  }
+
+  hydrate(chatId: string, state: SupplyWizardState): void {
+    this.storage.set(chatId, this.cloneState(state));
   }
 
   private cloneWarehouses(
@@ -347,5 +257,50 @@ export class SupplyWizardStore {
         warehouses: (cluster.logistic_clusters?.warehouses ?? []).map((item) => ({ ...item })),
       },
     }));
+  }
+
+  private cloneTasks(tasks: OzonSupplyTask[] | undefined): OzonSupplyTask[] | undefined {
+    if (!tasks) {
+      return undefined;
+    }
+    return tasks.map((task) => ({
+      ...task,
+      items: task.items.map((item) => ({ ...item })),
+      selectedTimeslot: task.selectedTimeslot ? { ...task.selectedTimeslot } : undefined,
+    }));
+  }
+
+  private cloneOrders(orders: SupplyWizardOrderSummary[] = []): SupplyWizardOrderSummary[] {
+    return orders.map((order) => ({
+      ...order,
+      items: order.items.map((item) => ({ ...item })),
+    }));
+  }
+
+  private clonePendingTasks(tasks: SupplyWizardOrderSummary[] = []): SupplyWizardOrderSummary[] {
+    return tasks.map((task) => ({
+      ...task,
+      items: task.items.map((item) => ({ ...item })),
+    }));
+  }
+
+  private cloneState(state: SupplyWizardState): SupplyWizardState {
+    return {
+      ...state,
+      clusters: this.cloneClusters(state.clusters),
+      warehouses: this.cloneWarehouses(state.warehouses),
+      dropOffs: this.cloneDropOffs(state.dropOffs),
+      draftWarehouses: this.cloneDraftWarehouses(state.draftWarehouses),
+      draftTimeslots: this.cloneDraftTimeslots(state.draftTimeslots),
+      tasks: this.cloneTasks(state.tasks),
+      orders: this.cloneOrders(state.orders),
+      pendingTasks: this.clonePendingTasks(state.pendingTasks),
+      selectedTimeslot: state.selectedTimeslot
+        ? {
+            ...state.selectedTimeslot,
+            data: state.selectedTimeslot.data ? { ...state.selectedTimeslot.data } : state.selectedTimeslot.data,
+          }
+        : undefined,
+    };
   }
 }

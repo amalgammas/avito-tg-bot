@@ -12,6 +12,7 @@ import { configuration } from './config/configuration';
 import { HealthController } from './health/health.controller';
 import { UserCredentialsEntity } from './storage/entities/user-credentials.entity';
 import { SupplyOrderEntity } from './storage/entities/supply-order.entity';
+import { WizardSessionEntity } from './storage/entities/wizard-session.entity';
 
 @Module({
     imports: [
@@ -36,7 +37,7 @@ import { SupplyOrderEntity } from './storage/entities/supply-order.entity';
                 return {
                     type: 'sqlite' as const,
                     database: databasePath,
-                    entities: [UserCredentialsEntity, SupplyOrderEntity],
+                    entities: [UserCredentialsEntity, SupplyOrderEntity, WizardSessionEntity],
                     synchronize: nodeEnv !== 'production',
                     autoLoadEntities: false,
                     logging,
