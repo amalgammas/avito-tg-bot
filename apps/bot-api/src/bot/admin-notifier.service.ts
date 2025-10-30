@@ -107,7 +107,7 @@ export class AdminNotifierService {
     if (!user) return undefined;
     const parts = [];
     if (user.username) {
-      parts.push(`@${user.username}`);
+      parts.push(`${user.username}`);
     }
     if (user.first_name || user.last_name) {
       parts.push(`${user.first_name ?? ''} ${user.last_name ?? ''}`.trim());
