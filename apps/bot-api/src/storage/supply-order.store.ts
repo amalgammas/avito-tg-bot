@@ -49,6 +49,8 @@ export class SupplyOrderStore {
     private readonly repository: Repository<SupplyOrderEntity>,
   ) {}
 
+  private readonly searchWindowFallbackDays = 28;
+
   async list(chatId: string): Promise<SupplyWizardOrderSummary[]> {
     const records = await this.repository.find({
       where: { chatId },
@@ -226,6 +228,7 @@ export class SupplyOrderStore {
       clusterName: record.clusterName ?? undefined,
       items,
       createdAt: record.completedAt ?? record.createdAt,
+      searchDeadlineAt: this.computeSearchDeadline(record),
     };
   }
 
@@ -243,6 +246,32 @@ export class SupplyOrderStore {
       quantity: item.quantity,
       sku: item.sku,
     }));
+  }
+
+  private computeSearchDeadline(record: SupplyOrderEntity): number | undefined {
+    const deadlineIso = record.taskPayload?.lastDay;
+    const explicitDeadline = this.parseSupplyDeadline(deadlineIso);
+    if (explicitDeadline) {
+      explicitDeadline.setHours(23, 59, 59, 0);
+      return explicitDeadline.getTime();
+    }
+
+    const baseTimestamp = typeof record.createdAt === 'number' ? record.createdAt : Date.now();
+    const baseDate = new Date(baseTimestamp);
+    if (Number.isNaN(baseDate.getTime())) {
+      return undefined;
+    }
+    baseDate.setHours(23, 59, 59, 0);
+    baseDate.setDate(baseDate.getDate() + this.searchWindowFallbackDays);
+    return baseDate.getTime();
+  }
+
+  private parseSupplyDeadline(value?: string): Date | undefined {
+    if (!value?.trim()) {
+      return undefined;
+    }
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? undefined : parsed;
   }
 
   private cloneTask(task: OzonSupplyTask): OzonSupplyTask {

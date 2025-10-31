@@ -621,7 +621,6 @@ export class SupplyWizardHandler {
             this.clearAbortController(task.taskId);
             return;
         }
-
         effectiveTask.clusterId = updated.selectedClusterId;
         effectiveTask.city = updated.selectedClusterName ?? '';
         effectiveTask.warehouseId = updated.selectedWarehouseId;
@@ -644,6 +643,9 @@ export class SupplyWizardHandler {
             : updated.selectedWarehouseName ??
             (typeof updated.selectedWarehouseId === 'number' ? `Склад ${updated.selectedWarehouseId}` : '—');
 
+        const searchDeadlineDate = this.resolveTimeslotSearchDeadline(effectiveTask);
+        const searchDeadlineLabel = this.formatTimeslotSearchDeadline(searchDeadlineDate);
+
         const summaryLines = [
             `Кластер: ${updated.selectedClusterName ?? '—'}`,
             `Склад: ${warehouseLabel}`,
@@ -651,6 +653,7 @@ export class SupplyWizardHandler {
         ];
 
         summaryLines.push(`Готовность к отгрузке: ${readyInDays} дн.`);
+        summaryLines.push(`Диапазон поиска: ${searchDeadlineLabel ? `до ${searchDeadlineLabel}` : '—'}`);
 
         try {
             await this.orderStore.saveTask(chatId, {
@@ -688,6 +691,8 @@ export class SupplyWizardHandler {
                 ...summaryLines,
                 '',
                 'Задача запущена. Проверяйте раздел «Мои задачи».',
+                '',
+                '<b>Указать конечную дату искомого тайм - слота пока нельзя. Бот ищет тайм-слоты в пределах 28 дней от сегодняшнего дня.</b>',
                 '',
                 landingText,
             ].join('\n');
@@ -1972,6 +1977,8 @@ export class SupplyWizardHandler {
             sku: item.sku,
         }));
 
+        const completionSearchDeadline = this.resolveTimeslotSearchDeadline(task);
+
         const entry: SupplyWizardOrderSummary = {
             id: orderId ? String(orderId) : operationId,
             orderId,
@@ -1985,6 +1992,7 @@ export class SupplyWizardHandler {
             timeslotLabel: timeslotLabel ?? undefined,
             items,
             createdAt: Date.now(),
+            searchDeadlineAt: completionSearchDeadline?.getTime(),
         };
 
         const updated =
@@ -4144,6 +4152,35 @@ export class SupplyWizardHandler {
             items: task.items.map((item) => ({ ...item })),
             selectedTimeslot: task.selectedTimeslot ? { ...task.selectedTimeslot } : undefined,
         };
+    }
+
+    private formatTimeslotSearchDeadline(deadline: Date | undefined): string | undefined {
+        if (!deadline) {
+            return undefined;
+        }
+        return new Intl.DateTimeFormat('ru-RU', {
+            day: '2-digit',
+            month: '2-digit',
+        }).format(deadline);
+    }
+
+    private resolveTimeslotSearchDeadline(task: OzonSupplyTask): Date | undefined {
+        const parsedDeadline = this.parseSupplyDeadline(task.lastDay);
+        if (parsedDeadline) {
+            return parsedDeadline;
+        }
+        const fallback = new Date();
+        fallback.setUTCHours(23, 59, 59, 0);
+        fallback.setUTCDate(fallback.getUTCDate() + this.readyDaysMax);
+        return fallback;
+    }
+
+    private parseSupplyDeadline(value?: string): Date | undefined {
+        if (!value) {
+            return undefined;
+        }
+        const parsed = new Date(value);
+        return Number.isNaN(parsed.getTime()) ? undefined : parsed;
     }
 
     private async downloadTelegramFile(ctx: Context, fileId: string): Promise<Buffer> {

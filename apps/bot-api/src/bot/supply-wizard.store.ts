@@ -70,6 +70,7 @@ export interface SupplyWizardOrderSummary {
   clusterName?: string;
   items: SupplyWizardSupplyItem[];
   createdAt: number;
+  searchDeadlineAt?: number;
 }
 
 export type SupplyWizardDraftStatus = 'idle' | 'creating' | 'success' | 'failed';
