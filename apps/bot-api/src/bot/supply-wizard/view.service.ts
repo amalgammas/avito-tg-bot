@@ -257,12 +257,14 @@ export class SupplyWizardViewService {
 
     renderOrderDetails(order: SupplyWizardOrderSummary): string {
         const searchWindowLine = this.buildSearchDeadlineLine(order.searchDeadlineAt);
+        const createdLine = this.buildCreatedLine(order.createdAt);
         const lines = [
             `Поставка №${order.orderId ?? order.operationId ?? order.id}`,
             '',
             order.clusterName ? `Кластер: ${order.clusterName}` : undefined,
             order.dropOffName ? `Пункт сдачи: ${order.dropOffName}` : undefined,
             order.warehouse ? `Склад: ${order.warehouse}` : undefined,
+            createdLine,
             searchWindowLine,
             order.timeslotLabel
                 ? `Таймслот: ${order.timeslotLabel}`
@@ -324,7 +326,7 @@ export class SupplyWizardViewService {
         const rows = pendingTasks.map((task) => {
             const baseName =
                 this.formatTaskName(task.operationId ?? task.id) ?? task.operationId ?? task.id ?? '—';
-            const createdAt = this.formatTaskCreatedAt(task.createdAt);
+            const createdAt = this.formatCreatedAt(task.createdAt);
             const label = createdAt ? `${baseName} · ${createdAt}` : baseName;
             return [
                 {
@@ -343,12 +345,14 @@ export class SupplyWizardViewService {
         const displayedItems = task.items.slice(0, limit);
 
         const searchWindowLine = this.buildSearchDeadlineLine(task.searchDeadlineAt);
+        const createdLine = this.buildCreatedLine(task.createdAt);
         const lines = [
             `Задача ${this.formatTaskName(task.operationId ?? task.id)}`,
             '\n',
             task.dropOffName ? `Пункт сдачи: ${task.dropOffName}` : undefined,
             task.clusterName ? `Кластер: ${task.clusterName}` : undefined,
             task.warehouse ? `Склад: ${task.warehouse}` : undefined,
+            createdLine,
             searchWindowLine,
             '',
             task.timeslotLabel ? `Таймслот: ${task.timeslotLabel}` : undefined,
@@ -373,11 +377,13 @@ export class SupplyWizardViewService {
 
     renderSupplySuccess(order: SupplyWizardOrderSummary): string {
         const searchWindowLine = this.buildSearchDeadlineLine(order.searchDeadlineAt);
+        const createdLine = this.buildCreatedLine(order.createdAt);
         const lines = [
             'Поставка создана ✅',
             `ID: ${order.orderId ?? order.id}`,
             order.timeslotLabel ? `Таймслот: ${order.timeslotLabel}` : order.arrival ? `Время отгрузки: ${order.arrival}` : undefined,
             order.warehouse ? `Склад: ${order.warehouse}` : undefined,
+            createdLine,
             searchWindowLine,
         ].filter((value): value is string => Boolean(value));
         return lines.join('\n');
@@ -1005,7 +1011,7 @@ export class SupplyWizardViewService {
         }
     }
 
-    private formatTaskCreatedAt(value: number | undefined): string | undefined {
+    private formatCreatedAt(value: number | undefined): string | undefined {
         if (typeof value !== 'number' || !Number.isFinite(value)) {
             return undefined;
         }
@@ -1019,6 +1025,11 @@ export class SupplyWizardViewService {
             hour: '2-digit',
             minute: '2-digit',
         }).format(date);
+    }
+
+    private buildCreatedLine(value: number | undefined): string | undefined {
+        const formatted = this.formatCreatedAt(value);
+        return formatted ? `Создана: ${formatted}` : undefined;
     }
 
     private buildSearchDeadlineLine(value: number | undefined): string {

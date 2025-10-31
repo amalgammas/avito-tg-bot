@@ -688,11 +688,11 @@ export class SupplyWizardHandler {
             const landingState = this.wizardStore.get(chatId) ?? updated;
             const landingText = this.view.renderLanding(landingState);
             const promptText = [
-                ...summaryLines,
-                '',
                 'Задача запущена. Проверяйте раздел «Мои задачи».',
                 '',
                 '<b>Указать конечную дату искомого тайм - слота пока нельзя. Бот ищет тайм-слоты в пределах 28 дней от сегодняшнего дня.</b>',
+                '',
+                ...summaryLines,
                 '',
                 landingText,
             ].join('\n');
