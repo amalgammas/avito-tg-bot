@@ -21,9 +21,11 @@ export class UserSessionService {
     const entity = await this.repository.findOne({
       where: { chatId, taskId: IsNull() },
     });
+
     if (!entity) {
       return undefined;
     }
+
     return this.cloneFromPayload<SupplyWizardState>(entity.payload);
   }
 
