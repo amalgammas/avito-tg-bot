@@ -476,6 +476,8 @@ export class OzonApiService {
       `[OzonApiService] createDraft response: ${this.stringifySafe(response.data) ?? 'empty body'} *** ${payload}`,
     );
 
+    await this.sleep(30_000);
+
     return response.data?.operation_id;
   }
 
