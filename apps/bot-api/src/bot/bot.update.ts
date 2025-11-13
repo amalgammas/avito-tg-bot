@@ -5,7 +5,8 @@ import { Context } from 'telegraf';
 import { SupplyWizardHandler } from './supply-wizard.handler';
 import { UserCredentialsStore } from './user-credentials.store';
 import { OzonCredentials } from '../config/ozon-api.service';
-import { AdminNotifierService } from './admin-notifier.service';
+import { NotificationService } from './services/notification.service';
+import { WizardEvent } from './services/wizard-event.types';
 
 @Update()
 export class BotUpdate {
@@ -24,7 +25,7 @@ export class BotUpdate {
   constructor(
     private readonly wizard: SupplyWizardHandler,
     private readonly credentialsStore: UserCredentialsStore,
-    private readonly adminNotifier: AdminNotifierService,
+    private readonly notifications: NotificationService,
   ) {}
 
   @Start()
@@ -68,9 +69,8 @@ export class BotUpdate {
       ].join('\n'),
     );
 
-    await this.adminNotifier.notifyWizardEvent({
+    await this.notifications.notifyWizard(WizardEvent.AuthSaved, {
       ctx,
-      event: 'auth.saved',
       lines: [`client_id: ${this.maskValue(clientId)}`],
     });
 
@@ -95,10 +95,7 @@ export class BotUpdate {
     await ctx.reply('✅ Ключи удалены из базы бота.');
     await this.wizard.start(ctx)
 
-    await this.adminNotifier.notifyWizardEvent({
-      ctx,
-      event: 'auth.cleared',
-    });
+    await this.notifications.notifyWizard(WizardEvent.AuthCleared, { ctx });
   }
 
   @Command('ozon_keys')

@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { AxiosError } from 'axios';
 
 import {
   OzonApiService,
@@ -10,12 +11,20 @@ import {
   OzonDraftStatus,
 } from '../config/ozon-api.service';
 import {
+  addUtcDays,
+  endOfUtcDay,
+  parseIsoDate,
+  startOfUtcDay,
+  toOzonIso,
+} from '@bot/utils/time.utils';
+import {
+  OzonSupplyEventType,
   OzonSupplyProcessOptions,
   OzonSupplyProcessResult,
   OzonSupplyTask,
-  OzonSupplyTaskMap,
-  OzonSupplyItem,
+  OzonSupplyTaskMap
 } from './ozon-supply.types';
+
 import { OzonSheetService } from './ozon-sheet.service';
 
 interface PrepareTasksOptions {
@@ -31,13 +40,14 @@ export class OzonSupplyService {
   private readonly defaultSpreadsheetId: string;
   private readonly pollIntervalMs: number;
   private readonly availableWarehousesTtlMs = 10 * 60 * 1000; // 10 минут
-  private readonly draftTtlMs = 55 * 60 * 1000; // 55 минут
   private readonly timeslotWindowMaxDays = 28;
   private readonly dayMs = 24 * 60 * 60 * 1000;
-  private readonly draftCache = new Map<
-    string,
-    { operationId: string; draftId?: number; expiresAt: number }
-  >();
+  private readonly draftMinuteLimit = 2;
+  private readonly draftHourLimit = 50;
+  private readonly draftMinuteWindowMs = 60 * 1000;
+  private readonly draftHourWindowMs = 60 * 60 * 1000;
+  private draftMinuteTimestamps: number[] = [];
+  private draftHourTimestamps: number[] = [];
   private lastClusters: OzonCluster[] = [];
   private availableWarehousesCache?: {
     warehouses: OzonAvailableWarehouse[];
@@ -126,21 +136,23 @@ export class OzonSupplyService {
         this.ensureNotAborted(abortSignal);
         try {
           const result = await this.processSingleTask(state, credentials, dropOffWarehouseId);
-          if (result.event === 'error' && /Склад отгрузки/.test(result.message ?? '')) {
+          const eventType = result.event?.type ?? OzonSupplyEventType.Error;
+
+          if (eventType === OzonSupplyEventType.Error && /Склад отгрузки/.test(result.message ?? '')) {
             const match = /Склад отгрузки (\d+)/.exec(result.message ?? '');
             const warehouseId = match ? Number(match[1]) : undefined;
             if (warehouseId && !seenUnavailableWarehouses.has(warehouseId)) {
               seenUnavailableWarehouses.add(warehouseId);
               await this.emitEvent(options.onEvent, {
                 task: state,
-                event: 'error',
+                event: { type: OzonSupplyEventType.Error },
                 message: `⚠️ Склад ${warehouseId} недоступен по данным Ozon (drop-off ${dropOffWarehouseId}). Выберите склад из списка, предложенного черновиком.`,
               });
             }
           }
           await this.emitEvent(options.onEvent, result);
 
-          if (result.event === 'supplyCreated' && result.operationId) {
+          if (eventType === OzonSupplyEventType.SupplyCreated && result.operationId) {
             await this.emitSupplyStatus(result.operationId, state, credentials, options.onEvent);
           }
 
@@ -152,7 +164,7 @@ export class OzonSupplyService {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.logger.error(`[${taskId}] Ошибка обработки: ${message}`);
-          await this.emitEvent(options.onEvent, { task: state, event: 'error', message });
+          await this.emitEvent(options.onEvent, { task: state, event: { type: OzonSupplyEventType.Error }, message });
         }
 
         try {
@@ -261,7 +273,7 @@ export class OzonSupplyService {
       const message = this.describeSupplyStatus(status);
       await this.emitEvent(handler, {
         task,
-        event: 'supplyStatus',
+        event: { type: OzonSupplyEventType.SupplyStatus },
         message,
         operationId,
       });
@@ -269,7 +281,7 @@ export class OzonSupplyService {
       this.logger.warn(`Не удалось получить статус поставки ${operationId}: ${String(error)}`);
       await this.emitEvent(handler, {
         task,
-        event: 'supplyStatus',
+        event: { type: OzonSupplyEventType.SupplyStatus },
         message: `Не удалось получить статус поставки ${operationId}: ${this.describeUnknownError(error)}`,
         operationId,
       });
@@ -352,11 +364,11 @@ export class OzonSupplyService {
     this.ensureNotAborted(abortSignal);
 
     if (!credentials && !this.ozonApiDefaultCredentialsAvailable()) {
-      return { task, event: 'noCredentials', message: 'Не заданы ключи Ozon' };
+      return { task, event: { type: OzonSupplyEventType.NoCredentials }, message: 'Не заданы ключи Ozon' };
     }
 
     if (!task.clusterId) {
-      return { task, event: 'error', message: 'Не удалось определить cluster_id' };
+      return { task, event: { type: OzonSupplyEventType.Error }, message: 'Не удалось определить cluster_id' };
     }
 
     const creds = credentials ?? this.ozonApiDefaultCredentials();
@@ -374,7 +386,20 @@ export class OzonSupplyService {
     abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult> {
     this.ensureNotAborted(abortSignal);
-    const info = await this.ozonApi.getDraftInfo(task.draftOperationId, credentials);
+    let info: OzonDraftStatus;
+    try {
+      info = await this.ozonApi.getDraftInfo(task.draftOperationId, credentials);
+    } catch (error) {
+      const axiosError = error as AxiosError<any>;
+      const response = axiosError?.response;
+      const data = response?.data as { code?: number };
+      if (response?.status === 404 && data?.code === 5) {
+        task.draftOperationId = '';
+        task.draftId = 0;
+        return { task, event: { type: OzonSupplyEventType.DraftExpired }, message: 'Черновик не найден, создаём заново' };
+      }
+      throw error;
+    }
     this.ensureNotAborted(abortSignal);
 
     if (info.status === 'CALCULATION_STATUS_SUCCESS') {
@@ -390,13 +415,13 @@ export class OzonSupplyService {
           task.warehouseSelectionPendingNotified = true;
           return {
             task,
-            event: 'warehousePending',
+            event: { type: OzonSupplyEventType.WarehousePending },
             message,
           };
         }
         return {
           task,
-          event: 'draftError',
+          event: { type: OzonSupplyEventType.DraftError },
           message: 'Черновик не содержит доступных складов для отгрузки',
         };
       }
@@ -410,7 +435,6 @@ export class OzonSupplyService {
       task.warehouseId = selectedWarehouseId;
       task.warehouseName = selectedWarehouseName ?? task.warehouseName;
       task.draftId = info.draft_id ?? task.draftId;
-      this.rememberDraft(task, info.draft_id ?? task.draftId);
       this.ensureNotAborted(abortSignal);
 
       const window = this.computeTimeslotWindow(task);
@@ -418,7 +442,7 @@ export class OzonSupplyService {
         task.orderFlag = 1;
         return {
           task,
-          event: 'windowExpired',
+          event: { type: OzonSupplyEventType.WindowExpired },
           message: 'Временной диапазон для поиска таймслотов истёк.',
         };
       }
@@ -426,7 +450,7 @@ export class OzonSupplyService {
       const timeslot = await this.pickTimeslot(task, credentials, window, abortSignal);
 
       if (!timeslot) {
-        return { task, event: 'timeslotMissing', message: 'Свободных таймслотов нет' };
+        return { task, event: { type: OzonSupplyEventType.TimeslotMissing }, message: 'Свободных таймслотов нет' };
       }
 
       task.selectedTimeslot = timeslot;
@@ -448,32 +472,30 @@ export class OzonSupplyService {
         }
         return {
           task,
-          event: 'supplyCreated',
+          event: { type: OzonSupplyEventType.SupplyCreated },
           message: messageParts.join(', '),
           operationId,
         };
       }
 
-      return { task, event: 'error', message: 'Ответ без operation_id при создании поставки' };
+      return { task, event: { type: OzonSupplyEventType.Error }, message: 'Ответ без operation_id при создании поставки' };
     }
 
     if (info.code === 5) {
       task.draftOperationId = '';
       task.draftId = 0;
-      this.draftCache.delete(this.getTaskHash(task));
-      return { task, event: 'draftExpired', message: 'Черновик устарел, создадим заново' };
+      return { task, event: { type: OzonSupplyEventType.DraftExpired }, message: 'Черновик устарел, создадим заново' };
     }
 
     if (info.code === 1) {
       task.draftOperationId = '';
       task.draftId = 0;
-      this.draftCache.delete(this.getTaskHash(task));
-      return { task, event: 'draftInvalid', message: 'Черновик невалидный' };
+      return { task, event: { type: OzonSupplyEventType.DraftInvalid }, message: 'Черновик невалидный' };
     }
 
     return {
       task,
-      event: 'draftError',
+      event: { type: OzonSupplyEventType.DraftError },
       message: `Неожиданный ответ статуса черновика: ${JSON.stringify(info)}`,
     };
   }
@@ -485,21 +507,9 @@ export class OzonSupplyService {
     abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult> {
     this.ensureNotAborted(abortSignal);
-    const cacheKey = this.getTaskHash(task);
-    const cached = this.draftCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      task.draftOperationId = cached.operationId;
-      task.draftId = cached.draftId ?? task.draftId;
-      return {
-        task,
-        event: 'draftValid',
-        message: `Используем существующий черновик ${cached.operationId}`,
-      };
-    }
-
-    this.ensureNotAborted(abortSignal);
     const ozonItems = await this.buildOzonItems(task, credentials);
     this.ensureNotAborted(abortSignal);
+    await this.throttleDraftCreation(abortSignal);
 
     const operationId = await this.ozonApi.createDraft(
       {
@@ -513,17 +523,12 @@ export class OzonSupplyService {
     this.ensureNotAborted(abortSignal);
 
     if (!operationId) {
-      return { task, event: 'error', message: 'Черновик не создан: пустой operation_id' };
+      return { task, event: { type: OzonSupplyEventType.Error }, message: 'Черновик не создан: пустой operation_id' };
     }
 
     task.draftOperationId = operationId;
-    this.draftCache.set(cacheKey, {
-      operationId,
-      draftId: undefined,
-      expiresAt: Date.now() + this.draftTtlMs,
-    });
 
-    return { task, event: 'draftCreated', message: `Создан черновик ${operationId}` };
+    return { task, event: { type: OzonSupplyEventType.DraftCreated }, message: `Создан черновик ${operationId}` };
   }
 
   private async pickTimeslot(
@@ -582,7 +587,7 @@ export class OzonSupplyService {
         (entry) => entry.warehouseId === preferredWarehouseId,
       );
       if (match) {
-        if (strict && match.isAvailable === false) {
+        if (strict && !match.isFullyAvailable) {
           return undefined;
         }
         return { warehouseId: match.warehouseId, name: match.name ?? preferredWarehouseName };
@@ -592,7 +597,7 @@ export class OzonSupplyService {
       }
     }
 
-    const firstAvailable = warehouses.find((entry) => entry.isAvailable !== false);
+    const firstAvailable = warehouses.find((entry) => entry.isFullyAvailable);
     if (firstAvailable) {
       return { warehouseId: firstAvailable.warehouseId, name: firstAvailable.name ?? preferredWarehouseName };
     }
@@ -605,8 +610,8 @@ export class OzonSupplyService {
 
   private collectDraftWarehouses(
     info: OzonDraftStatus,
-  ): Array<{ warehouseId: number; name?: string; isAvailable?: boolean }> {
-    const result: Array<{ warehouseId: number; name?: string; isAvailable?: boolean }> = [];
+  ): Array<{ warehouseId: number; name?: string; isFullyAvailable?: boolean }> {
+    const result: Array<{ warehouseId: number; name?: string; isFullyAvailable?: boolean }> = [];
     for (const cluster of info.clusters ?? []) {
       for (const warehouseInfo of cluster.warehouses ?? []) {
         const rawId =
@@ -618,8 +623,9 @@ export class OzonSupplyService {
           continue;
         }
         const name = warehouseInfo?.supply_warehouse?.name?.trim();
-        const isAvailable = warehouseInfo?.status?.is_available;
-        result.push({ warehouseId, name, isAvailable });
+        const state = warehouseInfo?.status?.state;
+        const isFullyAvailable = state === 'WAREHOUSE_SCORING_STATUS_FULL_AVAILABLE';
+        result.push({ warehouseId, name, isFullyAvailable });
       }
     }
     return result;
@@ -650,35 +656,27 @@ export class OzonSupplyService {
     };
   }
 
-  private toOzonIso(date: Date): string {
-    return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
-  }
-
   private computeTimeslotUpperBound(): string {
-    return this.toOzonIso(this.computeTimeslotUpperBoundDate());
+    return toOzonIso(this.computeTimeslotUpperBoundDate());
   }
 
   private computeTimeslotUpperBoundDate(): Date {
-    const upper = new Date();
-    upper.setUTCDate(upper.getUTCDate() + this.timeslotWindowMaxDays);
-    upper.setUTCHours(23, 59, 59, 0);
-    return upper;
+    const upper = addUtcDays(new Date(), this.timeslotWindowMaxDays);
+    return endOfUtcDay(upper);
   }
 
   private computeTimeslotWindow(task: OzonSupplyTask): { dateFromIso: string; dateToIso: string; expired: boolean } {
     const readyInDays = this.resolveReadyInDays(task);
-    const from = new Date();
-    from.setUTCHours(0, 0, 0, 0);
-    from.setUTCDate(from.getUTCDate() + readyInDays);
+    const from = startOfUtcDay(addUtcDays(new Date(), readyInDays));
 
-    const deadline = this.parseDeadline(task.lastDay) ?? this.computeTimeslotUpperBoundDate();
+    const deadline = parseIsoDate(task.lastDay) ?? this.computeTimeslotUpperBoundDate();
     const to = new Date(deadline.getTime());
 
     const expired = from.getTime() > to.getTime();
 
     return {
-      dateFromIso: this.toOzonIso(from),
-      dateToIso: this.toOzonIso(to),
+      dateFromIso: toOzonIso(from),
+      dateToIso: toOzonIso(to),
       expired,
     };
   }
@@ -721,8 +719,7 @@ export class OzonSupplyService {
       return undefined;
     }
 
-    const baseline = new Date();
-    baseline.setUTCHours(0, 0, 0, 0);
+    const baseline = startOfUtcDay(new Date());
     const diffMs = parsed.getTime() - baseline.getTime();
     if (!Number.isFinite(diffMs)) {
       return undefined;
@@ -736,12 +733,47 @@ export class OzonSupplyService {
     return diffDays;
   }
 
-  private parseDeadline(value?: string): Date | undefined {
-    if (!value) {
-      return undefined;
+  private async throttleDraftCreation(abortSignal?: AbortSignal): Promise<void> {
+    while (true) {
+      this.ensureNotAborted(abortSignal);
+      const now = Date.now();
+
+      this.draftMinuteTimestamps = this.draftMinuteTimestamps.filter(
+        (ts) => now - ts < this.draftMinuteWindowMs,
+      );
+      this.draftHourTimestamps = this.draftHourTimestamps.filter(
+        (ts) => now - ts < this.draftHourWindowMs,
+      );
+
+      const minuteExceeded = this.draftMinuteTimestamps.length >= this.draftMinuteLimit;
+      const hourExceeded = this.draftHourTimestamps.length >= this.draftHourLimit;
+
+      if (!minuteExceeded && !hourExceeded) {
+        this.draftMinuteTimestamps.push(now);
+        this.draftHourTimestamps.push(now);
+        return;
+      }
+
+      const waitCandidates: number[] = [];
+      if (minuteExceeded && this.draftMinuteTimestamps.length) {
+        waitCandidates.push(this.draftMinuteTimestamps[0] + this.draftMinuteWindowMs);
+      }
+      if (hourExceeded && this.draftHourTimestamps.length) {
+        waitCandidates.push(this.draftHourTimestamps[0] + this.draftHourWindowMs);
+      }
+
+      if (!waitCandidates.length) {
+        // Should not happen, but guard against empty lists.
+        this.draftMinuteTimestamps = [];
+        this.draftHourTimestamps = [];
+        continue;
+      }
+
+      const waitUntil = Math.min(...waitCandidates);
+      const delay = Math.max(waitUntil - now, 250);
+      this.logger.debug(`Draft creation throttled for ${delay}ms due to Ozon limits`);
+      await this.sleep(delay, abortSignal);
     }
-    const parsed = new Date(value);
-    return Number.isNaN(parsed.getTime()) ? undefined : parsed;
   }
 
   private cloneTask(task: OzonSupplyTask): OzonSupplyTask {
@@ -749,30 +781,6 @@ export class OzonSupplyService {
       ...task,
       items: task.items.map((item) => ({ ...item })),
     };
-  }
-
-  private rememberDraft(task: OzonSupplyTask, draftId?: number) {
-    const cacheKey = this.getTaskHash(task);
-    const existing = this.draftCache.get(cacheKey);
-    if (existing) {
-      existing.draftId = draftId ?? existing.draftId;
-      existing.expiresAt = Date.now() + this.draftTtlMs;
-    } else if (task.draftOperationId) {
-      this.draftCache.set(cacheKey, {
-        operationId: task.draftOperationId,
-        draftId,
-        expiresAt: Date.now() + this.draftTtlMs,
-      });
-    }
-  }
-
-  private getTaskHash(task: OzonSupplyTask): string {
-    const itemsHash = task.items
-      .slice()
-      .sort((a, b) => a.article.localeCompare(b.article, 'ru', { sensitivity: 'base' }))
-      .map((item) => `${item.article}:${item.quantity}`)
-      .join('|');
-    return `${task.clusterId ?? 'x'}-${task.warehouseId ?? 'x'}-${itemsHash}`;
   }
 
   private sleep(ms: number, signal?: AbortSignal): Promise<void> {

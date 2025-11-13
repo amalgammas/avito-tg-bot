@@ -8,16 +8,15 @@ import {
     OzonCredentials,
     OzonFboWarehouseSearchItem,
     OzonDraftStatus,
-    OzonDraftTimeslot,
-    OzonSupplyCancelStatus,
     OzonSupplyCreateStatus,
 } from '../config/ozon-api.service';
 
 import { OzonSheetService } from '../ozon/ozon-sheet.service';
 import { OzonSupplyService } from '../ozon/ozon-supply.service';
-import { OzonSupplyProcessResult, OzonSupplyTask } from '../ozon/ozon-supply.types';
+import { OzonSupplyProcessResult, OzonSupplyTask, OzonSupplyEventType } from '../ozon/ozon-supply.types';
 import { UserCredentialsStore } from './user-credentials.store';
 import { SupplyOrderStore } from '../storage/supply-order.store';
+import { UserSessionService } from './user-session.service';
 
 import {
     SupplyWizardStore,
@@ -28,22 +27,14 @@ import {
     SupplyWizardTimeslotOption,
     SupplyWizardOrderSummary,
     SupplyWizardSupplyItem,
+    SupplyWizardTaskContext,
 } from './supply-wizard.store';
 
-import { AdminNotifierService } from './admin-notifier.service';
+import { SupplyProcessService, SupplyOrderDetails } from './services/supply-process.service';
+import { NotificationService } from './services/notification.service';
+import { SupplyProcessingCoordinatorService } from './services/supply-processing-coordinator.service';
+import { WizardEvent } from './services/wizard-event.types';
 import { SupplyWizardViewService } from './supply-wizard/view.service';
-
-interface SupplyOrderDetails {
-    dropOffId?: number;
-    dropOffName?: string;
-    dropOffAddress?: string;
-    storageWarehouseId?: number;
-    storageWarehouseName?: string;
-    storageWarehouseAddress?: string;
-    timeslotFrom?: string;
-    timeslotTo?: string;
-    timeslotLabel?: string;
-}
 
 @Injectable()
 export class SupplyWizardHandler {
@@ -70,8 +61,11 @@ export class SupplyWizardHandler {
         private readonly sheetService: OzonSheetService,
         private readonly supplyService: OzonSupplyService,
         private readonly ozonApi: OzonApiService,
+        private readonly process: SupplyProcessService,
         private readonly wizardStore: SupplyWizardStore,
-        private readonly adminNotifier: AdminNotifierService,
+        private readonly sessions: UserSessionService,
+        private readonly processing: SupplyProcessingCoordinatorService,
+        private readonly notifications: NotificationService,
         private readonly view: SupplyWizardViewService,
         private readonly orderStore: SupplyOrderStore,
     ) {}
@@ -87,32 +81,46 @@ export class SupplyWizardHandler {
             return;
         }
 
-        const previousState = this.wizardStore.get(chatId);
         const persistedOrders = await this.orderStore.list(chatId);
         const credentials = await this.resolveCredentials(chatId);
         const initialStage = credentials ? 'landing' : 'authWelcome';
 
         try {
-            const baseState = this.wizardStore.start(
-                chatId,
-                {
-                    clusters: previousState?.clusters ?? [],
-                    warehouses: previousState?.warehouses ?? {},
-                    dropOffs: [],
-                },
-                { stage: initialStage },
-            );
+            const persistedState = await this.sessions.loadChatState(chatId);
+            if (persistedState) {
+                this.wizardStore.hydrate(chatId, persistedState);
+            }
+
+            let baseState = this.wizardStore.get(chatId);
+            if (!baseState) {
+                baseState = this.wizardStore.start(
+                    chatId,
+                    {
+                        clusters: persistedState?.clusters ?? [],
+                        warehouses: persistedState?.warehouses ?? {},
+                        dropOffs: [],
+                    },
+                    { stage: initialStage },
+                );
+            }
 
             const state =
-                this.wizardStore.update(chatId, (current) => {
-                    if (!current) return undefined;
+                this.updateWizardState(chatId, (current) => {
+                    const snapshot = current ?? baseState!;
                     return {
-                        ...current,
+                        ...snapshot,
+                        stage: snapshot.stage ?? initialStage,
                         orders: persistedOrders,
                         pendingApiKey: undefined,
                         pendingClientId: undefined,
                     };
-                }) ?? { ...baseState, orders: persistedOrders };
+                }) ?? {
+                    ...baseState!,
+                    stage: baseState?.stage ?? initialStage,
+                    orders: persistedOrders,
+                    pendingApiKey: undefined,
+                    pendingClientId: undefined,
+                };
 
             await this.syncPendingTasks(chatId);
             const landingState = this.wizardStore.get(chatId) ?? state;
@@ -126,7 +134,7 @@ export class SupplyWizardHandler {
                     this.view.buildAuthWelcomeKeyboard(),
                     { parseMode: 'HTML' },
                 );
-                await this.notifyAdmin(ctx, 'wizard.start', [`stage: ${landingState.stage}`]);
+                await this.notifications.notifyWizard(WizardEvent.Start, { ctx, lines: [`stage: ${landingState.stage}`] });
                 return;
             }
 
@@ -138,7 +146,7 @@ export class SupplyWizardHandler {
                 this.view.buildLandingKeyboard(landingState),
                 { parseMode: 'HTML' },
             );
-            await this.notifyAdmin(ctx, 'wizard.start', [`stage: ${landingState.stage}`]);
+            await this.notifications.notifyWizard(WizardEvent.Start, { ctx, lines: [`stage: ${landingState.stage}`] });
         } catch (error) {
             this.logger.error(`start wizard failed: ${this.describeError(error)}`);
             await ctx.reply(`❌ Не удалось инициализировать мастер: ${this.describeError(error)}`);
@@ -180,16 +188,19 @@ export class SupplyWizardHandler {
                 this.view.buildUploadKeyboard(),
             );
             const buffer = await this.downloadTelegramFile(ctx, document.file_id);
-            await this.processSpreadsheet(ctx, chatId, state, { buffer, label: document.file_name ?? 'файл' });
-            await this.notifyAdmin(ctx, 'wizard.documentUploaded', [
-                `file: ${document.file_name ?? 'unknown'}`,
-                document.file_size ? `size: ${document.file_size} bytes` : undefined,
-            ]);
+            await this.processSpreadsheet(ctx, chatId, { buffer, label: document.file_name ?? 'файл' });
+            await this.notifications.notifyWizard(WizardEvent.DocumentUploaded, {
+                ctx,
+                lines: [
+                    `file: ${document.file_name ?? 'unknown'}`,
+                    document.file_size ? `size: ${document.file_size} bytes` : undefined,
+                ],
+            });
         } catch (error) {
             this.logger.error(`handleDocument failed: ${this.describeError(error)}`);
             await ctx.reply(`❌ Не удалось обработать файл: ${this.describeError(error)}`);
             await ctx.reply('Пришлите Excel-файл (Артикул, Количество) повторно.');
-            await this.notifyAdmin(ctx, 'wizard.documentError', [this.describeError(error)]);
+            await this.notifications.notifyWizard(WizardEvent.DocumentError, { ctx, lines: [this.describeError(error)] });
         }
     }
 
@@ -205,7 +216,7 @@ export class SupplyWizardHandler {
             return;
         }
 
-        const updated = this.wizardStore.update(chatId, (current) => {
+        const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             return {
                 ...current,
@@ -249,7 +260,7 @@ export class SupplyWizardHandler {
 
         await this.credentialsStore.set(chatId, { clientId, apiKey });
 
-        const updated = this.wizardStore.update(chatId, (current) => {
+        const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             return {
                 ...current,
@@ -273,9 +284,10 @@ export class SupplyWizardHandler {
             { parseMode: "HTML" }
         );
 
-        await this.notifyAdmin(ctx, 'wizard.authCompleted', [
-            `client_id: ${this.maskSecret(clientId)}`,
-        ]);
+        await this.notifications.notifyWizard(WizardEvent.AuthCompleted, {
+            ctx,
+            lines: [`client_id: ${this.maskSecret(clientId)}`],
+        });
     }
 
     async handleSpreadsheetLink(ctx: Context, text: string): Promise<void> {
@@ -306,12 +318,12 @@ export class SupplyWizardHandler {
                 'Загружаю таблицу, подождите...',
                 this.view.buildUploadKeyboard(),
             );
-            await this.processSpreadsheet(ctx, chatId, state, { spreadsheet: trimmed, label: trimmed });
-            await this.notifyAdmin(ctx, 'wizard.spreadsheetLink', [`link: ${trimmed}`]);
+            await this.processSpreadsheet(ctx, chatId, { spreadsheet: trimmed, label: trimmed });
+            await this.notifications.notifyWizard(WizardEvent.SpreadsheetLink, { ctx, lines: [`link: ${trimmed}`] });
         } catch (error) {
             this.logger.error(`handleSpreadsheetLink failed: ${this.describeError(error)}`);
             await ctx.reply(`❌ Не удалось обработать таблицу: ${this.describeError(error)}`);
-            await this.notifyAdmin(ctx, 'wizard.spreadsheetError', [this.describeError(error)]);
+            await this.notifications.notifyWizard(WizardEvent.SpreadsheetError, { ctx, lines: [this.describeError(error)] });
         }
     }
 
@@ -353,9 +365,11 @@ export class SupplyWizardHandler {
         }
 
         const options = this.mapDropOffSearchResults(warehouses);
+        const activeTaskId = this.resolveActiveTaskId(chatId, state);
+
         if (!options.length) {
             const hasExistingSelection = Boolean(state.selectedDropOffId);
-            const updated = this.wizardStore.update(chatId, (current) => {
+            const updated = this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 return {
                     ...current,
@@ -371,6 +385,20 @@ export class SupplyWizardHandler {
                 };
             });
 
+            if (activeTaskId) {
+                this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                    ...context,
+                    stage: hasExistingSelection ? 'clusterPrompt' : 'awaitDropOffQuery',
+                    dropOffSearchQuery: query,
+                    draftWarehouses: [],
+                    draftTimeslots: [],
+                    selectedTimeslot: undefined,
+                    selectedDropOffId: hasExistingSelection ? context.selectedDropOffId : undefined,
+                    selectedDropOffName: hasExistingSelection ? context.selectedDropOffName : undefined,
+                    updatedAt: Date.now(),
+                }));
+            }
+
             const targetState = updated ?? state;
             await this.view.updatePrompt(
                 ctx,
@@ -385,7 +413,7 @@ export class SupplyWizardHandler {
         const limited = options.slice(0, this.dropOffOptionsLimit);
         const truncated = limited.length < options.length;
 
-        const updated = this.wizardStore.update(chatId, (current) => {
+        const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             return {
                 ...current,
@@ -403,17 +431,33 @@ export class SupplyWizardHandler {
                 draftCreatedAt: undefined,
                 draftExpiresAt: undefined,
                 draftError: undefined,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    draftOperationId: '',
-                    draftId: 0,
-                })),
             };
         });
 
         if (!updated) {
             await ctx.reply('Мастер закрыт. Запустите /start, чтобы начать заново.');
             return;
+        }
+
+        const targetTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (targetTaskId) {
+            this.updateTaskContext(chatId, targetTaskId, (context) => ({
+                ...context,
+                stage: 'dropOffSelect',
+                selectedDropOffId: undefined,
+                selectedDropOffName: undefined,
+                draftWarehouses: [],
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                dropOffSearchQuery: query,
+                updatedAt: Date.now(),
+            }));
         }
 
         const lines = limited.map((option, index) => {
@@ -512,7 +556,7 @@ export class SupplyWizardHandler {
         options: { summaryLines?: string[] } = {},
     ): Promise<void> {
         const updated =
-            this.wizardStore.update(chatId, (current) => {
+            this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 return {
                     ...current,
@@ -522,6 +566,16 @@ export class SupplyWizardHandler {
                     warehousePage: 0,
                 };
             }) ?? fallback;
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: 'awaitReadyDays',
+                readyInDays: undefined,
+                updatedAt: Date.now(),
+            }));
+        }
 
         const summarySource = options.summaryLines && options.summaryLines.length
             ? options.summaryLines
@@ -571,15 +625,17 @@ export class SupplyWizardHandler {
         state: SupplyWizardState,
         readyInDays: number,
     ): Promise<void> {
-        const task = state.tasks?.[0];
+        const task = this.getSelectedTask(chatId, state);
         if (!task) {
             await ctx.reply('Не найдены товары для обработки. Запустите мастер заново.');
             this.wizardStore.clear(chatId);
+            await this.sessions.deleteChatState(chatId);
             return;
         }
         if (!task.taskId) {
             await ctx.reply('Не удалось определить идентификатор задачи. Запустите мастер заново.');
             this.wizardStore.clear(chatId);
+            await this.sessions.deleteChatState(chatId);
             return;
         }
 
@@ -590,6 +646,7 @@ export class SupplyWizardHandler {
         ) {
             await ctx.reply('Должны быть выбраны кластер, склад и пункт сдачи. Запустите мастер заново.');
             this.wizardStore.clear(chatId);
+            await this.sessions.deleteChatState(chatId);
             return;
         }
 
@@ -604,7 +661,7 @@ export class SupplyWizardHandler {
         const wasAutoWarehouseSelection = typeof state.selectedWarehouseId !== 'number';
         const effectiveTask = this.cloneTask(task);
 
-        const updated = this.wizardStore.update(chatId, (current) => {
+        const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             return {
                 ...current,
@@ -621,6 +678,7 @@ export class SupplyWizardHandler {
             this.clearAbortController(task.taskId);
             return;
         }
+
         effectiveTask.clusterId = updated.selectedClusterId;
         effectiveTask.city = updated.selectedClusterName ?? '';
         effectiveTask.warehouseId = updated.selectedWarehouseId;
@@ -643,17 +701,51 @@ export class SupplyWizardHandler {
             : updated.selectedWarehouseName ??
             (typeof updated.selectedWarehouseId === 'number' ? `Склад ${updated.selectedWarehouseId}` : '—');
 
-        const searchDeadlineDate = this.resolveTimeslotSearchDeadline(effectiveTask);
-        const searchDeadlineLabel = this.formatTimeslotSearchDeadline(searchDeadlineDate);
-
         const summaryLines = [
             `Кластер: ${updated.selectedClusterName ?? '—'}`,
             `Склад: ${warehouseLabel}`,
             `Пункт сдачи: ${updated.selectedDropOffName ?? updated.selectedDropOffId ?? '—'}`,
         ];
 
+        const searchDeadlineDate = this.resolveTimeslotSearchDeadline(effectiveTask);
+        const searchDeadlineLabel = this.formatTimeslotSearchDeadline(searchDeadlineDate);
+
         summaryLines.push(`Готовность к отгрузке: ${readyInDays} дн.`);
         summaryLines.push(`Диапазон поиска: ${searchDeadlineLabel ? `до ${searchDeadlineLabel}` : '—'}`);
+
+        if (task.taskId) {
+            this.updateTaskContext(chatId, task.taskId, (context) => {
+                const nextTask = this.cloneTask(effectiveTask);
+                return {
+                    ...context,
+                    stage: 'processing',
+                    selectedClusterId: updated.selectedClusterId,
+                    selectedClusterName: updated.selectedClusterName,
+                    selectedWarehouseId: updated.selectedWarehouseId,
+                    selectedWarehouseName: updated.selectedWarehouseName,
+                    selectedDropOffId: updated.selectedDropOffId,
+                    selectedDropOffName: updated.selectedDropOffName,
+                    selectedTimeslot: updated.selectedTimeslot,
+                    readyInDays,
+                    autoWarehouseSelection: wasAutoWarehouseSelection,
+                    draftOperationId: updated.draftOperationId,
+                    draftId: updated.draftId,
+                    draftStatus: updated.draftStatus,
+                    draftCreatedAt: updated.draftCreatedAt,
+                    draftExpiresAt: updated.draftExpiresAt,
+                    draftError: updated.draftError,
+                    draftWarehouses: updated.draftWarehouses,
+                    draftTimeslots: updated.draftTimeslots,
+                    task: nextTask,
+                    summaryItems: nextTask.items.map((item) => ({
+                        article: item.article,
+                        quantity: item.quantity,
+                        sku: item.sku,
+                    })),
+                    updatedAt: Date.now(),
+                };
+            });
+        }
 
         try {
             await this.orderStore.saveTask(chatId, {
@@ -672,7 +764,7 @@ export class SupplyWizardHandler {
                 dropOffName: updated.selectedDropOffName ?? String(updated.selectedDropOffId),
                 readyInDays,
                 timeslotLabel:
-                    updated.selectedTimeslot?.label ?? this.describeTimeslot(effectiveTask.selectedTimeslot),
+                    updated.selectedTimeslot?.label ?? this.process.describeTimeslot(effectiveTask.selectedTimeslot),
                 warehouseAutoSelect: wasAutoWarehouseSelection,
                 timeslotAutoSelect: true,
             });
@@ -711,7 +803,7 @@ export class SupplyWizardHandler {
                 this.view.buildLandingKeyboard(landingState),
                 { parseMode: "HTML" }
             );
-            await this.notifyAdmin(ctx, 'wizard.supplyProcessing', summaryLines);
+            await this.notifications.notifyWizard(WizardEvent.SupplyProcessing, { ctx, lines: summaryLines });
             if (!this.wizardStore.get(chatId)) {
                 this.clearAbortController(task.taskId);
                 await this.orderStore.deleteByTaskId(chatId, task.taskId);
@@ -722,69 +814,116 @@ export class SupplyWizardHandler {
             throw error;
         }
 
-        void this.processSupplyTask({
-            ctx,
-            chatId,
-            state: updated,
+        void this.processing.run({
             task: effectiveTask,
-            readyInDays,
             credentials,
+            readyInDays,
+            dropOffWarehouseId: updated.selectedDropOffId,
             abortController,
+            callbacks: {
+                onEvent: async (result) => {
+                    await this.sendSupplyEvent(ctx, result);
+                },
+                onWindowExpired: async () => {
+                    await this.handleWindowExpired(ctx, chatId, updated, task);
+                },
+                onSupplyCreated: async (result) => {
+                    await this.handleSupplySuccess(ctx, chatId, updated, task, result);
+                },
+                onError: async (error) => {
+                    await this.handleSupplyFailure(ctx, chatId, updated, error);
+                },
+                onAbort: async () => {
+                    this.logger.log(`[${chatId}] обработка поставки отменена пользователем`);
+                },
+                onFinally: async () => {
+                    this.clearAbortController(task.taskId);
+                },
+            },
         });
     }
 
-    private async processSupplyTask(params: {
-        ctx: Context;
-        chatId: string;
-        state: SupplyWizardState;
+    private createTaskContext(options: {
         task: OzonSupplyTask;
-        readyInDays: number;
-        credentials: OzonCredentials;
-        abortController: AbortController;
-    }): Promise<void> {
-        const { ctx, chatId, state, task, readyInDays, credentials, abortController } = params;
+        stage: SupplyWizardTaskContext['stage'];
+        createdAt?: number;
+        overrides?: Partial<SupplyWizardTaskContext>;
+    }): SupplyWizardTaskContext {
+        const { task, stage, createdAt, overrides = {} } = options;
+        const summaryItems: SupplyWizardSupplyItem[] = task.items.map((item) => ({
+            article: item.article,
+            quantity: item.quantity,
+            sku: item.sku,
+        }));
 
-        let supplyResult: OzonSupplyProcessResult | undefined;
-        let windowExpiredResult: OzonSupplyProcessResult | undefined;
+        return {
+            taskId: task.taskId ?? `${Date.now()}`,
+            stage,
+            draftStatus: overrides.draftStatus ?? 'idle',
+            draftOperationId: overrides.draftOperationId,
+            draftId: overrides.draftId,
+            draftCreatedAt: overrides.draftCreatedAt,
+            draftExpiresAt: overrides.draftExpiresAt,
+            draftError: overrides.draftError,
+            draftWarehouses: overrides.draftWarehouses?.map((item) => ({ ...item })) ?? [],
+            draftTimeslots: overrides.draftTimeslots?.map((item) => ({ ...item })) ?? [],
+            selectedClusterId: overrides.selectedClusterId,
+            selectedClusterName: overrides.selectedClusterName,
+            selectedWarehouseId: overrides.selectedWarehouseId,
+            selectedWarehouseName: overrides.selectedWarehouseName,
+            selectedDropOffId: overrides.selectedDropOffId,
+            selectedDropOffName: overrides.selectedDropOffName,
+            selectedTimeslot: overrides.selectedTimeslot
+                ? {
+                      ...overrides.selectedTimeslot,
+                      data: overrides.selectedTimeslot.data
+                          ? { ...overrides.selectedTimeslot.data }
+                          : overrides.selectedTimeslot.data,
+                  }
+                : undefined,
+            readyInDays: overrides.readyInDays,
+            autoWarehouseSelection: overrides.autoWarehouseSelection,
+            dropOffSearchQuery: overrides.dropOffSearchQuery,
+            promptMessageId: overrides.promptMessageId,
+            task: this.cloneTask(task),
+            summaryItems,
+            createdAt: createdAt ?? Date.now(),
+            updatedAt: overrides.updatedAt,
+        };
+    }
 
+    private resolveActiveTaskId(chatId: string, state: SupplyWizardState): string | undefined {
+        const selected = state.selectedTaskId;
+        if (selected) {
+            const context = this.wizardStore.getTaskContext(chatId, selected);
+            if (context) {
+                return context.taskId;
+            }
+        }
+
+        const contexts = this.wizardStore.listTaskContexts(chatId);
+        if (contexts.length) {
+            return contexts[0].taskId;
+        }
+
+        if (selected) {
+            return selected;
+        }
+
+    }
+
+    private updateTaskContext(
+        chatId: string,
+        taskId: string,
+        updater: (context: SupplyWizardTaskContext) => SupplyWizardTaskContext,
+    ): void {
         try {
-            await this.supplyService.runSingleTask(task, {
-                credentials,
-                readyInDays,
-                dropOffWarehouseId: state.selectedDropOffId,
-                skipDropOffValidation: true,
-                abortSignal: abortController.signal,
-                onEvent: async (result) => {
-                    if (result.event === 'supplyCreated') {
-                        supplyResult = result;
-                    }
-                    if (result.event === 'windowExpired') {
-                        windowExpiredResult = result;
-                    }
-                    await this.sendSupplyEvent(ctx, result);
-                },
+            this.wizardStore.upsertTaskContext(chatId, taskId, (existing) => {
+                if (!existing) return undefined;
+                return updater(existing);
             });
-            if (windowExpiredResult) {
-                await this.handleWindowExpired(ctx, chatId, state, task);
-                return;
-            }
-
-            if (supplyResult) {
-                await this.handleSupplySuccess(ctx, chatId, state, task, supplyResult);
-            }
         } catch (error) {
-            if (this.isAbortError(error)) {
-                this.logger.log(`[${chatId}] обработка поставки отменена пользователем`);
-                return;
-            }
-
-            this.logger.error(`processSupplyTask failed: ${this.describeError(error)}`);
-            await this.view.updatePrompt(ctx, chatId, state, 'Мастер завершён с ошибкой ❌');
-            await ctx.reply(`❌ Ошибка при обработке: ${this.describeError(error)}`);
-            await this.view.sendErrorDetails(ctx, this.extractErrorPayload(error));
-            await this.notifyAdmin(ctx, 'wizard.supplyError', [this.describeError(error)]);
-        } finally {
-            this.clearAbortController(task.taskId);
+            this.logger.warn(`[${chatId}] failed to update task context ${taskId}: ${this.describeError(error)}`);
         }
     }
 
@@ -799,15 +938,15 @@ export class SupplyWizardHandler {
         await this.orderStore.deleteByTaskId(chatId, task.taskId);
         await this.syncPendingTasks(chatId);
 
-        this.wizardStore.update(chatId, (current) => {
+        this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             return {
                 ...current,
-                tasks: current.tasks?.filter((entry) => entry.taskId !== task.taskId),
                 pendingTasks: current.pendingTasks?.filter((entry) => entry.taskId !== task.taskId),
                 activeTaskId: current.activeTaskId === task.taskId ? undefined : current.activeTaskId,
             };
         });
+        this.wizardStore.removeTaskContext(chatId, task.taskId);
 
         const dropOffLabel =
             entity?.dropOffName ??
@@ -833,16 +972,19 @@ export class SupplyWizardHandler {
         const latestState = this.wizardStore.get(chatId) ?? fallback;
         await this.presentLandingAfterCancel(ctx, chatId, latestState);
 
-        await this.notifyAdmin(ctx, 'wizard.taskExpired', [
-            `task: ${task.taskId ?? 'unknown'}`,
-            `dropOff: ${dropOffLabel ?? 'n/a'}`,
-            `warehouse: ${warehouseLabel ?? 'n/a'}`,
-        ]);
+        await this.notifications.notifyWizard(WizardEvent.TaskExpired, {
+            ctx,
+            lines: [
+                `task: ${task.taskId ?? 'unknown'}`,
+                `dropOff: ${dropOffLabel ?? 'n/a'}`,
+                `warehouse: ${warehouseLabel ?? 'n/a'}`,
+            ],
+        });
     }
 
     private async syncPendingTasks(chatId: string): Promise<SupplyWizardOrderSummary[]> {
         const pending = await this.orderStore.listTaskSummaries(chatId);
-        this.wizardStore.update(chatId, (current) => {
+        this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             return {
                 ...current,
@@ -852,20 +994,108 @@ export class SupplyWizardHandler {
         return pending;
     }
 
+    private updateWizardState(
+        chatId: string,
+        updater: (state: SupplyWizardState | undefined) => SupplyWizardState | undefined,
+    ): SupplyWizardState | undefined {
+        const next = this.wizardStore.update(chatId, updater);
+        if (next) {
+            this.syncActiveTaskContext(chatId, next);
+        }
+        this.persistState(chatId, next);
+        return next;
+    }
+
+    private persistState(chatId: string, state?: SupplyWizardState): void {
+        if (!state) {
+            void this.sessions.deleteChatState(chatId).catch((error) => {
+                this.logger.warn(`[${chatId}] failed to delete wizard session: ${this.describeError(error)}`);
+            });
+            return;
+        }
+
+        void this.sessions.saveChatState(chatId, state).catch((error) => {
+            this.logger.warn(`[${chatId}] failed to persist wizard session: ${this.describeError(error)}`);
+        });
+    }
+
+    private syncActiveTaskContext(chatId: string, state: SupplyWizardState): void {
+        const context = this.buildActiveTaskContext(chatId, state);
+        const taskId = context?.taskId;
+        if (!taskId) {
+            return;
+        }
+
+        try {
+            this.wizardStore.upsertTaskContext(chatId, taskId, () => context);
+        } catch (error) {
+            this.logger.warn(`[${chatId}] failed to sync task context ${taskId}: ${this.describeError(error)}`);
+        }
+    }
+
+    private buildActiveTaskContext(chatId: string, state: SupplyWizardState): SupplyWizardTaskContext | undefined {
+        const activeTaskId = state.selectedTaskId;
+        let baseContext: SupplyWizardTaskContext | undefined = activeTaskId
+            ? this.wizardStore.getTaskContext(chatId, activeTaskId)
+            : undefined;
+
+        if (!baseContext) {
+            const contexts = this.wizardStore.listTaskContexts(chatId);
+            if (contexts.length) {
+                baseContext = contexts[0];
+            }
+        }
+
+        if (!baseContext) {
+            return undefined;
+        }
+
+        const contextOverride = this.wizardStore.getTaskContext(chatId, baseContext.taskId);
+        const effectiveTask = contextOverride ? this.cloneTask(contextOverride.task) : this.cloneTask(baseContext.task);
+        return {
+            ...baseContext,
+            stage: state.stage,
+            draftStatus: state.draftStatus ?? baseContext.draftStatus,
+            draftOperationId: state.draftOperationId ?? baseContext.draftOperationId,
+            draftId: state.draftId ?? baseContext.draftId,
+            draftCreatedAt: state.draftCreatedAt ?? baseContext.draftCreatedAt,
+            draftExpiresAt: state.draftExpiresAt ?? baseContext.draftExpiresAt,
+            draftError: state.draftError ?? baseContext.draftError,
+            selectedClusterId: state.selectedClusterId ?? baseContext.selectedClusterId,
+            selectedClusterName: state.selectedClusterName ?? baseContext.selectedClusterName,
+            selectedWarehouseId: state.selectedWarehouseId ?? baseContext.selectedWarehouseId,
+            selectedWarehouseName: state.selectedWarehouseName ?? baseContext.selectedWarehouseName,
+            selectedDropOffId: state.selectedDropOffId ?? baseContext.selectedDropOffId,
+            selectedDropOffName: state.selectedDropOffName ?? baseContext.selectedDropOffName,
+            selectedTimeslot: state.selectedTimeslot ?? baseContext.selectedTimeslot,
+            readyInDays: state.readyInDays ?? baseContext.readyInDays,
+            autoWarehouseSelection: state.autoWarehouseSelection ?? baseContext.autoWarehouseSelection,
+            dropOffSearchQuery: state.dropOffSearchQuery ?? baseContext.dropOffSearchQuery,
+            promptMessageId: state.promptMessageId ?? baseContext.promptMessageId,
+            task: effectiveTask,
+            summaryItems: effectiveTask.items.map((item) => ({
+                article: item.article,
+                quantity: item.quantity,
+                sku: item.sku,
+            })),
+            updatedAt: Date.now(),
+        };
+    }
+
     private async cancelPendingTask(ctx: Context, chatId: string, taskId: string): Promise<void> {
         this.abortActiveTask(chatId, taskId);
         await this.orderStore.deleteByTaskId(chatId, taskId);
         await this.syncPendingTasks(chatId);
-        this.wizardStore.update(chatId, (current) => {
+        this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             return {
                 ...current,
-                tasks: current.tasks?.filter((task) => task.taskId !== taskId),
                 selectedTaskId: current.selectedTaskId === taskId ? undefined : current.selectedTaskId,
                 autoWarehouseSelection: false,
             };
         });
-        await this.notifyAdmin(ctx, 'wizard.taskCancelled', [`task: ${taskId}`]);
+        this.wizardStore.removeTaskContext(chatId, taskId);
+        await this.notifications.notifyWizard(WizardEvent.TaskCancelled, { ctx, lines: [`task: ${taskId}`] });
     }
 
     async handleCallback(ctx: Context, data: string): Promise<void> {
@@ -925,16 +1155,18 @@ export class SupplyWizardHandler {
         return;
       case 'cancel': {
         this.abortActiveTask(chatId);
-        if (state.tasks?.length) {
-          await Promise.all(
-            state.tasks
-              .map((task) => task?.taskId)
-              .filter((taskId): taskId is string => Boolean(taskId))
-              .map((taskId) => this.orderStore.deleteByTaskId(chatId, taskId)),
-          );
-          await this.syncPendingTasks(chatId);
+        const contexts = this.wizardStore.listTaskContexts(chatId);
+        if (contexts.length) {
+          const taskIds = contexts
+            .map((context) => context.taskId)
+            .filter((taskId): taskId is string => Boolean(taskId));
+          if (taskIds.length) {
+            await Promise.all(taskIds.map((taskId) => this.orderStore.deleteByTaskId(chatId, taskId)));
+            await this.syncPendingTasks(chatId);
+          }
         }
         this.wizardStore.clear(chatId);
+        await this.sessions.deleteChatState(chatId);
         await this.safeAnswerCbQuery(ctx, chatId, 'Задача отменена');
         await this.presentLandingAfterCancel(ctx, chatId, state);
         return;
@@ -989,7 +1221,7 @@ export class SupplyWizardHandler {
         fallback: SupplyWizardState,
     ): Promise<void> {
         const state =
-            this.wizardStore.update(chatId, (current) => {
+            this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 return {
                     ...current,
@@ -1013,7 +1245,7 @@ export class SupplyWizardHandler {
         fallback: SupplyWizardState,
     ): Promise<void> {
         const state =
-            this.wizardStore.update(chatId, (current) => {
+            this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 return {
                     ...current,
@@ -1037,7 +1269,7 @@ export class SupplyWizardHandler {
         options: { keepExisting?: boolean } = {},
     ): Promise<void> {
         const state =
-            this.wizardStore.update(chatId, (current) => {
+            this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 return {
                     ...current,
@@ -1052,31 +1284,6 @@ export class SupplyWizardHandler {
             state,
             this.view.renderAuthApiKeyPrompt(),
             this.view.buildAuthApiKeyKeyboard(),
-        );
-    }
-
-    private async showAuthClientId(
-        ctx: Context,
-        chatId: string,
-        fallback: SupplyWizardState,
-    ): Promise<void> {
-        const updated =
-            this.wizardStore.update(chatId, (current) => {
-                if (!current) return undefined;
-                return {
-                    ...current,
-                    stage: 'authClientId',
-                };
-            }) ?? fallback;
-
-        const masked = updated.pendingApiKey ? this.maskSecret(updated.pendingApiKey) : undefined;
-
-        await this.view.updatePrompt(
-            ctx,
-            chatId,
-            updated,
-            this.view.renderAuthClientIdPrompt(masked),
-            this.view.buildAuthClientIdKeyboard(),
         );
     }
 
@@ -1172,7 +1379,7 @@ export class SupplyWizardHandler {
         fallback: SupplyWizardState,
     ): Promise<void> {
         const updated =
-            this.wizardStore.update(chatId, (current) => {
+            this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 return {
                     ...current,
@@ -1193,13 +1400,11 @@ export class SupplyWizardHandler {
     private async handleAuthResetConfirm(ctx: Context, chatId: string): Promise<void> {
         await this.credentialsStore.clear(chatId);
         this.wizardStore.clear(chatId);
+        await this.sessions.deleteChatState(chatId);
 
         await ctx.reply('✅ Ключи удалены из базы бота.');
 
-        await this.adminNotifier.notifyWizardEvent({
-            ctx,
-            event: 'auth.cleared',
-        });
+        await this.notifications.notifyWizard(WizardEvent.AuthCleared, { ctx });
 
         await this.start(ctx);
     }
@@ -1210,7 +1415,7 @@ export class SupplyWizardHandler {
         fallback: SupplyWizardState,
     ): Promise<void> {
         const state =
-            this.wizardStore.update(chatId, (current) => {
+            this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 return {
                     ...current,
@@ -1247,7 +1452,7 @@ export class SupplyWizardHandler {
 
         if (latest.selectedClusterId && latest.selectedDropOffId) {
             const updated =
-                this.wizardStore.update(chatId, (current) => {
+                this.updateWizardState(chatId, (current) => {
                     if (!current) return undefined;
                     return {
                         ...current,
@@ -1273,7 +1478,7 @@ export class SupplyWizardHandler {
         fallback: SupplyWizardState,
     ): Promise<void> {
         const state =
-            this.wizardStore.update(chatId, (current) => {
+            this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 return {
                     ...current,
@@ -1335,7 +1540,7 @@ export class SupplyWizardHandler {
     ): Promise<void> {
         await this.syncPendingTasks(chatId);
         const state =
-            this.wizardStore.update(chatId, (current) => {
+            this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 return {
                     ...current,
@@ -1361,13 +1566,12 @@ export class SupplyWizardHandler {
         fallback: SupplyWizardState,
     ): Promise<void> {
         const state =
-            this.wizardStore.update(chatId, (current) => {
+            this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 return {
                     ...current,
                     stage: 'awaitSpreadsheet',
                     spreadsheet: undefined,
-                    tasks: undefined,
                     selectedTaskId: undefined,
                     dropOffs: [],
                     dropOffSearchQuery: undefined,
@@ -1472,7 +1676,7 @@ export class SupplyWizardHandler {
       ) ?? fallback;
 
     const updated =
-      this.wizardStore.update(chatId, (current) => {
+      this.updateWizardState(chatId, (current) => {
         if (!current) return undefined;
         return {
           ...current,
@@ -1507,7 +1711,7 @@ export class SupplyWizardHandler {
                 await this.syncPendingTasks(chatId);
                 const current = this.wizardStore.get(chatId) ?? state;
                 const updated =
-                    this.wizardStore.update(chatId, (existing) => {
+                    this.updateWizardState(chatId, (existing) => {
                         if (!existing) return undefined;
                         return {
                             ...existing,
@@ -1541,7 +1745,7 @@ export class SupplyWizardHandler {
                 }
 
                 const updated =
-                    this.wizardStore.update(chatId, (existing) => {
+                    this.updateWizardState(chatId, (existing) => {
                         if (!existing) return undefined;
                         return {
                             ...existing,
@@ -1572,7 +1776,7 @@ export class SupplyWizardHandler {
                 const current = this.wizardStore.get(chatId) ?? state;
                 if (current.pendingTasks.length) {
                     const updated =
-                        this.wizardStore.update(chatId, (existing) => {
+                        this.updateWizardState(chatId, (existing) => {
                             if (!existing) return undefined;
                             return {
                                 ...existing,
@@ -1641,7 +1845,7 @@ export class SupplyWizardHandler {
         fallback: SupplyWizardState,
     ): Promise<void> {
         const state =
-            this.wizardStore.update(chatId, (current) => {
+            this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 return {
                     ...current,
@@ -1677,7 +1881,7 @@ export class SupplyWizardHandler {
         }
 
         const updated =
-            this.wizardStore.update(chatId, (existing) => {
+            this.updateWizardState(chatId, (existing) => {
                 if (!existing) return undefined;
                 return {
                     ...existing,
@@ -1737,26 +1941,32 @@ export class SupplyWizardHandler {
             } catch (error) {
                 const message = `Не удалось получить статус поставки: ${this.describeError(error)}`;
                 await ctx.reply(`❌ ${message}`);
-                await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
-                    `operation: ${operationId}`,
-                    message,
-                ]);
+                await this.notifications.notifyWizard(WizardEvent.OrderCancelFailed, {
+                    ctx,
+                    lines: [
+                        `operation: ${operationId}`,
+                        message,
+                    ],
+                });
                 return 'Ошибка';
             }
 
-            const ids = this.extractOrderIdsFromStatus(status);
+            const ids = this.process.extractOrderIdsFromStatus(status);
             resolvedOrderId = ids[0];
             if (!resolvedOrderId) {
                 await ctx.reply('❌ Ozon не вернул идентификатор заказа для этой поставки. Попробуйте позже.');
-                await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
-                    `operation: ${operationId}`,
-                    'order_ids: []',
-                ]);
+                await this.notifications.notifyWizard(WizardEvent.OrderCancelFailed, {
+                    ctx,
+                    lines: [
+                        `operation: ${operationId}`,
+                        'order_ids: []',
+                    ],
+                });
                 return 'order_id не найден';
             }
 
             await this.orderStore.setOrderId(chatId, order.operationId ?? operationId, resolvedOrderId);
-            this.wizardStore.update(chatId, (existing) => {
+            this.updateWizardState(chatId, (existing) => {
                 if (!existing) return undefined;
                 const orders = existing.orders.map((item) => {
                     if (
@@ -1790,7 +2000,7 @@ export class SupplyWizardHandler {
             order;
 
         const aligned =
-            this.wizardStore.update(chatId, (existing) => {
+            this.updateWizardState(chatId, (existing) => {
                 if (!existing) return undefined;
                 return {
                     ...existing,
@@ -1824,11 +2034,14 @@ export class SupplyWizardHandler {
                 orderDetailsText,
                 this.view.buildOrderDetailsKeyboard(normalizedOrder),
             );
-            await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
-                `operation: ${operationId}`,
-                `order_id: ${resolvedOrderId}`,
-                message,
-            ]);
+            await this.notifications.notifyWizard(WizardEvent.OrderCancelFailed, {
+                ctx,
+                lines: [
+                    `operation: ${operationId}`,
+                    `order_id: ${resolvedOrderId}`,
+                    message,
+                ],
+            });
             return 'Ошибка';
         }
 
@@ -1841,18 +2054,24 @@ export class SupplyWizardHandler {
                 orderDetailsText,
                 this.view.buildOrderDetailsKeyboard(normalizedOrder),
             );
-            await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
-                `operation: ${operationId}`,
-                `order_id: ${resolvedOrderId}`,
-                'cancel operation_id missing',
-            ]);
+            await this.notifications.notifyWizard(WizardEvent.OrderCancelFailed, {
+                ctx,
+                lines: [
+                    `operation: ${operationId}`,
+                    `order_id: ${resolvedOrderId}`,
+                    'cancel operation_id missing',
+                ],
+            });
             return 'operation_id отсутствует';
         }
 
-        const cancelStatus = await this.waitForCancelStatus(cancelOperationId, credentials);
+        const cancelStatus = await this.process.waitForCancelStatus(cancelOperationId, credentials, {
+            maxAttempts: this.cancelStatusMaxAttempts,
+            delayMs: this.cancelStatusPollDelayMs,
+        });
 
-        if (!this.isCancelSuccessful(cancelStatus)) {
-            const reason = this.describeCancelStatus(cancelStatus);
+        if (!this.process.isCancelSuccessful(cancelStatus)) {
+            const reason = this.process.describeCancelStatus(cancelStatus);
             await ctx.reply(`❌ Не удалось подтвердить отмену поставки. ${reason}`);
             await this.view.updatePrompt(
                 ctx,
@@ -1861,12 +2080,15 @@ export class SupplyWizardHandler {
                 orderDetailsText,
                 this.view.buildOrderDetailsKeyboard(normalizedOrder),
             );
-            await this.notifyAdmin(ctx, 'wizard.orderCancelFailed', [
-                `operation: ${operationId}`,
-                `order_id: ${resolvedOrderId}`,
-                `cancel_operation: ${cancelOperationId}`,
-                `status: ${reason}`,
-            ]);
+            await this.notifications.notifyWizard(WizardEvent.OrderCancelFailed, {
+                ctx,
+                lines: [
+                    `operation: ${operationId}`,
+                    `order_id: ${resolvedOrderId}`,
+                    `cancel_operation: ${cancelOperationId}`,
+                    `status: ${reason}`,
+                ],
+            });
             return 'Отмена не подтверждена';
         }
 
@@ -1879,7 +2101,7 @@ export class SupplyWizardHandler {
         const refreshedOrders = await this.orderStore.list(chatId);
 
         const updated =
-            this.wizardStore.update(chatId, (existing) => {
+            this.updateWizardState(chatId, (existing) => {
                 if (!existing) return undefined;
                 return {
                     ...existing,
@@ -1916,13 +2138,29 @@ export class SupplyWizardHandler {
             );
         }
 
-        await this.notifyAdmin(ctx, 'wizard.orderCancelled', [
-            `operation: ${operationId}`,
-            `order_id: ${resolvedOrderId}`,
-            `cancel_operation: ${cancelOperationId}`,
-        ]);
+        await this.notifications.notifyWizard(WizardEvent.OrderCancelled, {
+            ctx,
+            lines: [
+                `operation: ${operationId}`,
+                `order_id: ${resolvedOrderId}`,
+                `cancel_operation: ${cancelOperationId}`,
+            ],
+        });
 
         return 'Поставка отменена';
+    }
+
+    private async handleSupplyFailure(
+        ctx: Context,
+        chatId: string,
+        state: SupplyWizardState,
+        error: unknown,
+    ): Promise<void> {
+        this.logger.error(`processSupplyTask failed: ${this.describeError(error)}`);
+        await this.view.updatePrompt(ctx, chatId, state, 'Мастер завершён с ошибкой ❌');
+        await ctx.reply(`❌ Ошибка при обработке: ${this.describeError(error)}`);
+        await this.view.sendErrorDetails(ctx, this.extractErrorPayload(error));
+        await this.notifications.notifyWizard(WizardEvent.SupplyError, { ctx, lines: [this.describeError(error)] });
     }
 
     private async handleSupplySuccess(
@@ -1938,11 +2176,14 @@ export class SupplyWizardHandler {
         let orderId: number | undefined;
         let orderDetails: SupplyOrderDetails | undefined;
         if (credentials && operationId) {
-            orderId = await this.fetchOrderIdWithRetries(operationId, credentials);
+            orderId = await this.process.fetchOrderIdWithRetries(operationId, credentials, {
+                attempts: this.orderIdPollAttempts,
+                delayMs: this.orderIdPollDelayMs,
+            });
             if (!orderId) {
                 this.logger.warn(`Не удалось получить order_id для ${operationId} после ${this.orderIdPollAttempts} попыток`);
             } else {
-                orderDetails = await this.fetchSupplyOrderDetails(orderId, credentials);
+                orderDetails = await this.process.fetchSupplyOrderDetails(orderId, credentials);
             }
         }
 
@@ -1966,7 +2207,7 @@ export class SupplyWizardHandler {
         const timeslotLabel =
             orderDetails?.timeslotLabel ??
             state.selectedTimeslot?.label ??
-            this.describeTimeslot(task.selectedTimeslot);
+            this.process.describeTimeslot(task.selectedTimeslot);
 
         const timeslotFrom = orderDetails?.timeslotFrom ?? task.selectedTimeslot?.from_in_timezone;
         const timeslotTo = orderDetails?.timeslotTo ?? task.selectedTimeslot?.to_in_timezone;
@@ -1992,11 +2233,11 @@ export class SupplyWizardHandler {
             timeslotLabel: timeslotLabel ?? undefined,
             items,
             createdAt: Date.now(),
-            searchDeadlineAt: completionSearchDeadline?.getTime(),
+            searchDeadlineAt: completionSearchDeadline?.getTime()
         };
 
         const updated =
-            this.wizardStore.update(chatId, (current) => {
+            this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 const withoutDuplicate = current.orders.filter((order) => {
                     if (entry.orderId && order.orderId && order.orderId === entry.orderId) {
@@ -2011,7 +2252,6 @@ export class SupplyWizardHandler {
                     ...current,
                     orders: [...withoutDuplicate, entry],
                     stage: 'landing',
-                    tasks: undefined,
                     readyInDays: undefined,
                     selectedTimeslot: undefined,
                     draftTimeslots: [],
@@ -2025,6 +2265,8 @@ export class SupplyWizardHandler {
                     spreadsheet: undefined,
                 };
             }) ?? state;
+
+        this.wizardStore.removeTaskContext(chatId, task.taskId);
 
         await this.orderStore.completeTask(chatId, {
             taskId: task.taskId,
@@ -2058,11 +2300,14 @@ export class SupplyWizardHandler {
             { parseMode: "HTML" }
         );
 
-        await this.notifyAdmin(ctx, 'wizard.supplyDone', [
-            orderId ? `order: ${orderId}` : `operation: ${operationId}`,
-            entry.arrival ? `arrival: ${entry.arrival}` : undefined,
-            entry.warehouse ? `warehouse: ${entry.warehouse}` : undefined,
-        ]);
+        await this.notifications.notifyWizard(WizardEvent.SupplyDone, {
+            ctx,
+            lines: [
+                orderId ? `order: ${orderId}` : `operation: ${operationId}`,
+                entry.arrival ? `arrival: ${entry.arrival}` : undefined,
+                entry.warehouse ? `warehouse: ${entry.warehouse}` : undefined,
+            ],
+        });
     }
 
     private extractOperationIdFromMessage(message?: string): string | undefined {
@@ -2071,230 +2316,9 @@ export class SupplyWizardHandler {
         return match ? match[1] : undefined;
     }
 
-    private extractOrderIdsFromStatus(status: OzonSupplyCreateStatus | undefined): number[] {
-        if (!status) {
-            return [];
-        }
-
-        const collected: Array<number | string> = [];
-        const direct = (status as any)?.order_ids;
-        if (Array.isArray(direct)) {
-            collected.push(...direct);
-        }
-        const nested = status.result?.order_ids;
-        if (Array.isArray(nested)) {
-            collected.push(...nested);
-        }
-
-        return collected
-            .map((value) => {
-                if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-                    return Math.trunc(value);
-                }
-                if (typeof value === 'string') {
-                    const parsed = Number(value.trim());
-                    return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : undefined;
-                }
-                return undefined;
-            })
-            .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
-    }
-
-    private async waitForCancelStatus(
-        operationId: string,
-        credentials: OzonCredentials,
-    ): Promise<OzonSupplyCancelStatus | undefined> {
-        let lastStatus: OzonSupplyCancelStatus | undefined;
-
-        for (let attempt = 0; attempt < this.cancelStatusMaxAttempts; attempt++) {
-            try {
-                lastStatus = await this.ozonApi.getSupplyCancelStatus(operationId, credentials);
-            } catch (error) {
-                this.logger.warn(
-                    `cancel status ${operationId} attempt ${attempt + 1}/${this.cancelStatusMaxAttempts} failed: ${this.describeError(error)}`,
-                );
-            }
-
-            if (this.isCancelSuccessful(lastStatus)) {
-                return lastStatus;
-            }
-
-            if (attempt < this.cancelStatusMaxAttempts - 1) {
-                await this.sleep(this.cancelStatusPollDelayMs);
-            }
-        }
-
-        return lastStatus;
-    }
-
-    private async fetchOrderIdWithRetries(
-        operationId: string,
-        credentials: OzonCredentials,
-    ): Promise<number | undefined> {
-        for (let attempt = 0; attempt < this.orderIdPollAttempts; attempt++) {
-            try {
-                const status = await this.ozonApi.getSupplyCreateStatus(operationId, credentials);
-                const orderId = this.extractOrderIdsFromStatus(status)[0];
-                if (orderId) {
-                    return orderId;
-                }
-            } catch (error) {
-                this.logger.warn(
-                    `Не удалось получить order_id для ${operationId} (попытка ${attempt + 1}/${this.orderIdPollAttempts}): ${this.describeError(error)}`,
-                );
-            }
-
-            if (attempt < this.orderIdPollAttempts - 1) {
-                await this.sleep(this.orderIdPollDelayMs);
-            }
-        }
-
-        return undefined;
-    }
-
-    private async fetchSupplyOrderDetails(
-        orderId: number,
-        credentials: OzonCredentials,
-    ): Promise<SupplyOrderDetails | undefined> {
-        try {
-            const orders = await this.ozonApi.getSupplyOrders([orderId], credentials);
-            const order = orders?.[0];
-            if (!order) {
-                return undefined;
-            }
-
-            const dropOff = order.drop_off_warehouse;
-            const supply = order.supplies?.[0];
-            const storage = supply?.storage_warehouse;
-            const timeslot = order.timeslot?.timeslot;
-            const timezone = order.timeslot?.timezone_info?.iana_name;
-
-            const timeslotFrom = timeslot?.from ?? undefined;
-            const timeslotTo = timeslot?.to ?? undefined;
-
-            return {
-                dropOffId: this.parseWarehouseId(dropOff?.warehouse_id),
-                dropOffName: dropOff?.name ?? dropOff?.address,
-                dropOffAddress: dropOff?.address,
-                storageWarehouseId: this.parseWarehouseId(storage?.warehouse_id),
-                storageWarehouseName: storage?.name ?? storage?.address,
-                storageWarehouseAddress: storage?.address,
-                timeslotFrom,
-                timeslotTo,
-                timeslotLabel: this.formatTimeslotRange(timeslotFrom, timeslotTo, timezone),
-            };
-        } catch (error) {
-            this.logger.warn(`getSupplyOrders failed for ${orderId}: ${this.describeError(error)}`);
-            return undefined;
-        }
-    }
-
-    private isCancelSuccessful(status?: OzonSupplyCancelStatus): boolean {
-        if (!status) {
-            return false;
-        }
-
-        if ((status.status ?? '').toUpperCase() === 'SUCCESS') {
-            return true;
-        }
-
-        if (status.result?.is_order_cancelled) {
-            return true;
-        }
-
-        return (status.result?.supplies ?? []).some((item) => item?.is_supply_cancelled);
-    }
-
-    private describeCancelStatus(status?: OzonSupplyCancelStatus): string {
-        if (!status) {
-            return 'Ответ сервиса пустой';
-        }
-
-        const parts: string[] = [];
-
-        if (status.status) {
-            parts.push(`status=${status.status}`);
-        }
-
-        if (typeof status.result?.is_order_cancelled === 'boolean') {
-            parts.push(`is_order_cancelled=${status.result.is_order_cancelled ? 'true' : 'false'}`);
-        }
-
-        const supplies = status.result?.supplies ?? [];
-        if (supplies.length) {
-            const supplyParts = supplies.map((entry) => {
-                const supplyId = entry?.supply_id ?? 'n/a';
-                const state = entry?.is_supply_cancelled ? 'cancelled' : 'active';
-                const errors = (entry?.error_reasons ?? [])
-                    .map((reason) => `${reason?.code ?? 'n/a'}:${reason?.message ?? '—'}`)
-                    .join(',');
-                return errors ? `${supplyId}:${state}(${errors})` : `${supplyId}:${state}`;
-            });
-            parts.push(`supplies=${supplyParts.join(';')}`);
-        }
-
-        if (status.error_reasons?.length) {
-            const errors = status.error_reasons
-                .map((reason) => `${reason?.code ?? 'n/a'}:${reason?.message ?? '—'}`)
-                .join(', ');
-            parts.push(`errors=${errors}`);
-        }
-
-        return parts.length ? parts.join(', ') : 'Ответ без подробностей';
-    }
-
-    private formatTimeslotRange(fromIso?: string, toIso?: string, timezone?: string): string | undefined {
-        if (!fromIso || !toIso) {
-            return undefined;
-        }
-
-        try {
-            const options: Intl.DateTimeFormatOptions = {
-                day: '2-digit',
-                month: '2-digit',
-                hour: '2-digit',
-                minute: '2-digit',
-            };
-            const formatter = new Intl.DateTimeFormat('ru-RU', timezone ? { ...options, timeZone: timezone } : options);
-            const fromText = formatter.format(new Date(fromIso));
-            const toText = formatter.format(new Date(toIso));
-            return timezone ? `${fromText} — ${toText} (${timezone})` : `${fromText} — ${toText}`;
-        } catch (error) {
-            this.logger.debug(`formatTimeslotRange failed: ${this.describeError(error)}`);
-            return `${fromIso} — ${toIso}`;
-        }
-    }
-
-    private parseWarehouseId(value: unknown): number | undefined {
-        if (typeof value === 'number' && Number.isFinite(value)) {
-            return Math.trunc(value);
-        }
-        if (typeof value === 'string' && value.trim().length) {
-            const parsed = Number(value.trim());
-            if (Number.isFinite(parsed)) {
-                return Math.trunc(parsed);
-            }
-        }
-        return undefined;
-    }
-
-    private describeTimeslot(slot?: OzonDraftTimeslot): string | undefined {
-        if (!slot) {
-            return undefined;
-        }
-
-        const from = slot.from_in_timezone;
-        const to = slot.to_in_timezone;
-        if (!from || !to) {
-            return undefined;
-        }
-        return `${from} — ${to}`;
-    }
-
     private async processSpreadsheet(
         ctx: Context,
         chatId: string,
-        state: SupplyWizardState,
         source: { buffer?: Buffer; spreadsheet?: string; label: string },
     ): Promise<void> {
         const credentials = await this.resolveCredentials(chatId);
@@ -2326,9 +2350,35 @@ export class SupplyWizardHandler {
             task.selectedTimeslot = undefined;
         }
 
-        await this.resolveSkus(clonedTasks[0], credentials);
+        await this.process.resolveSkus(clonedTasks[0], credentials);
 
         const summary = this.view.formatItemsSummary(clonedTasks[0]);
+        const createdContexts: SupplyWizardTaskContext[] = [];
+
+        const now = Date.now();
+        const newTaskIds = new Set(
+            clonedTasks
+                .map((task) => task.taskId)
+                .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0),
+        );
+        const existingContexts = this.wizardStore.listTaskContexts(chatId);
+        for (const context of existingContexts) {
+            if (!newTaskIds.has(context.taskId)) {
+                this.wizardStore.removeTaskContext(chatId, context.taskId);
+            }
+        }
+
+        for (const [index, task] of clonedTasks.entries()) {
+            const context = this.createTaskContext({
+                task,
+                stage: 'awaitDropOffQuery',
+                createdAt: now + index,
+            });
+            if (task.taskId) {
+                this.wizardStore.upsertTaskContext(chatId, task.taskId, () => context);
+                createdContexts.push(context);
+            }
+        }
 
         let clusters: OzonCluster[] = [];
         try {
@@ -2347,14 +2397,14 @@ export class SupplyWizardHandler {
 
         const options = this.view.buildOptions(clusters);
 
-        const updated = this.wizardStore.update(chatId, (current) => {
+        const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
+            const selectedTaskId = createdContexts[0]?.taskId ?? current.selectedTaskId;
             return {
                 ...current,
                 stage: 'awaitDropOffQuery',
                 spreadsheet: source.label,
-                tasks: clonedTasks,
-                selectedTaskId: clonedTasks[0]?.taskId,
+                selectedTaskId,
                 clusters: options.clusters,
                 warehouses: options.warehouses,
                 dropOffs: [],
@@ -2404,7 +2454,7 @@ export class SupplyWizardHandler {
             return;
         }
 
-        const updated = this.wizardStore.update(chatId, (current) => {
+        const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             return {
                 ...current,
@@ -2422,20 +2472,34 @@ export class SupplyWizardHandler {
                 draftCreatedAt: undefined,
                 draftExpiresAt: undefined,
                 draftError: undefined,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    clusterId: undefined,
-                    warehouseId: current.selectedWarehouseId ?? task.warehouseId,
-                    warehouseName: current.selectedWarehouseName ?? task.warehouseName,
-                    draftOperationId: '',
-                    draftId: 0,
-                })),
             };
         });
 
         if (!updated) {
             await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
             return;
+        }
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: 'clusterSelect',
+                selectedClusterId: undefined,
+                selectedClusterName: undefined,
+                selectedWarehouseId: updated.selectedWarehouseId ?? context.selectedWarehouseId,
+                selectedWarehouseName: updated.selectedWarehouseName ?? context.selectedWarehouseName,
+                draftWarehouses: updated.draftWarehouses.map((item) => ({ ...item })),
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                updatedAt: Date.now(),
+            }));
         }
 
         const message = (ctx.callbackQuery as any)?.message;
@@ -2507,8 +2571,9 @@ export class SupplyWizardHandler {
         }
 
         const hasDropOffSelection = Boolean(state.selectedDropOffId);
+        const activeTaskId = this.resolveActiveTaskId(chatId, state);
 
-        const updated = this.wizardStore.update(chatId, (current) => {
+        const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             const nextWarehouses = { ...current.warehouses };
             if (refreshedWarehouses) {
@@ -2534,13 +2599,6 @@ export class SupplyWizardHandler {
                 warehouseSearchQuery: undefined,
                 warehousePage: 0,
                 warehouses: nextWarehouses,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    clusterId: cluster.id,
-                    draftOperationId: '',
-                    draftId: 0,
-                    selectedTimeslot: undefined,
-                })),
             };
         });
 
@@ -2549,12 +2607,37 @@ export class SupplyWizardHandler {
             return;
         }
 
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: hasDropOffSelection ? 'warehouseSelect' : 'dropOffSelect',
+                selectedClusterId: cluster.id,
+                selectedClusterName: cluster.name,
+                selectedWarehouseId: undefined,
+                selectedWarehouseName: undefined,
+                draftWarehouses: [],
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                autoWarehouseSelection: false,
+                updatedAt: Date.now(),
+            }));
+        }
+
         const dropOffLabel = updated.selectedDropOffName ??
             (updated.selectedDropOffId ? String(updated.selectedDropOffId) : undefined);
-        await this.notifyAdmin(ctx, 'wizard.clusterSelected', [
-            `cluster: ${cluster.name} (${cluster.id})`,
-            dropOffLabel ? `drop-off: ${dropOffLabel}` : undefined,
-        ]);
+        await this.notifications.notifyWizard(WizardEvent.ClusterSelected, {
+            ctx,
+            lines: [
+                `cluster: ${cluster.name} (${cluster.id})`,
+                dropOffLabel ? `drop-off: ${dropOffLabel}` : undefined,
+            ],
+        });
 
         if (hasDropOffSelection) {
             const nextState = this.wizardStore.get(chatId) ?? updated;
@@ -2616,7 +2699,7 @@ export class SupplyWizardHandler {
                 return;
             }
             const updated =
-                this.wizardStore.update(chatId, (current) => {
+                this.updateWizardState(chatId, (current) => {
                     if (!current) return undefined;
                     if (current.stage !== 'warehouseSelect') {
                         return current;
@@ -2634,7 +2717,7 @@ export class SupplyWizardHandler {
 
         if (action === 'search' && extra === 'clear') {
             const updated =
-                this.wizardStore.update(chatId, (current) => {
+                this.updateWizardState(chatId, (current) => {
                     if (!current) return undefined;
                     if (current.stage !== 'warehouseSelect') {
                         return current;
@@ -2652,7 +2735,7 @@ export class SupplyWizardHandler {
         }
 
         if (action === 'backToClusters') {
-            const updated = this.wizardStore.update(chatId, (current) => {
+            const updated = this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 if (current.stage !== 'warehouseSelect') {
                     return current;
@@ -2705,7 +2788,7 @@ export class SupplyWizardHandler {
 
         const hasDropOffSelection = Boolean(state.selectedDropOffId);
 
-        const updated = this.wizardStore.update(chatId, (current) => {
+        const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             const selectedWarehouseId = requestedAuto ? undefined : warehouse.warehouse_id;
             const selectedWarehouseName = requestedAuto ? undefined : warehouse.name;
@@ -2725,21 +2808,38 @@ export class SupplyWizardHandler {
                 draftExpiresAt: undefined,
                 draftError: undefined,
                 autoWarehouseSelection: requestedAuto,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    clusterId: current.selectedClusterId ?? task.clusterId,
-                    warehouseId: selectedWarehouseId ?? undefined,
-                    warehouseName: selectedWarehouseName ?? task.warehouseName,
-                    draftOperationId: '',
-                    draftId: 0,
-                    selectedTimeslot: undefined,
-                })),
             };
         });
 
         if (!updated) {
             await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
             return;
+        }
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: hasDropOffSelection ? 'awaitReadyDays' : 'dropOffSelect',
+                selectedClusterId: updated.selectedClusterId ?? context.selectedClusterId,
+                selectedClusterName: updated.selectedClusterName ?? context.selectedClusterName,
+                selectedWarehouseId: requestedAuto ? undefined : warehouse.warehouse_id,
+                selectedWarehouseName: requestedAuto ? undefined : warehouse.name,
+                selectedDropOffId: updated.selectedDropOffId ?? context.selectedDropOffId,
+                selectedDropOffName: updated.selectedDropOffName ?? context.selectedDropOffName,
+                draftWarehouses: [],
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                autoWarehouseSelection: requestedAuto,
+                readyInDays: undefined,
+                updatedAt: Date.now(),
+            }));
         }
 
         if (hasDropOffSelection) {
@@ -2791,7 +2891,7 @@ export class SupplyWizardHandler {
 
         const hasClusterSelection = Boolean(state.selectedClusterId);
 
-        const updated = this.wizardStore.update(chatId, (current) => {
+        const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             return {
                 ...current,
@@ -2812,13 +2912,6 @@ export class SupplyWizardHandler {
                 autoWarehouseSelection: false,
                 warehouseSearchQuery: undefined,
                 warehousePage: 0,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    clusterId: current.selectedClusterId ?? task.clusterId,
-                    draftOperationId: '',
-                    draftId: 0,
-                    selectedTimeslot: undefined,
-                })),
             };
         });
 
@@ -2827,10 +2920,36 @@ export class SupplyWizardHandler {
             return;
         }
 
-        await this.notifyAdmin(ctx, 'wizard.dropOffSelected', [
-            `drop-off: ${option.name} (${option.warehouse_id})`,
-            option.address ? `address: ${option.address}` : undefined,
-        ]);
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: hasClusterSelection ? 'warehouseSelect' : 'clusterPrompt',
+                selectedDropOffId: option.warehouse_id,
+                selectedDropOffName: option.name,
+                selectedWarehouseId: undefined,
+                selectedWarehouseName: undefined,
+                draftWarehouses: [],
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                autoWarehouseSelection: false,
+                updatedAt: Date.now(),
+            }));
+        }
+
+        await this.notifications.notifyWizard(WizardEvent.DropOffSelected, {
+            ctx,
+            lines: [
+                `drop-off: ${option.name} (${option.warehouse_id})`,
+                option.address ? `address: ${option.address}` : undefined,
+            ],
+        });
 
         if (hasClusterSelection) {
             await this.showWarehouseSelection(ctx, chatId, updated, {
@@ -2899,7 +3018,7 @@ export class SupplyWizardHandler {
         let page = state.warehousePage ?? 0;
 
         if (page >= pageCount) {
-            const updated = this.wizardStore.update(chatId, (current) => {
+            const updated = this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 if (current.stage !== 'warehouseSelect') {
                     return current;
@@ -2987,7 +3106,7 @@ export class SupplyWizardHandler {
         const query = text.trim();
         const normalized = query.length ? query : undefined;
         const updated =
-            this.wizardStore.update(chatId, (current) => {
+            this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 if (current.stage !== 'warehouseSelect') {
                     return current;
@@ -3034,14 +3153,8 @@ export class SupplyWizardHandler {
             return;
         }
 
-        const updated = this.wizardStore.update(chatId, (current) => {
+        const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
-            const tasks = (current.tasks ?? []).map((task) => ({
-                ...task,
-                warehouseId: option.warehouseId,
-                warehouseName: option.name ?? task.warehouseName,
-            }));
-
             return {
                 ...current,
                 stage: 'timeslotSelect',
@@ -3052,13 +3165,29 @@ export class SupplyWizardHandler {
                 draftWarehouses: current.draftWarehouses?.length ? current.draftWarehouses : this.latestDraftWarehouses,
                 draftTimeslots: [],
                 selectedTimeslot: undefined,
-                tasks,
             };
         });
 
         if (!updated) {
             await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
             return;
+        }
+
+        const targetTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (targetTaskId) {
+            this.updateTaskContext(chatId, targetTaskId, (context) => ({
+                ...context,
+                stage: 'timeslotSelect',
+                selectedWarehouseId: option.warehouseId,
+                selectedWarehouseName: option.name ?? context.selectedWarehouseName,
+                selectedClusterId: option.clusterId ?? context.selectedClusterId,
+                selectedClusterName: option.clusterName ?? context.selectedClusterName,
+                draftWarehouses: (updated.draftWarehouses ?? []).map((item) => ({ ...item })),
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                autoWarehouseSelection: false,
+                updatedAt: Date.now(),
+            }));
         }
 
         await this.presentDraftWarehouseSelection(ctx, chatId, updated, option);
@@ -3076,7 +3205,7 @@ export class SupplyWizardHandler {
         const skipReadyPrompt = options.skipReadyPrompt ?? false;
         const summaryLines = this.view.describeWarehouseSelection(option, state);
 
-        await this.notifyAdmin(ctx, 'wizard.warehouseSelected', summaryLines);
+        await this.notifications.notifyWizard(WizardEvent.WarehouseSelected, { ctx, lines: summaryLines });
 
         if (!skipReadyPrompt) {
             await this.view.updatePrompt(
@@ -3113,21 +3242,34 @@ export class SupplyWizardHandler {
             this.logger.error(`getDraftTimeslots failed: ${message}`);
             await ctx.reply(`Не удалось получить таймслоты: ${message}`);
 
-            const rollback = this.wizardStore.update(chatId, (current) => {
+            const rollback = this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
                 return {
                     ...current,
                     stage: 'draftWarehouseSelect',
                     draftTimeslots: [],
                     selectedTimeslot: undefined,
-                    tasks: (current.tasks ?? []).map((task) => ({
-                        ...task,
-                        selectedTimeslot: undefined,
-                    })),
                 };
             });
 
             if (rollback) {
+                const activeTaskId = this.resolveActiveTaskId(chatId, rollback);
+                if (activeTaskId) {
+                    this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                        ...context,
+                        stage: 'draftWarehouseSelect',
+                        draftTimeslots: [],
+                        selectedTimeslot: undefined,
+                        draftStatus: rollback.draftStatus ?? context.draftStatus,
+                        draftOperationId: rollback.draftOperationId ?? context.draftOperationId,
+                        draftId: rollback.draftId ?? context.draftId,
+                        draftCreatedAt: rollback.draftCreatedAt ?? context.draftCreatedAt,
+                        draftExpiresAt: rollback.draftExpiresAt ?? context.draftExpiresAt,
+                        draftError: rollback.draftError ?? context.draftError,
+                        updatedAt: Date.now(),
+                    }));
+                }
+
                 await this.view.updatePrompt(
                     ctx,
                     chatId,
@@ -3141,7 +3283,7 @@ export class SupplyWizardHandler {
 
         const { limited, truncated } = this.view.limitTimeslotOptions(timeslotOptions);
 
-        const stored = this.wizardStore.update(chatId, (current) => {
+        const stored = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
 
             if (!limited.length) {
@@ -3150,10 +3292,6 @@ export class SupplyWizardHandler {
                     stage: 'draftWarehouseSelect',
                     draftTimeslots: [],
                     selectedTimeslot: undefined,
-                    tasks: (current.tasks ?? []).map((task) => ({
-                        ...task,
-                        selectedTimeslot: undefined,
-                    })),
                 };
             }
 
@@ -3164,15 +3302,35 @@ export class SupplyWizardHandler {
                 stage: 'awaitReadyDays',
                 draftTimeslots: limited,
                 selectedTimeslot: firstTimeslot,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    selectedTimeslot: firstTimeslot.data,
-                })),
             };
         });
 
         if (!stored) {
             return undefined;
+        }
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, stored);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => {
+                if (!limited.length) {
+                    return {
+                        ...context,
+                        stage: 'draftWarehouseSelect',
+                        draftTimeslots: [],
+                        selectedTimeslot: undefined,
+                        updatedAt: Date.now(),
+                    };
+                }
+
+                const [firstTimeslot] = limited;
+                return {
+                    ...context,
+                    stage: 'awaitReadyDays',
+                    draftTimeslots: limited.map((item) => ({ ...item })),
+                    selectedTimeslot: firstTimeslot ? { ...firstTimeslot, data: firstTimeslot.data ? { ...firstTimeslot.data } : firstTimeslot.data } : undefined,
+                    updatedAt: Date.now(),
+                };
+            });
         }
 
         if (!limited.length) {
@@ -3199,7 +3357,10 @@ export class SupplyWizardHandler {
         const selectedTimeslot = stored.selectedTimeslot;
 
         if (selectedTimeslot) {
-            await this.notifyAdmin(ctx, 'wizard.timeslotSelected', [`timeslot: ${selectedTimeslot.label}`]);
+            await this.notifications.notifyWizard(WizardEvent.TimeslotSelected, {
+                ctx,
+                lines: [`timeslot: ${selectedTimeslot.label}`],
+            });
         }
 
         const readySummary = [
@@ -3246,19 +3407,13 @@ export class SupplyWizardHandler {
             return;
         }
 
-        const updated = this.wizardStore.update(chatId, (current) => {
+        const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
-            const tasks = (current.tasks ?? []).map((task) => ({
-                ...task,
-                selectedTimeslot: option.data,
-            }));
-
             return {
                 ...current,
                 stage: 'awaitReadyDays',
                 selectedTimeslot: option,
                 draftTimeslots: current.draftTimeslots,
-                tasks,
             };
         });
 
@@ -3267,7 +3422,21 @@ export class SupplyWizardHandler {
             return;
         }
 
-        await this.notifyAdmin(ctx, 'wizard.timeslotSelected', [`timeslot: ${option.label}`]);
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: 'awaitReadyDays',
+                selectedTimeslot: {
+                    ...option,
+                    data: option.data ? { ...option.data } : option.data,
+                },
+                draftTimeslots: (updated.draftTimeslots ?? []).map((item) => ({ ...item })),
+                updatedAt: Date.now(),
+            }));
+        }
+
+        await this.notifications.notifyWizard(WizardEvent.TimeslotSelected, { ctx, lines: [`timeslot: ${option.label}`] });
         await this.safeAnswerCbQuery(ctx, chatId, 'Таймслот выбран');
 
         const summary = [
@@ -3292,7 +3461,12 @@ export class SupplyWizardHandler {
             return [];
         }
 
-        const { from, to } = this.computeTimeslotWindow();
+        const window = this.process.computeTimeslotWindow({
+            fromDays: this.readyDaysMin,
+            toDays: this.readyDaysMax,
+        });
+        const from = window.fromIso;
+        const to = window.toIso;
         const response = await this.ozonApi.getDraftTimeslots(
             {
                 draftId: state.draftId,
@@ -3306,42 +3480,6 @@ export class SupplyWizardHandler {
         return this.view.mapTimeslotOptions(response);
     }
 
-    private collectTimeslotWarehouseIds(
-        state: SupplyWizardState,
-        option: SupplyWizardDraftWarehouseOption,
-    ): string[] {
-        const warehouseId = option?.warehouseId ?? state.selectedWarehouseId;
-        return warehouseId ? [String(warehouseId)] : [];
-    }
-
-    private computeTimeslotWindow(): { from: string; to: string } {
-        const now = new Date();
-        const start = this.addUtcDays(now, this.readyDaysMin);
-        const end = this.addUtcDays(now, this.readyDaysMax);
-        const from = this.toOzonIso(start);
-        const to = this.toOzonIso(end);
-        return { from, to };
-    }
-
-    private addUtcDays(date: Date, days: number): Date {
-        const copy = new Date(date.getTime());
-        copy.setUTCDate(copy.getUTCDate() + days);
-        return copy;
-    }
-
-    private toOzonIso(date: Date): string {
-        return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
-    }
-
-    private findSelectedDraftWarehouse(
-        state: SupplyWizardState,
-    ): SupplyWizardDraftWarehouseOption | undefined {
-        if (!state.selectedWarehouseId) {
-            return undefined;
-        }
-        return state.draftWarehouses.find((item) => item.warehouseId === state.selectedWarehouseId);
-    }
-
     private mapDropOffSearchResults(
         items: OzonFboWarehouseSearchItem[],
     ): SupplyWizardDropOffOption[] {
@@ -3349,7 +3487,7 @@ export class SupplyWizardHandler {
         const options: SupplyWizardDropOffOption[] = [];
 
         for (const item of items ?? []) {
-            if (!item || typeof item.warehouse_id !== 'number') {
+            if (!item) {
                 continue;
             }
 
@@ -3371,7 +3509,6 @@ export class SupplyWizardHandler {
     }
 
     private async pollDraftStatus(
-        chatId: string,
         operationId: string,
         credentials: OzonCredentials,
     ): Promise<
@@ -3442,29 +3579,14 @@ export class SupplyWizardHandler {
         this.latestDraftId = payload.draftId ?? this.latestDraftId;
         this.latestDraftOperationId = payload.operationId;
 
-        const updated = this.wizardStore.update(chatId, (current) => {
+        const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
 
             const createdAt = current.draftCreatedAt ?? Date.now();
             const expiresAt = current.draftExpiresAt ?? createdAt + this.draftLifetimeMs;
 
-            const tasks = (current.tasks ?? []).map((task) => {
-                if (task.taskId !== payload.taskId) {
-                    return { ...task };
-                }
-                return {
-                    ...task,
-                    clusterId: current.selectedClusterId ?? task.clusterId,
-                    warehouseId: current.selectedWarehouseId ?? task.warehouseId,
-                    draftOperationId: payload.operationId,
-                    draftId: payload.draftId ?? task.draftId,
-                    selectedTimeslot: undefined,
-                };
-            });
-
             return {
                 ...current,
-                tasks,
                 stage: limitedOptions.length ? 'draftWarehouseSelect' : 'awaitReadyDays',
                 draftStatus: 'success',
                 draftOperationId: payload.operationId,
@@ -3487,6 +3609,30 @@ export class SupplyWizardHandler {
         if (!updated || updated.draftOperationId !== payload.operationId) {
             return;
         }
+
+        this.updateTaskContext(chatId, payload.taskId, (context) => ({
+            ...context,
+            stage: limitedOptions.length ? 'draftWarehouseSelect' : 'awaitReadyDays',
+            draftStatus: 'success',
+            draftOperationId: payload.operationId,
+            draftId: payload.draftId ?? context.draftId,
+            draftCreatedAt: updated.draftCreatedAt ?? context.draftCreatedAt ?? Date.now(),
+            draftExpiresAt: updated.draftExpiresAt ?? context.draftExpiresAt,
+            draftError: undefined,
+            draftWarehouses: limitedOptions.map((item) => ({ ...item })),
+            draftTimeslots: [],
+            selectedTimeslot: undefined,
+            selectedClusterId: updated.selectedClusterId ?? context.selectedClusterId,
+            selectedClusterName: updated.selectedClusterName ?? context.selectedClusterName,
+            selectedWarehouseId: limitedOptions.length
+                ? undefined
+                : updated.selectedWarehouseId ?? context.selectedWarehouseId,
+            selectedWarehouseName: limitedOptions.length
+                ? undefined
+                : updated.selectedWarehouseName ?? context.selectedWarehouseName,
+            autoWarehouseSelection: context.autoWarehouseSelection,
+            updatedAt: Date.now(),
+        }));
 
         const headerLines = [
             'Черновик успешно создан ✅',
@@ -3533,7 +3679,7 @@ export class SupplyWizardHandler {
     }
 
     private resetDraftStateForRetry(chatId: string): void {
-        this.wizardStore.update(chatId, (current) => {
+        this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             return {
                 ...current,
@@ -3546,14 +3692,24 @@ export class SupplyWizardHandler {
                 draftWarehouses: [],
                 draftTimeslots: [],
                 selectedTimeslot: undefined,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    draftOperationId: '',
-                    draftId: 0,
-                    selectedTimeslot: undefined,
-                })),
             };
         });
+        const contexts = this.wizardStore.listTaskContexts(chatId);
+        for (const context of contexts) {
+            this.updateTaskContext(chatId, context.taskId, (current) => ({
+                ...current,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                draftWarehouses: [],
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                updatedAt: Date.now(),
+            }));
+        }
         this.latestDraftOperationId = undefined;
     }
 
@@ -3585,7 +3741,7 @@ export class SupplyWizardHandler {
             return;
         }
 
-        await this.notifyAdmin(ctx, 'wizard.callbackExpired', [`stage: ${current.stage}`]);
+        await this.notifications.notifyWizard(WizardEvent.CallbackExpired, { ctx, lines: [`stage: ${current.stage}`] });
 
         if (current.stage === 'warehouseSelect') {
             const view = this.computeWarehouseView(chatId, current);
@@ -3676,7 +3832,7 @@ export class SupplyWizardHandler {
             return;
         }
 
-        const task = this.getSelectedTask(state);
+        const task = this.getSelectedTask(chatId, state);
         if (!task) {
             this.logger.warn(`[${chatId}] ensureDraftCreated: задача не найдена`);
             return;
@@ -3705,14 +3861,14 @@ export class SupplyWizardHandler {
 
         let items: Array<{ sku: number; quantity: number }>;
         try {
-            items = this.buildDraftItems(task);
+            items = this.process.buildDraftItems(task);
         } catch (error) {
             const message = this.describeError(error);
             await this.handleDraftCreationFailure(ctx, chatId, message);
             return;
         }
 
-        const started = this.wizardStore.update(chatId, (current) => {
+        const started = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             if (current.draftStatus === 'creating') {
                 return current;
@@ -3763,7 +3919,7 @@ export class SupplyWizardHandler {
             return;
         }
 
-        const withOperation = this.wizardStore.update(chatId, (current) => {
+        const withOperation = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             if (current.draftStatus !== 'creating') {
                 return current;
@@ -3782,7 +3938,7 @@ export class SupplyWizardHandler {
 
         this.latestDraftOperationId = operationId;
 
-        const pollResult = await this.pollDraftStatus(chatId, operationId, credentials);
+        const pollResult = await this.pollDraftStatus(operationId, credentials);
         await this.handleDraftPollResult(ctx, chatId, task, operationId, pollResult, retryAttempt);
     }
 
@@ -3845,7 +4001,7 @@ export class SupplyWizardHandler {
                 return true;
             }
 
-            const pollResult = await this.pollDraftStatus(chatId, normalizedOperationId, credentials);
+            const pollResult = await this.pollDraftStatus(normalizedOperationId, credentials);
             await this.handleDraftPollResult(
                 ctx,
                 chatId,
@@ -3934,31 +4090,20 @@ export class SupplyWizardHandler {
         }
     }
 
-    private getSelectedTask(state: SupplyWizardState): OzonSupplyTask | undefined {
-        if (!state.tasks || !state.tasks.length) {
-            return undefined;
-        }
+    private getSelectedTask(chatId: string, state: SupplyWizardState): OzonSupplyTask | undefined {
         if (state.selectedTaskId) {
-            const match = state.tasks.find((task) => task.taskId === state.selectedTaskId);
-            if (match) {
-                return match;
+            const context = this.wizardStore.getTaskContext(chatId, state.selectedTaskId);
+            if (context) {
+                return this.cloneTask(context.task);
             }
         }
-        return state.tasks[0];
-    }
 
-    private buildDraftItems(task: OzonSupplyTask): Array<{ sku: number; quantity: number }> {
-        const items: Array<{ sku: number; quantity: number }> = [];
-        for (const item of task.items) {
-            if (!item.sku) {
-                throw new Error(`Для артикула «${item.article}» не найден SKU.`);
-            }
-            if (!Number.isFinite(item.quantity) || item.quantity <= 0) {
-                throw new Error(`Количество должно быть положительным числом (артикул ${item.article}).`);
-            }
-            items.push({ sku: Math.round(item.sku), quantity: Math.round(item.quantity) });
+        const contexts = this.wizardStore.listTaskContexts(chatId);
+        if (contexts.length) {
+            return this.cloneTask(contexts[0].task);
         }
-        return items;
+
+        return undefined;
     }
 
     private async handleDraftCreationFailure(
@@ -3966,7 +4111,7 @@ export class SupplyWizardHandler {
         chatId: string,
         reason: string,
     ): Promise<void> {
-        const updated = this.wizardStore.update(chatId, (current) => {
+        const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             return {
                 ...current,
@@ -3979,17 +4124,29 @@ export class SupplyWizardHandler {
                 draftWarehouses: [],
                 draftTimeslots: [],
                 selectedTimeslot: undefined,
-                tasks: (current.tasks ?? []).map((task) => ({
-                    ...task,
-                    draftOperationId: '',
-                    draftId: 0,
-                    selectedTimeslot: undefined,
-                })),
             };
         });
 
         if (!updated) {
             return;
+        }
+
+        const targetTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (targetTaskId) {
+            this.updateTaskContext(chatId, targetTaskId, (context) => ({
+                ...context,
+                stage: updated.stage,
+                draftStatus: 'failed',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: reason,
+                draftWarehouses: [],
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                updatedAt: Date.now(),
+            }));
         }
 
         const message = [
@@ -3998,7 +4155,7 @@ export class SupplyWizardHandler {
         ].join('\n');
 
         await this.view.updatePrompt(ctx, chatId, updated, message, this.view.withCancel());
-        await this.notifyAdmin(ctx, 'wizard.draftError', [reason]);
+        await this.notifications.notifyWizard(WizardEvent.DraftError, { ctx, lines: [reason] });
         this.latestDraftOperationId = undefined;
     }
 
@@ -4016,82 +4173,56 @@ export class SupplyWizardHandler {
         await new Promise((resolve) => setTimeout(resolve, ms));
     }
 
-    private async resolveSkus(task: OzonSupplyTask, credentials: OzonCredentials): Promise<void> {
-        const unresolvedOffers: string[] = [];
-
-        for (const item of task.items) {
-            const article = item.article?.trim();
-            if (!article) {
-                throw new Error('Есть строки с пустым артикулом. Исправьте файл и загрузите заново.');
-            }
-
-            const numericCandidate = Number(article);
-            if (Number.isFinite(numericCandidate) && numericCandidate > 0) {
-                item.sku = Math.round(numericCandidate);
-                continue;
-            }
-
-            unresolvedOffers.push(article);
-        }
-
-        if (unresolvedOffers.length) {
-            const skuMap = await this.ozonApi.getProductsByOfferIds(unresolvedOffers, credentials);
-            const missing: string[] = [];
-
-            for (const article of unresolvedOffers) {
-                const sku = skuMap.get(article);
-                if (!sku) {
-                    missing.push(article);
-                    continue;
-                }
-
-                const target = task.items.find((entry) => entry.article.trim() === article);
-                if (target) {
-                    target.sku = sku;
-                }
-            }
-
-            if (missing.length) {
-                const limit = 20;
-                const sample = missing.slice(0, limit);
-                const suffix = missing.length > limit ? `, и ещё ${missing.length - limit} артикулов` : '';
-                throw new Error(`Не удалось найти SKU в Ozon для артикулов: ${sample.join(', ')}${suffix}`);
-            }
-        }
-    }
-
     private async sendSupplyEvent(ctx: Context, result: OzonSupplyProcessResult): Promise<void> {
         const chatId = this.extractChatId(ctx);
         if (!chatId) return;
 
+        const eventType = result.event?.type ?? OzonSupplyEventType.Error;
+        const wizardEvent = this.mapSupplyEvent(eventType);
+
         const text = this.view.formatSupplyEvent({
             taskId: result.task.taskId,
-            event: result.event,
+            event: eventType,
             message: result.message,
         });
-        if (!text) {
-            return;
-        }
 
-        await this.notifyAdmin(ctx, `wizard.${result.event}`, [text]);
+        const lines = text ? [text] : [];
+        await this.notifications.notifyWizard(wizardEvent, { ctx, lines });
+    }
+
+    private mapSupplyEvent(type: OzonSupplyEventType): WizardEvent {
+        switch (type) {
+            case OzonSupplyEventType.DraftCreated:
+                return WizardEvent.DraftCreated;
+            case OzonSupplyEventType.DraftValid:
+                return WizardEvent.DraftValid;
+            case OzonSupplyEventType.DraftExpired:
+                return WizardEvent.DraftExpired;
+            case OzonSupplyEventType.DraftInvalid:
+                return WizardEvent.DraftInvalid;
+            case OzonSupplyEventType.DraftError:
+                return WizardEvent.DraftError;
+            case OzonSupplyEventType.TimeslotMissing:
+                return WizardEvent.TimeslotMissing;
+            case OzonSupplyEventType.WarehousePending:
+                return WizardEvent.WarehousePending;
+            case OzonSupplyEventType.WindowExpired:
+                return WizardEvent.WindowExpired;
+            case OzonSupplyEventType.SupplyCreated:
+                return WizardEvent.SupplyCreated;
+            case OzonSupplyEventType.SupplyStatus:
+                return WizardEvent.SupplyStatus;
+            case OzonSupplyEventType.NoCredentials:
+                return WizardEvent.NoCredentials;
+            case OzonSupplyEventType.Error:
+            default:
+                return WizardEvent.Error;
+        }
     }
 
     private extractChatId(ctx: Context): string | undefined {
         const chatId = (ctx.chat as any)?.id;
         return typeof chatId === 'undefined' || chatId === null ? undefined : String(chatId);
-    }
-
-    private async notifyAdmin(ctx: Context, event: string, lines: Array<string | undefined> = []): Promise<void> {
-        if (!this.adminNotifier.isEnabled()) {
-            return;
-        }
-
-        const filtered = lines.filter((value): value is string => Boolean(value && value.trim().length));
-        try {
-            await this.adminNotifier.notifyWizardEvent({ ctx, event, lines: filtered });
-        } catch (error) {
-            this.logger.debug(`Admin notification failed (${event}): ${this.describeError(error)}`);
-        }
     }
 
     private async resolveCredentials(chatId: string): Promise<OzonCredentials | undefined> {
@@ -4142,10 +4273,6 @@ export class SupplyWizardHandler {
         this.taskAbortControllers.delete(taskId);
     }
 
-    private isAbortError(error: unknown): boolean {
-        return error instanceof Error && error.name === 'AbortError';
-    }
-
     private cloneTask(task: OzonSupplyTask): OzonSupplyTask {
         return {
             ...task,
@@ -4154,38 +4281,9 @@ export class SupplyWizardHandler {
         };
     }
 
-    private formatTimeslotSearchDeadline(deadline: Date | undefined): string | undefined {
-        if (!deadline) {
-            return undefined;
-        }
-        return new Intl.DateTimeFormat('ru-RU', {
-            day: '2-digit',
-            month: '2-digit',
-        }).format(deadline);
-    }
-
-    private resolveTimeslotSearchDeadline(task: OzonSupplyTask): Date | undefined {
-        const parsedDeadline = this.parseSupplyDeadline(task.lastDay);
-        if (parsedDeadline) {
-            return parsedDeadline;
-        }
-        const fallback = new Date();
-        fallback.setUTCHours(23, 59, 59, 0);
-        fallback.setUTCDate(fallback.getUTCDate() + this.readyDaysMax);
-        return fallback;
-    }
-
-    private parseSupplyDeadline(value?: string): Date | undefined {
-        if (!value) {
-            return undefined;
-        }
-        const parsed = new Date(value);
-        return Number.isNaN(parsed.getTime()) ? undefined : parsed;
-    }
-
     private async downloadTelegramFile(ctx: Context, fileId: string): Promise<Buffer> {
         const link = await ctx.telegram.getFileLink(fileId);
-        const url = typeof link === 'string' ? link : link.href ?? link.toString();
+        const url = link.href ?? link.toString();
         const response = await axios.get<ArrayBuffer>(url, {
             responseType: 'arraybuffer',
             timeout: 60_000,
@@ -4239,5 +4337,34 @@ export class SupplyWizardHandler {
         } catch (error) {
             return undefined;
         }
+    }
+
+    private formatTimeslotSearchDeadline(deadline: Date | undefined): string | undefined {
+        if (!deadline) {
+            return undefined;
+        }
+        return new Intl.DateTimeFormat('ru-RU', {
+            day: '2-digit',
+            month: '2-digit',
+        }).format(deadline);
+    }
+
+    private resolveTimeslotSearchDeadline(task: OzonSupplyTask): Date | undefined {
+        const parsedDeadline = this.parseSupplyDeadline(task.lastDay);
+        if (parsedDeadline) {
+            return parsedDeadline;
+        }
+        const fallback = new Date();
+        fallback.setUTCHours(23, 59, 59, 0);
+        fallback.setUTCDate(fallback.getUTCDate() + this.readyDaysMax);
+        return fallback;
+    }
+
+    private parseSupplyDeadline(value?: string): Date | undefined {
+        if (!value) {
+            return undefined;
+        }
+        const parsed = new Date(value);
+        return Number.isNaN(parsed.getTime()) ? undefined : parsed;
     }
 }

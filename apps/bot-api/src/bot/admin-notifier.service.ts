@@ -4,6 +4,8 @@ import { Context, TelegramError } from 'telegraf';
 import { Telegraf } from 'telegraf';
 import { InjectBot } from 'nestjs-telegraf';
 
+import { WizardEvent } from './services/wizard-event.types';
+
 @Injectable()
 export class AdminNotifierService {
   private readonly logger = new Logger(AdminNotifierService.name);
@@ -36,7 +38,7 @@ export class AdminNotifierService {
 
   async notifyWizardEvent(params: {
     ctx?: Context;
-    event: string;
+    event: WizardEvent;
     lines?: string[];
   }): Promise<void> {
     if (!this.isEnabled()) {

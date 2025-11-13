@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { Context } from 'telegraf';
 
+import { OzonSupplyEventType } from '@bot/ozon/ozon-supply.types';
+
 import {
     SupplyWizardClusterOption,
     SupplyWizardDraftWarehouseOption,
@@ -11,7 +13,6 @@ import {
     SupplyWizardWarehouseOption,
     SupplyWizardStore,
 } from '../supply-wizard.store';
-import { it } from "node:test";
 
 @Injectable()
 export class SupplyWizardViewService {
@@ -101,7 +102,6 @@ export class SupplyWizardViewService {
 
         const pendingTasks = state.pendingTasks ?? [];
         if (pendingTasks.length) {
-            const current = pendingTasks[pendingTasks.length - 1];
             lines.push(
                 '',
                 `В обработке ${pendingTasks.length} ${pendingTasks.length === 1 ? 'задача' : 'задачи'}.`,
@@ -109,7 +109,6 @@ export class SupplyWizardViewService {
         }
 
         if (state.orders.length) {
-            const last = state.orders[state.orders.length - 1];
             lines.push(
                 '',
                 'Созданные поставки доступны в разделе «Мои поставки».',
@@ -257,14 +256,13 @@ export class SupplyWizardViewService {
 
     renderOrderDetails(order: SupplyWizardOrderSummary): string {
         const searchWindowLine = this.buildSearchDeadlineLine(order.searchDeadlineAt);
-        const createdLine = this.buildCreatedLine(order.createdAt);
+
         const lines = [
             `Поставка №${order.orderId ?? order.operationId ?? order.id}`,
             '',
             order.clusterName ? `Кластер: ${order.clusterName}` : undefined,
             order.dropOffName ? `Пункт сдачи: ${order.dropOffName}` : undefined,
             order.warehouse ? `Склад: ${order.warehouse}` : undefined,
-            createdLine,
             searchWindowLine,
             order.timeslotLabel
                 ? `Таймслот: ${order.timeslotLabel}`
@@ -343,9 +341,9 @@ export class SupplyWizardViewService {
         const limit = 20;
         const totalItems = task.items.length;
         const displayedItems = task.items.slice(0, limit);
-
         const searchWindowLine = this.buildSearchDeadlineLine(task.searchDeadlineAt);
         const createdLine = this.buildCreatedLine(task.createdAt);
+
         const lines = [
             `Задача ${this.formatTaskName(task.operationId ?? task.id)}`,
             '\n',
@@ -378,6 +376,7 @@ export class SupplyWizardViewService {
     renderSupplySuccess(order: SupplyWizardOrderSummary): string {
         const searchWindowLine = this.buildSearchDeadlineLine(order.searchDeadlineAt);
         const createdLine = this.buildCreatedLine(order.createdAt);
+
         const lines = [
             'Поставка создана ✅',
             `ID: ${order.orderId ?? order.id}`,
@@ -874,30 +873,32 @@ export class SupplyWizardViewService {
         ].join('\n');
     }
 
-    formatSupplyEvent(result: { taskId: string; event: string; message?: string }): string | undefined {
+    formatSupplyEvent(result: { taskId: string; event: OzonSupplyEventType; message?: string }): string | undefined {
         const prefix = `[${result.taskId}]`;
         switch (result.event) {
-            case 'draftCreated':
+            case OzonSupplyEventType.DraftCreated:
                 return `${prefix} Черновик создан. ${result.message ?? ''}`.trim();
-            case 'draftValid':
+            case OzonSupplyEventType.DraftValid:
                 return `${prefix} Используем существующий черновик. ${result.message ?? ''}`.trim();
-            case 'draftExpired':
+            case OzonSupplyEventType.DraftExpired:
                 return `${prefix} Черновик устарел, создаём заново.`;
-            case 'draftInvalid':
+            case OzonSupplyEventType.DraftInvalid:
                 return `${prefix} Черновик невалидный, пересоздаём.`;
-            case 'draftError':
+            case OzonSupplyEventType.DraftError:
                 return `${prefix} Ошибка статуса черновика.${result.message ? ` ${result.message}` : ''}`;
-            case 'warehousePending':
+            case OzonSupplyEventType.WarehousePending:
                 return result.message ? `${prefix} ${result.message}` : undefined;
-            case 'timeslotMissing':
+            case OzonSupplyEventType.WindowExpired:
+                return `${prefix} Временное окно истекло, задача остановлена.`;
+            case OzonSupplyEventType.TimeslotMissing:
                 //return `${prefix} Свободных таймслотов нет.`;
                 return ``;
-            case 'supplyCreated':
+            case OzonSupplyEventType.SupplyCreated:
                 return `${prefix} ✅ Поставка создана. ${result.message ?? ''}`.trim();
-            case 'supplyStatus':
+            case OzonSupplyEventType.SupplyStatus:
                 return `${prefix} ${result.message ?? 'Статус поставки обновлён.'}`.trim();
-            case 'noCredentials':
-            case 'error':
+            case OzonSupplyEventType.NoCredentials:
+            case OzonSupplyEventType.Error:
                 return `${prefix} ❌ ${result.message ?? 'Ошибка'}`;
             default:
                 return result.message ? `${prefix} ${result.message}` : undefined;
@@ -967,7 +968,7 @@ export class SupplyWizardViewService {
     ): SupplyWizardWarehouseOption[] {
         const map = new Map<number, SupplyWizardWarehouseOption>();
         for (const entry of entries) {
-            if (!entry || typeof entry.warehouse_id !== 'number') continue;
+            if (!entry) continue;
             if (!map.has(entry.warehouse_id)) {
                 map.set(entry.warehouse_id, entry);
             }
@@ -1011,6 +1012,11 @@ export class SupplyWizardViewService {
         }
     }
 
+    private formatDropOffButtonLabel(option: SupplyWizardDropOffOption): string {
+        const base = option.name ?? `Пункт ${option.warehouse_id}`;
+        return this.truncate(`${base}`, 60);
+    }
+
     private formatCreatedAt(value: number | undefined): string | undefined {
         if (typeof value !== 'number' || !Number.isFinite(value)) {
             return undefined;
@@ -1049,11 +1055,6 @@ export class SupplyWizardViewService {
             day: '2-digit',
             month: '2-digit',
         }).format(date);
-    }
-
-    private formatDropOffButtonLabel(option: SupplyWizardDropOffOption): string {
-        const base = option.name ?? `Пункт ${option.warehouse_id}`;
-        return this.truncate(`${base}`, 60);
     }
 
     private formatDraftWarehouseButtonLabel(
