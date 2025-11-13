@@ -518,6 +518,8 @@ export class OzonApiService {
       credentials,
     );
 
+    await this.sleep(30_000);
+
     return response.data;
   }
 
