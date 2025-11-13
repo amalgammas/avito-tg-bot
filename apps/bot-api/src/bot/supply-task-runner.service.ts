@@ -206,7 +206,13 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
         this.logger.error(
           `Task ${taskLabel} resume error: ${result.message ?? 'unknown error'}`,
         );
-        await this.notifications.notifyUser(record.chatId, this.formatSupplyError(result.message), { parseMode: 'HTML' });
+        await this.notifications.notifyWizard(WizardEvent.SupplyError, {
+          lines: [
+            `task: ${taskLabel}`,
+            `chat: ${record.chatId}`,
+            result.message ?? 'unknown error',
+          ],
+        });
         break;
       default:
         this.logger.debug(`Task ${taskLabel} resume event: ${eventType}`);
@@ -240,14 +246,6 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       entity.dropOffName ? `Пункт сдачи: ${entity.dropOffName}` : undefined,
     ].filter((value): value is string => Boolean(value));
 
-    return lines.join('\n');
-  }
-
-  private formatSupplyError(message?: string): string {
-    const lines = ['<b>❌ Ошибка при обработке поставки</b>'];
-    if (message) {
-      lines.push(message);
-    }
     return lines.join('\n');
   }
 

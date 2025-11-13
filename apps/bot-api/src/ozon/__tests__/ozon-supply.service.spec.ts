@@ -87,19 +87,15 @@ describe('OzonSupplyService', () => {
     expect(result.event.type).toBe(OzonSupplyEventType.DraftExpired);
   });
 
-  it('createDraft caches operation and returns DraftCreated', async () => {
+  it('createDraft requests operation and returns DraftCreated', async () => {
     const credentials = { clientId: 'id', apiKey: 'key' };
-    ozonApi.createDraft.mockResolvedValueOnce('operation-123');
+    ozonApi.createDraft.mockResolvedValue('operation-123');
     ozonApi.getDraftTimeslots.mockResolvedValue({ drop_off_warehouse_timeslots: [] });
     const task = { ...baseTask, draftOperationId: '', draftId: 0 };
 
     const result = await (service as any).createDraft(task, credentials, 100);
     expect(result.event.type).toBe(OzonSupplyEventType.DraftCreated);
     expect(task.draftOperationId).toBe('operation-123');
-
-    // repeat should hit cache and return DraftValid
-    const cached = await (service as any).createDraft(task, credentials, 100);
-    expect(cached.event.type).toBe(OzonSupplyEventType.DraftValid);
     expect(ozonApi.createDraft).toHaveBeenCalledTimes(1);
   });
 });

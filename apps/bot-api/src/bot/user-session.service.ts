@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
+import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 
 import type { SupplyWizardState, SupplyWizardTaskContext, SupplyWizardTimeslotOption, SupplyWizardSupplyItem } from './supply-wizard.store';
 import type { OzonSupplyTask } from '../ozon/ozon-supply.types';
@@ -32,15 +33,16 @@ export class UserSessionService {
     const mainId = this.buildId(chatId, undefined);
 
     const existing = await this.repository.findOne({ where: { id: mainId } });
-    await this.repository.save({
+    const entity: QueryDeepPartialEntity<WizardSessionEntity> = {
       id: mainId,
       chatId,
-      taskId: undefined,
+      taskId: null,
       stage: state.stage,
-      payload: snapshot,
+      payload: snapshot as QueryDeepPartialEntity<unknown>,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
-    });
+    };
+    await this.repository.upsert(entity, ['id']);
 
     await this.syncTaskSessions(chatId, state, now);
   }
@@ -73,7 +75,7 @@ export class UserSessionService {
       ? Object.values(contexts)
       : legacyTasks.map((task) => this.makeLegacyTaskContext(state, task));
     const targetIds: string[] = [];
-    const entities: WizardSessionEntity[] = [];
+    const entities: QueryDeepPartialEntity<WizardSessionEntity>[] = [];
 
     for (const context of tasks) {
       const taskId = context?.taskId ?? context?.task?.taskId;
@@ -82,7 +84,7 @@ export class UserSessionService {
       }
       const id = this.buildId(chatId, taskId);
       targetIds.push(id);
-      const payload = this.cloneForStorage(context);
+      const payload = this.cloneForStorage(context) as QueryDeepPartialEntity<unknown>;
       const existing = await this.repository.findOne({ where: { id } });
       entities.push({
         id,
@@ -96,7 +98,7 @@ export class UserSessionService {
     }
 
     if (entities.length) {
-      await this.repository.save(entities);
+      await this.repository.upsert(entities, ['id']);
     }
 
     if (targetIds.length) {

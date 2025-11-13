@@ -40,13 +40,14 @@ export class OzonSupplyService {
   private readonly defaultSpreadsheetId: string;
   private readonly pollIntervalMs: number;
   private readonly availableWarehousesTtlMs = 10 * 60 * 1000; // 10 минут
-  private readonly draftTtlMs = 55 * 60 * 1000; // 55 минут
   private readonly timeslotWindowMaxDays = 28;
   private readonly dayMs = 24 * 60 * 60 * 1000;
-  private readonly draftCache = new Map<
-    string,
-    { operationId: string; draftId?: number; expiresAt: number }
-  >();
+  private readonly draftMinuteLimit = 2;
+  private readonly draftHourLimit = 50;
+  private readonly draftMinuteWindowMs = 60 * 1000;
+  private readonly draftHourWindowMs = 60 * 60 * 1000;
+  private draftMinuteTimestamps: number[] = [];
+  private draftHourTimestamps: number[] = [];
   private lastClusters: OzonCluster[] = [];
   private availableWarehousesCache?: {
     warehouses: OzonAvailableWarehouse[];
@@ -395,7 +396,6 @@ export class OzonSupplyService {
       if (response?.status === 404 && data?.code === 5) {
         task.draftOperationId = '';
         task.draftId = 0;
-        this.draftCache.delete(this.getTaskHash(task));
         return { task, event: { type: OzonSupplyEventType.DraftExpired }, message: 'Черновик не найден, создаём заново' };
       }
       throw error;
@@ -435,7 +435,6 @@ export class OzonSupplyService {
       task.warehouseId = selectedWarehouseId;
       task.warehouseName = selectedWarehouseName ?? task.warehouseName;
       task.draftId = info.draft_id ?? task.draftId;
-      this.rememberDraft(task, info.draft_id ?? task.draftId);
       this.ensureNotAborted(abortSignal);
 
       const window = this.computeTimeslotWindow(task);
@@ -485,14 +484,12 @@ export class OzonSupplyService {
     if (info.code === 5) {
       task.draftOperationId = '';
       task.draftId = 0;
-      this.draftCache.delete(this.getTaskHash(task));
       return { task, event: { type: OzonSupplyEventType.DraftExpired }, message: 'Черновик устарел, создадим заново' };
     }
 
     if (info.code === 1) {
       task.draftOperationId = '';
       task.draftId = 0;
-      this.draftCache.delete(this.getTaskHash(task));
       return { task, event: { type: OzonSupplyEventType.DraftInvalid }, message: 'Черновик невалидный' };
     }
 
@@ -510,21 +507,9 @@ export class OzonSupplyService {
     abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult> {
     this.ensureNotAborted(abortSignal);
-    const cacheKey = this.getTaskHash(task);
-    const cached = this.draftCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      task.draftOperationId = cached.operationId;
-      task.draftId = cached.draftId ?? task.draftId;
-      return {
-        task,
-        event: { type: OzonSupplyEventType.DraftValid },
-        message: `Используем существующий черновик ${cached.operationId}`,
-      };
-    }
-
-    this.ensureNotAborted(abortSignal);
     const ozonItems = await this.buildOzonItems(task, credentials);
     this.ensureNotAborted(abortSignal);
+    await this.throttleDraftCreation(abortSignal);
 
     const operationId = await this.ozonApi.createDraft(
       {
@@ -542,11 +527,6 @@ export class OzonSupplyService {
     }
 
     task.draftOperationId = operationId;
-    this.draftCache.set(cacheKey, {
-      operationId,
-      draftId: undefined,
-      expiresAt: Date.now() + this.draftTtlMs,
-    });
 
     return { task, event: { type: OzonSupplyEventType.DraftCreated }, message: `Создан черновик ${operationId}` };
   }
@@ -607,7 +587,7 @@ export class OzonSupplyService {
         (entry) => entry.warehouseId === preferredWarehouseId,
       );
       if (match) {
-        if (strict && match.isAvailable === false) {
+        if (strict && !match.isFullyAvailable) {
           return undefined;
         }
         return { warehouseId: match.warehouseId, name: match.name ?? preferredWarehouseName };
@@ -617,7 +597,7 @@ export class OzonSupplyService {
       }
     }
 
-    const firstAvailable = warehouses.find((entry) => entry.isAvailable !== false);
+    const firstAvailable = warehouses.find((entry) => entry.isFullyAvailable);
     if (firstAvailable) {
       return { warehouseId: firstAvailable.warehouseId, name: firstAvailable.name ?? preferredWarehouseName };
     }
@@ -630,8 +610,8 @@ export class OzonSupplyService {
 
   private collectDraftWarehouses(
     info: OzonDraftStatus,
-  ): Array<{ warehouseId: number; name?: string; isAvailable?: boolean }> {
-    const result: Array<{ warehouseId: number; name?: string; isAvailable?: boolean }> = [];
+  ): Array<{ warehouseId: number; name?: string; isFullyAvailable?: boolean }> {
+    const result: Array<{ warehouseId: number; name?: string; isFullyAvailable?: boolean }> = [];
     for (const cluster of info.clusters ?? []) {
       for (const warehouseInfo of cluster.warehouses ?? []) {
         const rawId =
@@ -643,8 +623,9 @@ export class OzonSupplyService {
           continue;
         }
         const name = warehouseInfo?.supply_warehouse?.name?.trim();
-        const isAvailable = warehouseInfo?.status?.is_available;
-        result.push({ warehouseId, name, isAvailable });
+        const state = warehouseInfo?.status?.state;
+        const isFullyAvailable = state === 'WAREHOUSE_SCORING_STATUS_FULL_AVAILABLE';
+        result.push({ warehouseId, name, isFullyAvailable });
       }
     }
     return result;
@@ -752,35 +733,54 @@ export class OzonSupplyService {
     return diffDays;
   }
 
+  private async throttleDraftCreation(abortSignal?: AbortSignal): Promise<void> {
+    while (true) {
+      this.ensureNotAborted(abortSignal);
+      const now = Date.now();
+
+      this.draftMinuteTimestamps = this.draftMinuteTimestamps.filter(
+        (ts) => now - ts < this.draftMinuteWindowMs,
+      );
+      this.draftHourTimestamps = this.draftHourTimestamps.filter(
+        (ts) => now - ts < this.draftHourWindowMs,
+      );
+
+      const minuteExceeded = this.draftMinuteTimestamps.length >= this.draftMinuteLimit;
+      const hourExceeded = this.draftHourTimestamps.length >= this.draftHourLimit;
+
+      if (!minuteExceeded && !hourExceeded) {
+        this.draftMinuteTimestamps.push(now);
+        this.draftHourTimestamps.push(now);
+        return;
+      }
+
+      const waitCandidates: number[] = [];
+      if (minuteExceeded && this.draftMinuteTimestamps.length) {
+        waitCandidates.push(this.draftMinuteTimestamps[0] + this.draftMinuteWindowMs);
+      }
+      if (hourExceeded && this.draftHourTimestamps.length) {
+        waitCandidates.push(this.draftHourTimestamps[0] + this.draftHourWindowMs);
+      }
+
+      if (!waitCandidates.length) {
+        // Should not happen, but guard against empty lists.
+        this.draftMinuteTimestamps = [];
+        this.draftHourTimestamps = [];
+        continue;
+      }
+
+      const waitUntil = Math.min(...waitCandidates);
+      const delay = Math.max(waitUntil - now, 250);
+      this.logger.debug(`Draft creation throttled for ${delay}ms due to Ozon limits`);
+      await this.sleep(delay, abortSignal);
+    }
+  }
+
   private cloneTask(task: OzonSupplyTask): OzonSupplyTask {
     return {
       ...task,
       items: task.items.map((item) => ({ ...item })),
     };
-  }
-
-  private rememberDraft(task: OzonSupplyTask, draftId?: number) {
-    const cacheKey = this.getTaskHash(task);
-    const existing = this.draftCache.get(cacheKey);
-    if (existing) {
-      existing.draftId = draftId ?? existing.draftId;
-      existing.expiresAt = Date.now() + this.draftTtlMs;
-    } else if (task.draftOperationId) {
-      this.draftCache.set(cacheKey, {
-        operationId: task.draftOperationId,
-        draftId,
-        expiresAt: Date.now() + this.draftTtlMs,
-      });
-    }
-  }
-
-  private getTaskHash(task: OzonSupplyTask): string {
-    const itemsHash = task.items
-      .slice()
-      .sort((a, b) => a.article.localeCompare(b.article, 'ru', { sensitivity: 'base' }))
-      .map((item) => `${item.article}:${item.quantity}`)
-      .join('|');
-    return `${task.clusterId ?? 'x'}-${task.warehouseId ?? 'x'}-${itemsHash}`;
   }
 
   private sleep(ms: number, signal?: AbortSignal): Promise<void> {

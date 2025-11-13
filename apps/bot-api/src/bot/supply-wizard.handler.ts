@@ -8,8 +8,6 @@ import {
     OzonCredentials,
     OzonFboWarehouseSearchItem,
     OzonDraftStatus,
-    OzonDraftTimeslot,
-    OzonSupplyCancelStatus,
     OzonSupplyCreateStatus,
 } from '../config/ozon-api.service';
 
@@ -190,7 +188,7 @@ export class SupplyWizardHandler {
                 this.view.buildUploadKeyboard(),
             );
             const buffer = await this.downloadTelegramFile(ctx, document.file_id);
-            await this.processSpreadsheet(ctx, chatId, state, { buffer, label: document.file_name ?? 'файл' });
+            await this.processSpreadsheet(ctx, chatId, { buffer, label: document.file_name ?? 'файл' });
             await this.notifications.notifyWizard(WizardEvent.DocumentUploaded, {
                 ctx,
                 lines: [
@@ -320,7 +318,7 @@ export class SupplyWizardHandler {
                 'Загружаю таблицу, подождите...',
                 this.view.buildUploadKeyboard(),
             );
-            await this.processSpreadsheet(ctx, chatId, state, { spreadsheet: trimmed, label: trimmed });
+            await this.processSpreadsheet(ctx, chatId, { spreadsheet: trimmed, label: trimmed });
             await this.notifications.notifyWizard(WizardEvent.SpreadsheetLink, { ctx, lines: [`link: ${trimmed}`] });
         } catch (error) {
             this.logger.error(`handleSpreadsheetLink failed: ${this.describeError(error)}`);
@@ -709,7 +707,11 @@ export class SupplyWizardHandler {
             `Пункт сдачи: ${updated.selectedDropOffName ?? updated.selectedDropOffId ?? '—'}`,
         ];
 
+        const searchDeadlineDate = this.resolveTimeslotSearchDeadline(effectiveTask);
+        const searchDeadlineLabel = this.formatTimeslotSearchDeadline(searchDeadlineDate);
+
         summaryLines.push(`Готовность к отгрузке: ${readyInDays} дн.`);
+        summaryLines.push(`Диапазон поиска: ${searchDeadlineLabel ? `до ${searchDeadlineLabel}` : '—'}`);
 
         if (task.taskId) {
             this.updateTaskContext(chatId, task.taskId, (context) => {
@@ -778,9 +780,11 @@ export class SupplyWizardHandler {
             const landingState = this.wizardStore.get(chatId) ?? updated;
             const landingText = this.view.renderLanding(landingState);
             const promptText = [
-                ...summaryLines,
-                '',
                 'Задача запущена. Проверяйте раздел «Мои задачи».',
+                '',
+                '<b>Указать конечную дату искомого тайм - слота пока нельзя. Бот ищет тайм-слоты в пределах 28 дней от сегодняшнего дня.</b>',
+                '',
+                ...summaryLines,
                 '',
                 landingText,
             ].join('\n');
@@ -1280,31 +1284,6 @@ export class SupplyWizardHandler {
             state,
             this.view.renderAuthApiKeyPrompt(),
             this.view.buildAuthApiKeyKeyboard(),
-        );
-    }
-
-    private async showAuthClientId(
-        ctx: Context,
-        chatId: string,
-        fallback: SupplyWizardState,
-    ): Promise<void> {
-        const updated =
-            this.updateWizardState(chatId, (current) => {
-                if (!current) return undefined;
-                return {
-                    ...current,
-                    stage: 'authClientId',
-                };
-            }) ?? fallback;
-
-        const masked = updated.pendingApiKey ? this.maskSecret(updated.pendingApiKey) : undefined;
-
-        await this.view.updatePrompt(
-            ctx,
-            chatId,
-            updated,
-            this.view.renderAuthClientIdPrompt(masked),
-            this.view.buildAuthClientIdKeyboard(),
         );
     }
 
@@ -2239,6 +2218,8 @@ export class SupplyWizardHandler {
             sku: item.sku,
         }));
 
+        const completionSearchDeadline = this.resolveTimeslotSearchDeadline(task);
+
         const entry: SupplyWizardOrderSummary = {
             id: orderId ? String(orderId) : operationId,
             orderId,
@@ -2252,6 +2233,7 @@ export class SupplyWizardHandler {
             timeslotLabel: timeslotLabel ?? undefined,
             items,
             createdAt: Date.now(),
+            searchDeadlineAt: completionSearchDeadline?.getTime()
         };
 
         const updated =
@@ -2337,7 +2319,6 @@ export class SupplyWizardHandler {
     private async processSpreadsheet(
         ctx: Context,
         chatId: string,
-        state: SupplyWizardState,
         source: { buffer?: Buffer; spreadsheet?: string; label: string },
     ): Promise<void> {
         const credentials = await this.resolveCredentials(chatId);
@@ -3499,15 +3480,6 @@ export class SupplyWizardHandler {
         return this.view.mapTimeslotOptions(response);
     }
 
-    private findSelectedDraftWarehouse(
-        state: SupplyWizardState,
-    ): SupplyWizardDraftWarehouseOption | undefined {
-        if (!state.selectedWarehouseId) {
-            return undefined;
-        }
-        return state.draftWarehouses.find((item) => item.warehouseId === state.selectedWarehouseId);
-    }
-
     private mapDropOffSearchResults(
         items: OzonFboWarehouseSearchItem[],
     ): SupplyWizardDropOffOption[] {
@@ -3515,7 +3487,7 @@ export class SupplyWizardHandler {
         const options: SupplyWizardDropOffOption[] = [];
 
         for (const item of items ?? []) {
-            if (!item || typeof item.warehouse_id !== 'number') {
+            if (!item) {
                 continue;
             }
 
@@ -3537,7 +3509,6 @@ export class SupplyWizardHandler {
     }
 
     private async pollDraftStatus(
-        chatId: string,
         operationId: string,
         credentials: OzonCredentials,
     ): Promise<
@@ -3967,7 +3938,7 @@ export class SupplyWizardHandler {
 
         this.latestDraftOperationId = operationId;
 
-        const pollResult = await this.pollDraftStatus(chatId, operationId, credentials);
+        const pollResult = await this.pollDraftStatus(operationId, credentials);
         await this.handleDraftPollResult(ctx, chatId, task, operationId, pollResult, retryAttempt);
     }
 
@@ -4030,7 +4001,7 @@ export class SupplyWizardHandler {
                 return true;
             }
 
-            const pollResult = await this.pollDraftStatus(chatId, normalizedOperationId, credentials);
+            const pollResult = await this.pollDraftStatus(normalizedOperationId, credentials);
             await this.handleDraftPollResult(
                 ctx,
                 chatId,
@@ -4302,10 +4273,6 @@ export class SupplyWizardHandler {
         this.taskAbortControllers.delete(taskId);
     }
 
-    private isAbortError(error: unknown): boolean {
-        return error instanceof Error && error.name === 'AbortError';
-    }
-
     private cloneTask(task: OzonSupplyTask): OzonSupplyTask {
         return {
             ...task,
@@ -4316,7 +4283,7 @@ export class SupplyWizardHandler {
 
     private async downloadTelegramFile(ctx: Context, fileId: string): Promise<Buffer> {
         const link = await ctx.telegram.getFileLink(fileId);
-        const url = typeof link === 'string' ? link : link.href ?? link.toString();
+        const url = link.href ?? link.toString();
         const response = await axios.get<ArrayBuffer>(url, {
             responseType: 'arraybuffer',
             timeout: 60_000,
@@ -4370,5 +4337,34 @@ export class SupplyWizardHandler {
         } catch (error) {
             return undefined;
         }
+    }
+
+    private formatTimeslotSearchDeadline(deadline: Date | undefined): string | undefined {
+        if (!deadline) {
+            return undefined;
+        }
+        return new Intl.DateTimeFormat('ru-RU', {
+            day: '2-digit',
+            month: '2-digit',
+        }).format(deadline);
+    }
+
+    private resolveTimeslotSearchDeadline(task: OzonSupplyTask): Date | undefined {
+        const parsedDeadline = this.parseSupplyDeadline(task.lastDay);
+        if (parsedDeadline) {
+            return parsedDeadline;
+        }
+        const fallback = new Date();
+        fallback.setUTCHours(23, 59, 59, 0);
+        fallback.setUTCDate(fallback.getUTCDate() + this.readyDaysMax);
+        return fallback;
+    }
+
+    private parseSupplyDeadline(value?: string): Date | undefined {
+        if (!value) {
+            return undefined;
+        }
+        const parsed = new Date(value);
+        return Number.isNaN(parsed.getTime()) ? undefined : parsed;
     }
 }

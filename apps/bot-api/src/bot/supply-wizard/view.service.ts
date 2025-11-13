@@ -102,7 +102,6 @@ export class SupplyWizardViewService {
 
         const pendingTasks = state.pendingTasks ?? [];
         if (pendingTasks.length) {
-            const current = pendingTasks[pendingTasks.length - 1];
             lines.push(
                 '',
                 `В обработке ${pendingTasks.length} ${pendingTasks.length === 1 ? 'задача' : 'задачи'}.`,
@@ -110,7 +109,6 @@ export class SupplyWizardViewService {
         }
 
         if (state.orders.length) {
-            const last = state.orders[state.orders.length - 1];
             lines.push(
                 '',
                 'Созданные поставки доступны в разделе «Мои поставки».',
@@ -257,12 +255,15 @@ export class SupplyWizardViewService {
     }
 
     renderOrderDetails(order: SupplyWizardOrderSummary): string {
+        const searchWindowLine = this.buildSearchDeadlineLine(order.searchDeadlineAt);
+
         const lines = [
             `Поставка №${order.orderId ?? order.operationId ?? order.id}`,
             '',
             order.clusterName ? `Кластер: ${order.clusterName}` : undefined,
             order.dropOffName ? `Пункт сдачи: ${order.dropOffName}` : undefined,
             order.warehouse ? `Склад: ${order.warehouse}` : undefined,
+            searchWindowLine,
             order.timeslotLabel
                 ? `Таймслот: ${order.timeslotLabel}`
                 : order.arrival
@@ -320,12 +321,18 @@ export class SupplyWizardViewService {
 
     buildTasksListKeyboard(state: SupplyWizardState): Array<Array<{ text: string; callback_data: string }>> {
         const pendingTasks = state.pendingTasks ?? [];
-        const rows = pendingTasks.map((task) => [
-            {
-                text: `${this.formatTaskName(task.operationId ?? task.id)}`,
-                callback_data: `wizard:tasks:details:${task.taskId ?? task.id}`,
-            },
-        ]);
+        const rows = pendingTasks.map((task) => {
+            const baseName =
+                this.formatTaskName(task.operationId ?? task.id) ?? task.operationId ?? task.id ?? '—';
+            const createdAt = this.formatCreatedAt(task.createdAt);
+            const label = createdAt ? `${baseName} · ${createdAt}` : baseName;
+            return [
+                {
+                    text: label,
+                    callback_data: `wizard:tasks:details:${task.taskId ?? task.id}`,
+                },
+            ];
+        });
         rows.push([{ text: 'Назад', callback_data: 'wizard:tasks:back' }]);
         return rows;
     }
@@ -334,6 +341,8 @@ export class SupplyWizardViewService {
         const limit = 20;
         const totalItems = task.items.length;
         const displayedItems = task.items.slice(0, limit);
+        const searchWindowLine = this.buildSearchDeadlineLine(task.searchDeadlineAt);
+        const createdLine = this.buildCreatedLine(task.createdAt);
 
         const lines = [
             `Задача ${this.formatTaskName(task.operationId ?? task.id)}`,
@@ -341,6 +350,8 @@ export class SupplyWizardViewService {
             task.dropOffName ? `Пункт сдачи: ${task.dropOffName}` : undefined,
             task.clusterName ? `Кластер: ${task.clusterName}` : undefined,
             task.warehouse ? `Склад: ${task.warehouse}` : undefined,
+            createdLine,
+            searchWindowLine,
             '',
             task.timeslotLabel ? `Таймслот: ${task.timeslotLabel}` : undefined,
             '\n',
@@ -363,11 +374,16 @@ export class SupplyWizardViewService {
     }
 
     renderSupplySuccess(order: SupplyWizardOrderSummary): string {
+        const searchWindowLine = this.buildSearchDeadlineLine(order.searchDeadlineAt);
+        const createdLine = this.buildCreatedLine(order.createdAt);
+
         const lines = [
             'Поставка создана ✅',
             `ID: ${order.orderId ?? order.id}`,
             order.timeslotLabel ? `Таймслот: ${order.timeslotLabel}` : order.arrival ? `Время отгрузки: ${order.arrival}` : undefined,
             order.warehouse ? `Склад: ${order.warehouse}` : undefined,
+            createdLine,
+            searchWindowLine,
         ].filter((value): value is string => Boolean(value));
         return lines.join('\n');
     }
@@ -952,7 +968,7 @@ export class SupplyWizardViewService {
     ): SupplyWizardWarehouseOption[] {
         const map = new Map<number, SupplyWizardWarehouseOption>();
         for (const entry of entries) {
-            if (!entry || typeof entry.warehouse_id !== 'number') continue;
+            if (!entry) continue;
             if (!map.has(entry.warehouse_id)) {
                 map.set(entry.warehouse_id, entry);
             }
@@ -999,6 +1015,46 @@ export class SupplyWizardViewService {
     private formatDropOffButtonLabel(option: SupplyWizardDropOffOption): string {
         const base = option.name ?? `Пункт ${option.warehouse_id}`;
         return this.truncate(`${base}`, 60);
+    }
+
+    private formatCreatedAt(value: number | undefined): string | undefined {
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+            return undefined;
+        }
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+            return undefined;
+        }
+        return new Intl.DateTimeFormat('ru-RU', {
+            day: '2-digit',
+            month: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+        }).format(date);
+    }
+
+    private buildCreatedLine(value: number | undefined): string | undefined {
+        const formatted = this.formatCreatedAt(value);
+        return formatted ? `Создана: ${formatted}` : undefined;
+    }
+
+    private buildSearchDeadlineLine(value: number | undefined): string {
+        const formatted = this.formatSearchDeadline(value);
+        return `Диапазон поиска: ${formatted ? `до ${formatted}` : '—'}`;
+    }
+
+    private formatSearchDeadline(value: number | undefined): string | undefined {
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+            return undefined;
+        }
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+            return undefined;
+        }
+        return new Intl.DateTimeFormat('ru-RU', {
+            day: '2-digit',
+            month: '2-digit',
+        }).format(date);
     }
 
     private formatDraftWarehouseButtonLabel(

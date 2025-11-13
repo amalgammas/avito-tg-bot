@@ -96,7 +96,7 @@ describe('SupplyTaskRunnerService', () => {
     });
   });
 
-  it('handleTaskEvent sends error notification on generic error', async () => {
+  it('handleTaskEvent sends error info to wizard channel on generic error', async () => {
     const result = {
       event: { type: OzonSupplyEventType.Error },
       message: 'oops',
@@ -105,8 +105,9 @@ describe('SupplyTaskRunnerService', () => {
 
     await (service as any).handleTaskEvent(sampleTask, result, {} as any);
 
-    expect(notifications.notifyUser).toHaveBeenCalledWith('chat-1', expect.stringContaining('oops'), {
-      parseMode: 'HTML',
+    expect(notifications.notifyWizard).toHaveBeenCalledWith(WizardEvent.SupplyError, {
+      lines: expect.arrayContaining([expect.stringContaining('task: task-1'), expect.stringContaining('oops')]),
     });
+    expect(notifications.notifyUser).not.toHaveBeenCalled();
   });
 });

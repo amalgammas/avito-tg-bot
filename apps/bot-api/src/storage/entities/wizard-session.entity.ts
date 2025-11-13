@@ -11,7 +11,7 @@ export class WizardSessionEntity {
   chatId!: string;
 
   @Column({ type: 'text', nullable: true })
-  taskId?: string;
+  taskId?: string | null;
 
   @Column({ type: 'text' })
   stage!: string;
