@@ -135,7 +135,7 @@ export class OzonSupplyService {
       for (const [taskId, state] of Array.from(taskMap.entries())) {
         this.ensureNotAborted(abortSignal);
         try {
-          const result = await this.processSingleTask(state, credentials, dropOffWarehouseId);
+          const result = await this.processSingleTask(state, credentials, dropOffWarehouseId, abortSignal);
           const eventType = result.event?.type ?? OzonSupplyEventType.Error;
 
           if (eventType === OzonSupplyEventType.Error && /Склад отгрузки/.test(result.message ?? '')) {
@@ -388,7 +388,7 @@ export class OzonSupplyService {
     this.ensureNotAborted(abortSignal);
     let info: OzonDraftStatus;
     try {
-      info = await this.ozonApi.getDraftInfo(task.draftOperationId, credentials);
+      info = await this.ozonApi.getDraftInfo(task.draftOperationId, credentials, abortSignal);
     } catch (error) {
       const axiosError = error as AxiosError<any>;
       const response = axiosError?.response;
@@ -462,6 +462,7 @@ export class OzonSupplyService {
           timeslot,
         },
         credentials,
+        abortSignal,
       );
 
       if (operationId) {
@@ -519,6 +520,7 @@ export class OzonSupplyService {
         type: 'CREATE_TYPE_CROSSDOCK',
       },
       credentials,
+      abortSignal,
     );
     this.ensureNotAborted(abortSignal);
 
@@ -553,6 +555,7 @@ export class OzonSupplyService {
         dateTo: window.dateToIso,
       },
       credentials,
+      abortSignal,
     );
     this.ensureNotAborted(abortSignal);
 

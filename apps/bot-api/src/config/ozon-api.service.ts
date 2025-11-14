@@ -222,11 +222,15 @@ export class OzonApiService {
   async request<T = unknown>(
     config: AxiosRequestConfig,
     credentials?: OzonCredentials,
+    abortSignal?: AbortSignal,
+    options?: { retryDelayMs?: number },
   ): Promise<AxiosResponse<T>> {
     const creds = credentials ?? this.defaultCredentials;
     if (!creds) {
       throw new Error('Ozon credentials are not configured');
     }
+
+    this.ensureNotAborted(abortSignal);
 
     const url = this.resolveUrl(this.baseUrl, config.url);
     const method = (config.method ?? 'GET').toUpperCase();
@@ -236,6 +240,7 @@ export class OzonApiService {
       timeout: this.httpTimeoutMs,
       ...config,
       url,
+      signal: config.signal ?? abortSignal,
       headers: {
         ...(config.headers ?? {}),
         'Client-Id': creds.clientId,
@@ -245,6 +250,7 @@ export class OzonApiService {
 
     let attempt = 0;
     while (true) {
+      this.ensureNotAborted(abortSignal);
       const startedAt = Date.now();
       const requestBodyLog = this.describeBody(finalConfig.data);
       try {
@@ -259,6 +265,9 @@ export class OzonApiService {
         this.logger.debug(`← [${requestId}] ${response.status} ${response.statusText} in ${duration}ms`);
         return response;
       } catch (err) {
+        if (this.isAbortError(err)) {
+          throw this.createAbortError();
+        }
         const duration = Date.now() - startedAt;
         const errorSummary = this.describeError(err);
         this.logger.error(
@@ -269,23 +278,36 @@ export class OzonApiService {
         if (!shouldRetry) throw err;
 
         attempt++;
-        const delay = this.retryBaseDelayMs;
+        const delay = options?.retryDelayMs ?? this.retryBaseDelayMs;
         this.logger.warn(`↻ [${requestId}] retry ${attempt + 1}/${this.retryAttempts} in ~${delay}ms`);
-        await this.sleep(delay);
+        await this.sleep(delay, abortSignal);
       }
     }
   }
 
-  async post<T = unknown>(url: string, data?: any, cfg?: AxiosRequestConfig, credentials?: OzonCredentials) {
+  async post<T = unknown>(
+    url: string,
+    data?: any,
+    cfg?: AxiosRequestConfig,
+    credentials?: OzonCredentials,
+    abortSignal?: AbortSignal,
+    options?: { retryDelayMs?: number },
+  ) {
     const headers =
       data && typeof data === 'object' && !(data instanceof URLSearchParams)
         ? { 'Content-Type': 'application/json', ...(cfg?.headers ?? {}) }
         : cfg?.headers;
-    return this.request<T>({ method: 'POST', url, data, ...(cfg ?? {}), headers }, credentials);
+    return this.request<T>({ method: 'POST', url, data, ...(cfg ?? {}), headers }, credentials, abortSignal, options);
   }
 
-  async get<T = unknown>(url: string, cfg?: AxiosRequestConfig, credentials?: OzonCredentials) {
-    return this.request<T>({ method: 'GET', url, ...(cfg ?? {}) }, credentials);
+  async get<T = unknown>(
+    url: string,
+    cfg?: AxiosRequestConfig,
+    credentials?: OzonCredentials,
+    abortSignal?: AbortSignal,
+    options?: { retryDelayMs?: number },
+  ) {
+    return this.request<T>({ method: 'GET', url, ...(cfg ?? {}) }, credentials, abortSignal, options);
   }
 
   /** Проверка ключей: запрашиваем информацию о продавце. */
@@ -459,6 +481,7 @@ export class OzonApiService {
       type: 'CREATE_TYPE_DIRECT' | 'CREATE_TYPE_CROSSDOCK';
     },
     credentials?: OzonCredentials,
+    abortSignal?: AbortSignal,
   ): Promise<string | undefined> {
     const response = await this.post<{ operation_id?: string }>(
       '/v1/draft/create',
@@ -470,13 +493,14 @@ export class OzonApiService {
       },
       undefined,
       credentials,
+      abortSignal,
     );
 
     this.logger.debug(
       `[OzonApiService] createDraft response: ${this.stringifySafe(response.data) ?? 'empty body'} *** ${payload}`,
     );
 
-    await this.sleep(30_000);
+    await this.sleep(30_000, abortSignal);
 
     return response.data?.operation_id;
   }
@@ -484,12 +508,15 @@ export class OzonApiService {
   async getDraftInfo(
     operationId: string,
     credentials?: OzonCredentials,
+    abortSignal?: AbortSignal,
   ): Promise<OzonDraftStatus> {
     const response = await this.post<OzonDraftStatus>(
       '/v1/draft/create/info',
       { operation_id: operationId },
       undefined,
       credentials,
+      abortSignal,
+      { retryDelayMs: 30_000 },
     );
     this.logger.debug(
       `[OzonApiService] draftInfo response: ${this.stringifySafe(response.data) ?? 'empty body'}`,
@@ -505,6 +532,7 @@ export class OzonApiService {
       dateTo: string;
     },
     credentials?: OzonCredentials,
+    abortSignal?: AbortSignal,
   ): Promise<OzonTimeslotResponse> {
     const response = await this.post<OzonTimeslotResponse>(
       '/v1/draft/timeslot/info',
@@ -516,9 +544,8 @@ export class OzonApiService {
       },
       undefined,
       credentials,
+      abortSignal,
     );
-
-    await this.sleep(30_000);
 
     return response.data;
   }
@@ -530,6 +557,7 @@ export class OzonApiService {
       timeslot: OzonDraftTimeslot;
     },
     credentials?: OzonCredentials,
+    abortSignal?: AbortSignal,
   ): Promise<string | undefined> {
 
 
@@ -546,6 +574,7 @@ export class OzonApiService {
       },
       undefined,
       credentials,
+      abortSignal,
     );
 
     return response.data?.operation_id;
@@ -746,7 +775,57 @@ export class OzonApiService {
     return undefined;
   }
 
-  private sleep(ms: number) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  private ensureNotAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      throw this.createAbortError();
+    }
+  }
+
+  private createAbortError(): Error {
+    const error = new Error('Request aborted by signal');
+    error.name = 'AbortError';
+    return error;
+  }
+
+  private isAbortError(err: unknown): boolean {
+    if (!err) {
+      return false;
+    }
+    if (err instanceof Error && err.name === 'AbortError') {
+      return true;
+    }
+    if (isAxiosError(err) && err.code === 'ERR_CANCELED') {
+      return true;
+    }
+    return typeof (err as any)?.code === 'string' && (err as any).code === 'ERR_CANCELED';
+  }
+
+  private sleep(ms: number, signal?: AbortSignal) {
+    if (!signal) {
+      return new Promise<void>((resolve) => setTimeout(() => resolve(undefined), ms));
+    }
+
+    if (signal.aborted) {
+      return Promise.reject(this.createAbortError());
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      let timeout: ReturnType<typeof setTimeout>;
+
+      const onAbort = () => {
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+        signal.removeEventListener('abort', onAbort);
+        reject(this.createAbortError());
+      };
+
+      timeout = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(undefined);
+      }, ms);
+
+      signal.addEventListener('abort', onAbort);
+    });
   }
 }

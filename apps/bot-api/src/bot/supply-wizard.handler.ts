@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { AxiosError } from 'axios';
 import { Injectable, Logger } from '@nestjs/common';
 import { Context } from 'telegraf';
 
@@ -188,7 +189,10 @@ export class SupplyWizardHandler {
                 this.view.buildUploadKeyboard(),
             );
             const buffer = await this.downloadTelegramFile(ctx, document.file_id);
-            await this.processSpreadsheet(ctx, chatId, { buffer, label: document.file_name ?? 'файл' });
+            const processed = await this.processSpreadsheet(ctx, chatId, { buffer, label: document.file_name ?? 'файл' });
+            if (!processed) {
+                return;
+            }
             await this.notifications.notifyWizard(WizardEvent.DocumentUploaded, {
                 ctx,
                 lines: [
@@ -318,7 +322,10 @@ export class SupplyWizardHandler {
                 'Загружаю таблицу, подождите...',
                 this.view.buildUploadKeyboard(),
             );
-            await this.processSpreadsheet(ctx, chatId, { spreadsheet: trimmed, label: trimmed });
+            const processed = await this.processSpreadsheet(ctx, chatId, { spreadsheet: trimmed, label: trimmed });
+            if (!processed) {
+                return;
+            }
             await this.notifications.notifyWizard(WizardEvent.SpreadsheetLink, { ctx, lines: [`link: ${trimmed}`] });
         } catch (error) {
             this.logger.error(`handleSpreadsheetLink failed: ${this.describeError(error)}`);
@@ -2320,23 +2327,31 @@ export class SupplyWizardHandler {
         ctx: Context,
         chatId: string,
         source: { buffer?: Buffer; spreadsheet?: string; label: string },
-    ): Promise<void> {
+    ): Promise<boolean> {
         const credentials = await this.resolveCredentials(chatId);
         if (!credentials) {
             await ctx.reply('🔐 Сначала сохраните ключи через /start.');
-            return;
+            return false;
         }
 
-        const taskMap = await this.supplyService.prepareTasks({
-            credentials,
-            buffer: source.buffer,
-            spreadsheet: source.spreadsheet,
-        });
+        let taskMap;
+        try {
+            taskMap = await this.supplyService.prepareTasks({
+                credentials,
+                buffer: source.buffer,
+                spreadsheet: source.spreadsheet,
+            });
+        } catch (error) {
+            if (await this.handleOzonAuthFailure(ctx, chatId, error)) {
+                return false;
+            }
+            throw error;
+        }
 
         const tasks = [...taskMap.values()];
         if (!tasks.length) {
             await ctx.reply('В документе не найдены товары. Проверьте колонки «Артикул» и «Количество».');
-            return;
+            return true;
         }
 
         const clonedTasks = tasks.map((task) => this.cloneTask(task));
@@ -2350,7 +2365,14 @@ export class SupplyWizardHandler {
             task.selectedTimeslot = undefined;
         }
 
-        await this.process.resolveSkus(clonedTasks[0], credentials);
+        try {
+            await this.process.resolveSkus(clonedTasks[0], credentials);
+        } catch (error) {
+            if (await this.handleOzonAuthFailure(ctx, chatId, error)) {
+                return false;
+            }
+            throw error;
+        }
 
         const summary = this.view.formatItemsSummary(clonedTasks[0]);
         const createdContexts: SupplyWizardTaskContext[] = [];
@@ -2385,14 +2407,17 @@ export class SupplyWizardHandler {
             const response = await this.ozonApi.listClusters({}, credentials);
             clusters = response.clusters;
         } catch (error) {
+            if (await this.handleOzonAuthFailure(ctx, chatId, error)) {
+                return false;
+            }
             this.logger.error(`listClusters failed: ${this.describeError(error)}`);
             await ctx.reply('Не удалось получить список кластеров. Попробуйте позже.');
-            return;
+            return true;
         }
 
         if (!clusters.length) {
             await ctx.reply('Ozon вернул пустой список кластеров. Попробуйте позже.');
-            return;
+            return true;
         }
 
         const options = this.view.buildOptions(clusters);
@@ -2426,7 +2451,7 @@ export class SupplyWizardHandler {
 
         if (!updated) {
             await ctx.reply('Мастер закрыт. Запустите заново.');
-            return;
+            return true;
         }
 
         const promptText = [
@@ -2442,6 +2467,8 @@ export class SupplyWizardHandler {
             this.view.buildDropOffQueryKeyboard(),
             { parseMode: 'HTML' },
         );
+
+        return true;
     }
 
     private async onClusterStart(
@@ -3511,6 +3538,7 @@ export class SupplyWizardHandler {
     private async pollDraftStatus(
         operationId: string,
         credentials: OzonCredentials,
+        abortSignal?: AbortSignal,
     ): Promise<
         | { status: 'success'; draftId?: number; errorDetails?: string; draftInfo?: OzonDraftStatus }
         | { status: 'failed' | 'expired'; errorDetails?: string; draftInfo?: OzonDraftStatus }
@@ -3520,8 +3548,11 @@ export class SupplyWizardHandler {
         let lastInfo: OzonDraftStatus | undefined;
 
         for (let attempt = 0; attempt < this.draftPollMaxAttempts; attempt++) {
+            if (abortSignal?.aborted) {
+                throw this.createAbortError();
+            }
             try {
-                const info = await this.ozonApi.getDraftInfo(operationId, credentials);
+                const info = await this.ozonApi.getDraftInfo(operationId, credentials, abortSignal);
                 lastInfo = info;
 
                 const status = info?.status;
@@ -3552,12 +3583,15 @@ export class SupplyWizardHandler {
 
                 await this.sleep(this.draftPollIntervalMs);
             } catch (error) {
+                if (this.isAbortError(error)) {
+                    throw error;
+                }
                 const message = this.describeError(error);
                 this.logger.warn(`getDraftInfo failed для ${operationId}: ${message}`);
                 if (attempt === this.draftPollMaxAttempts - 1) {
                     return { status: 'error', message, draftInfo: lastInfo };
                 }
-                await this.sleep(this.draftPollIntervalMs);
+                await this.sleep(this.draftPollIntervalMs, abortSignal);
             }
         }
 
@@ -3844,49 +3878,58 @@ export class SupplyWizardHandler {
             return;
         }
 
-        const existingOperationId = this.resolveKnownDraftOperationId(state);
-        if (existingOperationId) {
-            const handled = await this.tryReuseExistingDraft(
-                ctx,
-                chatId,
-                task,
-                existingOperationId,
-                credentials,
-                retryAttempt,
-            );
-            if (handled) {
+        if (!task.taskId) {
+            this.logger.warn(`[${chatId}] ensureDraftCreated: taskId не задан`);
+            return;
+        }
+
+        const abortController = this.registerAbortController(chatId, task.taskId);
+
+        try {
+            const existingOperationId = this.resolveKnownDraftOperationId(state);
+            if (existingOperationId) {
+                const handled = await this.tryReuseExistingDraft(
+                    ctx,
+                    chatId,
+                    task,
+                    existingOperationId,
+                    credentials,
+                    retryAttempt,
+                    abortController.signal,
+                );
+                if (handled) {
+                    return;
+                }
+            }
+
+            let items: Array<{ sku: number; quantity: number }>;
+            try {
+                items = this.process.buildDraftItems(task);
+            } catch (error) {
+                const message = this.describeError(error);
+                await this.handleDraftCreationFailure(ctx, chatId, message);
                 return;
             }
-        }
 
-        let items: Array<{ sku: number; quantity: number }>;
-        try {
-            items = this.process.buildDraftItems(task);
-        } catch (error) {
-            const message = this.describeError(error);
-            await this.handleDraftCreationFailure(ctx, chatId, message);
-            return;
-        }
+            const started = this.updateWizardState(chatId, (current) => {
+                if (!current) return undefined;
+                if (current.draftStatus === 'creating') {
+                    return current;
+                }
+                return {
+                    ...current,
+                    draftStatus: 'creating',
+                    draftError: undefined,
+                    draftOperationId: undefined,
+                    draftId: undefined,
+                    draftCreatedAt: undefined,
+                    draftExpiresAt: undefined,
+                };
+            });
 
-        const started = this.updateWizardState(chatId, (current) => {
-            if (!current) return undefined;
-            if (current.draftStatus === 'creating') {
-                return current;
+            if (!started || started.draftStatus !== 'creating') {
+                return;
             }
-            return {
-                ...current,
-                draftStatus: 'creating',
-                draftError: undefined,
-                draftOperationId: undefined,
-                draftId: undefined,
-                draftCreatedAt: undefined,
-                draftExpiresAt: undefined,
-            };
-        });
-
-        if (!started || started.draftStatus !== 'creating') {
-            return;
-        }
 
         await this.view.updatePrompt(
             ctx,
@@ -3896,50 +3939,63 @@ export class SupplyWizardHandler {
             this.view.withCancel(),
         );
 
-        let operationId: string | undefined;
-        try {
-            operationId = await this.ozonApi.createDraft(
-                {
-                    clusterIds: [clusterId],
-                    dropOffPointWarehouseId: dropOffId,
-                    items,
-                    type: 'CREATE_TYPE_CROSSDOCK',
-                },
-                credentials,
-            );
-        } catch (error) {
-            const message = this.describeError(error);
-            this.logger.error(`createDraft failed: ${message}`);
-            await this.handleDraftCreationFailure(ctx, chatId, message);
-            return;
-        }
-
-        if (!operationId) {
-            await this.handleDraftCreationFailure(ctx, chatId, 'Сервис вернул пустой operation_id.');
-            return;
-        }
-
-        const withOperation = this.updateWizardState(chatId, (current) => {
-            if (!current) return undefined;
-            if (current.draftStatus !== 'creating') {
-                return current;
+            let operationId: string | undefined;
+            try {
+                operationId = await this.ozonApi.createDraft(
+                    {
+                        clusterIds: [clusterId],
+                        dropOffPointWarehouseId: dropOffId,
+                        items,
+                        type: 'CREATE_TYPE_CROSSDOCK',
+                    },
+                    credentials,
+                    abortController.signal,
+                );
+            } catch (error) {
+                if (this.isAbortError(error)) {
+                    throw error;
+                }
+                const message = this.describeError(error);
+                this.logger.error(`createDraft failed: ${message}`);
+                await this.handleDraftCreationFailure(ctx, chatId, message);
+                return;
             }
-            return {
-                ...current,
-                draftOperationId: operationId,
-                draftCreatedAt: Date.now(),
-                draftExpiresAt: Date.now() + this.draftLifetimeMs,
-            };
-        });
 
-        if (!withOperation) {
-            return;
+            if (!operationId) {
+                await this.handleDraftCreationFailure(ctx, chatId, 'Сервис вернул пустой operation_id.');
+                return;
+            }
+
+            const withOperation = this.updateWizardState(chatId, (current) => {
+                if (!current) return undefined;
+                if (current.draftStatus !== 'creating') {
+                    return current;
+                }
+                return {
+                    ...current,
+                    draftOperationId: operationId,
+                    draftCreatedAt: Date.now(),
+                    draftExpiresAt: Date.now() + this.draftLifetimeMs,
+                };
+            });
+
+            if (!withOperation) {
+                return;
+            }
+
+            this.latestDraftOperationId = operationId;
+
+            const pollResult = await this.pollDraftStatus(operationId, credentials, abortController.signal);
+            await this.handleDraftPollResult(ctx, chatId, task, operationId, pollResult, retryAttempt);
+        } catch (error) {
+            if (this.isAbortError(error)) {
+                this.logger.log(`[${chatId}] создание черновика остановлено пользователем`);
+                return;
+            }
+            throw error;
+        } finally {
+            this.clearAbortController(task.taskId);
         }
-
-        this.latestDraftOperationId = operationId;
-
-        const pollResult = await this.pollDraftStatus(operationId, credentials);
-        await this.handleDraftPollResult(ctx, chatId, task, operationId, pollResult, retryAttempt);
     }
 
     private resolveKnownDraftOperationId(state: SupplyWizardState): string | undefined {
@@ -3957,6 +4013,7 @@ export class SupplyWizardHandler {
         operationId: string,
         credentials: OzonCredentials,
         retryAttempt: number,
+        abortSignal?: AbortSignal,
     ): Promise<boolean> {
         const normalizedOperationId = operationId.trim();
         if (!normalizedOperationId) {
@@ -3964,7 +4021,7 @@ export class SupplyWizardHandler {
         }
 
         try {
-            const info = await this.ozonApi.getDraftInfo(normalizedOperationId, credentials);
+            const info = await this.ozonApi.getDraftInfo(normalizedOperationId, credentials, abortSignal);
             const status = info?.status;
 
             if (status === 'CALCULATION_STATUS_SUCCESS') {
@@ -4001,7 +4058,7 @@ export class SupplyWizardHandler {
                 return true;
             }
 
-            const pollResult = await this.pollDraftStatus(normalizedOperationId, credentials);
+            const pollResult = await this.pollDraftStatus(normalizedOperationId, credentials, abortSignal);
             await this.handleDraftPollResult(
                 ctx,
                 chatId,
@@ -4012,6 +4069,9 @@ export class SupplyWizardHandler {
             );
             return true;
         } catch (error) {
+            if (this.isAbortError(error)) {
+                throw error;
+            }
             this.logger.warn(
                 `check existing draft ${normalizedOperationId} failed: ${this.describeError(error)}`,
             );
@@ -4169,8 +4229,44 @@ export class SupplyWizardHandler {
         return formatter.format(new Date(timestamp));
     }
 
-    private async sleep(ms: number): Promise<void> {
-        await new Promise((resolve) => setTimeout(resolve, ms));
+    private async sleep(ms: number, signal?: AbortSignal): Promise<void> {
+        if (!signal) {
+            await new Promise((resolve) => setTimeout(resolve, ms));
+            return;
+        }
+
+        if (signal.aborted) {
+            throw this.createAbortError();
+        }
+
+        await new Promise<void>((resolve, reject) => {
+            let timeout: ReturnType<typeof setTimeout>;
+
+            const onAbort = () => {
+                if (timeout) {
+                    clearTimeout(timeout);
+                }
+                signal.removeEventListener('abort', onAbort);
+                reject(this.createAbortError());
+            };
+
+            timeout = setTimeout(() => {
+                signal.removeEventListener('abort', onAbort);
+                resolve();
+            }, ms);
+
+            signal.addEventListener('abort', onAbort);
+        });
+    }
+
+    private createAbortError(): Error {
+        const error = new Error('Операция отменена пользователем');
+        error.name = 'AbortError';
+        return error;
+    }
+
+    private isAbortError(error: unknown): boolean {
+        return error instanceof Error && error.name === 'AbortError';
     }
 
     private async sendSupplyEvent(ctx: Context, result: OzonSupplyProcessResult): Promise<void> {
@@ -4320,6 +4416,54 @@ export class SupplyWizardHandler {
         }
 
         return undefined;
+    }
+
+    private async handleOzonAuthFailure(ctx: Context, chatId: string, error: unknown): Promise<boolean> {
+        if (!this.isApiKeyDeactivatedError(error)) {
+            return false;
+        }
+
+        this.logger.warn(`[${chatId}] clearing credentials: api key deactivated`);
+
+        await this.credentialsStore.clear(chatId);
+        this.wizardStore.clear(chatId);
+        await this.sessions.deleteChatState(chatId);
+
+        await ctx.reply(
+            '❌ Ваши ключи не прошли проверку Ozon. Пересоздайте Client-Id и Api-Key и повторите настройку через /start.',
+        );
+
+        await this.notifications.notifyWizard(WizardEvent.AuthCleared, {
+            ctx,
+            lines: ['auto-clear: api key deactivated'],
+        });
+
+        await this.start(ctx);
+        return true;
+    }
+
+    private isApiKeyDeactivatedError(error: unknown): boolean {
+        if (!error) {
+            return false;
+        }
+
+        const axiosError = error as AxiosError<{ code?: number; message?: string }>;
+        if (!(axiosError as any)?.isAxiosError) {
+            return false;
+        }
+
+        const status = axiosError.response?.status;
+        if (status !== 403) {
+            return false;
+        }
+
+        const code = axiosError.response?.data?.code;
+        if (code === 7) {
+            return true;
+        }
+
+        const message = axiosError.response?.data?.message?.toLowerCase();
+        return Boolean(message && message.includes('api-key is deactivated'));
     }
 
     private stringifySafe(value: unknown): string | undefined {
