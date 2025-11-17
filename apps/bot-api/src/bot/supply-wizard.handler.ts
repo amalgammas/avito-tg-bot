@@ -36,6 +36,7 @@ import { NotificationService } from './services/notification.service';
 import { SupplyProcessingCoordinatorService } from './services/supply-processing-coordinator.service';
 import { WizardEvent } from './services/wizard-event.types';
 import { SupplyWizardViewService } from './supply-wizard/view.service';
+import { SupplyTaskAbortService } from './services/supply-task-abort.service';
 
 @Injectable()
 export class SupplyWizardHandler {
@@ -55,8 +56,6 @@ export class SupplyWizardHandler {
     private latestDraftWarehouses: SupplyWizardDraftWarehouseOption[] = [];
     private latestDraftId?: number;
     private latestDraftOperationId?: string;
-    private readonly taskAbortControllers = new Map<string, { controller: AbortController; chatId: string }>();
-
     constructor(
         private readonly credentialsStore: UserCredentialsStore,
         private readonly sheetService: OzonSheetService,
@@ -69,6 +68,7 @@ export class SupplyWizardHandler {
         private readonly notifications: NotificationService,
         private readonly view: SupplyWizardViewService,
         private readonly orderStore: SupplyOrderStore,
+        private readonly taskAbortService: SupplyTaskAbortService,
     ) {}
 
     getState(chatId: string): SupplyWizardState | undefined {
@@ -4338,36 +4338,16 @@ export class SupplyWizardHandler {
     }
 
     private registerAbortController(chatId: string, taskId: string): AbortController {
-        const existing = this.taskAbortControllers.get(taskId);
-        if (existing) {
-            existing.controller.abort();
-        }
         const controller = new AbortController();
-        this.taskAbortControllers.set(taskId, { controller, chatId });
-        return controller;
+        return this.taskAbortService.register(chatId, taskId, controller);
     }
 
     private abortActiveTask(chatId: string, taskId?: string): void {
-        if (taskId) {
-            const entry = this.taskAbortControllers.get(taskId);
-            if (!entry || entry.chatId !== chatId) {
-                return;
-            }
-            entry.controller.abort();
-            this.taskAbortControllers.delete(taskId);
-            return;
-        }
-
-        for (const [key, entry] of this.taskAbortControllers.entries()) {
-            if (entry.chatId === chatId) {
-                entry.controller.abort();
-                this.taskAbortControllers.delete(key);
-            }
-        }
+        this.taskAbortService.abort(chatId, taskId);
     }
 
     private clearAbortController(taskId: string): void {
-        this.taskAbortControllers.delete(taskId);
+        this.taskAbortService.clear(taskId);
     }
 
     private cloneTask(task: OzonSupplyTask): OzonSupplyTask {

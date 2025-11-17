@@ -345,7 +345,7 @@ export class SupplyWizardViewService {
         const createdLine = this.buildCreatedLine(task.createdAt);
 
         const lines = [
-            `Задача ${this.formatTaskName(task.operationId ?? task.id)}`,
+            `Задача ${this.formatTaskName(task.operationId || task.id)}`,
             '\n',
             task.dropOffName ? `Пункт сдачи: ${task.dropOffName}` : undefined,
             task.clusterName ? `Кластер: ${task.clusterName}` : undefined,

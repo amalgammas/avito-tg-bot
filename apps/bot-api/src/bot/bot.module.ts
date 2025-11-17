@@ -21,6 +21,7 @@ import { SupplyTaskOrchestratorService } from './services/supply-task-orchestrat
 import { SupplyProcessingCoordinatorService } from './services/supply-processing-coordinator.service';
 import { WizardNotifierService } from './services/wizard-notifier.service';
 import { NotificationService } from './services/notification.service';
+import { SupplyTaskAbortService } from './services/supply-task-abort.service';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { NotificationService } from './services/notification.service';
     WizardNotifierService,
     UserSessionService,
     NotificationService,
+    SupplyTaskAbortService,
   ],
 })
 export class BotModule {}

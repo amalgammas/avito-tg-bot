@@ -10,6 +10,7 @@ import { NotificationService } from './services/notification.service';
 import { WizardEvent } from './services/wizard-event.types';
 import { OzonCredentials } from '@bot/config/ozon-api.service';
 import { SupplyProcessService, SupplyOrderDetails } from './services/supply-process.service';
+import { SupplyTaskAbortService } from './services/supply-task-abort.service';
 
 @Injectable()
 export class SupplyTaskRunnerService implements OnApplicationBootstrap {
@@ -26,6 +27,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     private readonly supplyService: OzonSupplyService,
     private readonly notifications: NotificationService,
     private readonly process: SupplyProcessService,
+    private readonly taskAbortService: SupplyTaskAbortService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -78,13 +80,14 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       sample.forEach((task, index) => {
         const parts: string[] = [];
         parts.push(`#${index + 1}`);
-        parts.push(`chat=${task.chatId}`);
-        const taskLabel = task.taskId ?? task.id;
-        if (taskLabel) parts.push(`task=${taskLabel}`);
-        if (task.dropOffName) parts.push(`drop-off=${task.dropOffName}`);
-        if (task.warehouseName) parts.push(`склад=${task.warehouseName}`);
-        if (task.readyInDays !== undefined) parts.push(`готовность=${task.readyInDays}д`);
-        lines.push(parts.join(' • '));
+        parts.push(`chat: ${task.chatId}`);
+        const taskLabel = this.formatTaskName(task.taskId ?? task.id);
+        if (taskLabel) parts.push(`task: ${taskLabel}`);
+        if (task.dropOffName) parts.push(`drop-off: ${task.dropOffName}`);
+        if (task.clusterName) parts.push(`cluster: ${task.clusterName}`);
+        if (task.warehouseName) parts.push(`склад: ${task.warehouseName}`);
+        if (task.readyInDays !== undefined) parts.push(`готовность ${task.readyInDays}д`);
+        lines.push(parts.join('\n • '));
       });
       if (tasks.length > sample.length) {
         lines.push(`… и ещё ${tasks.length - sample.length} задач`);
@@ -113,23 +116,34 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     const clonedTask = this.cloneTask(record.taskPayload);
     const readyInDays = record.readyInDays ?? 0;
 
+    const taskKey = record.taskId ?? record.id ?? `task-${record.chatId}-${Date.now()}`;
+    const abortController = new AbortController();
+    this.taskAbortService.register(record.chatId, taskKey, abortController);
+
     try {
       await this.supplyService.runSingleTask(clonedTask, {
         credentials,
         readyInDays,
         dropOffWarehouseId: record.dropOffId,
         skipDropOffValidation: true,
+        abortSignal: abortController.signal,
         onEvent: async (result) => this.handleTaskEvent(record, result, credentials),
       });
     } catch (error) {
-      this.logger.error(`Task ${record.taskId ?? record.id} resume failed: ${this.describeError(error)}`);
-      await this.notifications.notifyWizard(WizardEvent.TaskResumeFailed, {
-        lines: [
-          `task: ${record.taskId ?? record.id}`,
-          `chat: ${record.chatId}`,
-          this.describeError(error),
-        ],
-      });
+      if (this.isAbortError(error)) {
+        this.logger.warn(`Task ${taskKey} aborted`);
+      } else {
+        this.logger.error(`Task ${record.taskId ?? record.id} resume failed: ${this.describeError(error)}`);
+        await this.notifications.notifyWizard(WizardEvent.TaskResumeFailed, {
+          lines: [
+            `task: ${record.taskId ?? record.id}`,
+            `chat: ${record.chatId}`,
+            this.describeError(error),
+          ],
+        });
+      }
+    } finally {
+      this.taskAbortService.clear(taskKey);
     }
   }
 
@@ -234,6 +248,13 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     return String(error);
   }
 
+    private formatTaskName(name: string | undefined): string | undefined {
+        if (name) {
+            const names = name.split('-');
+            return names[1];
+        }
+    }
+
   private formatSupplyCreated(entity: SupplyOrderEntity): string {
     const timeslotLabel =
       entity.arrival ?? this.process.formatTimeslotRange(entity.timeslotFrom, entity.timeslotTo);
@@ -249,4 +270,8 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     return lines.join('\n');
   }
 
+
+  private isAbortError(error: unknown): boolean {
+    return error instanceof Error && error.name === 'AbortError';
+  }
 }
