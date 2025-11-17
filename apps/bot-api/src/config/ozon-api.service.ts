@@ -1,12 +1,7 @@
 import { HttpService } from '@nestjs/axios';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import {
-  AxiosError,
-  AxiosRequestConfig,
-  AxiosResponse,
-  isAxiosError,
-} from 'axios';
+import { AxiosError, AxiosRequestConfig, AxiosResponse, GenericAbortSignal, isAxiosError } from 'axios';
 
 export interface OzonCredentials {
   clientId: string;
@@ -235,12 +230,13 @@ export class OzonApiService {
     const url = this.resolveUrl(this.baseUrl, config.url);
     const method = (config.method ?? 'GET').toUpperCase();
     const requestId = `${method} ${url ?? '<relative>'}`;
+    const { signal: resolvedSignal, cleanupSignal } = this.composeAbortSignal(config.signal, abortSignal);
 
     const finalConfig: AxiosRequestConfig = {
       timeout: this.httpTimeoutMs,
       ...config,
       url,
-      signal: config.signal ?? abortSignal,
+      signal: resolvedSignal,
       headers: {
         ...(config.headers ?? {}),
         'Client-Id': creds.clientId,
@@ -249,39 +245,43 @@ export class OzonApiService {
     };
 
     let attempt = 0;
-    while (true) {
-      this.ensureNotAborted(abortSignal);
-      const startedAt = Date.now();
-      const requestBodyLog = this.describeBody(finalConfig.data);
-      try {
-        this.logger.debug(
-          `→ [${requestId}] attempt ${attempt + 1}/${this.retryAttempts} headers=${this.describeHeaders(
-            finalConfig.headers,
-          )} body=${requestBodyLog}`,
-        );
+    try {
+      while (true) {
+        this.ensureNotAborted(abortSignal);
+        const startedAt = Date.now();
+        const requestBodyLog = this.describeBody(finalConfig.data);
+        try {
+          this.logger.debug(
+            `→ [${requestId}] attempt ${attempt + 1}/${this.retryAttempts} headers=${this.describeHeaders(
+              finalConfig.headers,
+            )} body=${requestBodyLog}`,
+          );
 
-        const response = await this.http.axiosRef.request<T>(finalConfig);
-        const duration = Date.now() - startedAt;
-        this.logger.debug(`← [${requestId}] ${response.status} ${response.statusText} in ${duration}ms`);
-        return response;
-      } catch (err) {
-        if (this.isAbortError(err)) {
-          throw this.createAbortError();
+          const response = await this.http.axiosRef.request<T>(finalConfig);
+          const duration = Date.now() - startedAt;
+          this.logger.debug(`← [${requestId}] ${response.status} ${response.statusText} in ${duration}ms`);
+          return response;
+        } catch (err) {
+          if (this.isAbortError(err)) {
+            throw this.createAbortError();
+          }
+          const duration = Date.now() - startedAt;
+          const errorSummary = this.describeError(err);
+          this.logger.error(
+            `× [${requestId}] failed in ${duration}ms: ${errorSummary} body=${requestBodyLog}${this.describeErrorPayload(err)}`,
+          );
+
+          const shouldRetry = this.shouldRetry(err) && attempt < this.retryAttempts - 1;
+          if (!shouldRetry) throw err;
+
+          attempt++;
+          const delay = options?.retryDelayMs ?? this.retryBaseDelayMs;
+          this.logger.warn(`↻ [${requestId}] retry ${attempt + 1}/${this.retryAttempts} in ~${delay}ms`);
+          await this.sleep(delay, abortSignal);
         }
-        const duration = Date.now() - startedAt;
-        const errorSummary = this.describeError(err);
-        this.logger.error(
-          `× [${requestId}] failed in ${duration}ms: ${errorSummary} body=${requestBodyLog}${this.describeErrorPayload(err)}`,
-        );
-
-        const shouldRetry = this.shouldRetry(err) && attempt < this.retryAttempts - 1;
-        if (!shouldRetry) throw err;
-
-        attempt++;
-        const delay = options?.retryDelayMs ?? this.retryBaseDelayMs;
-        this.logger.warn(`↻ [${requestId}] retry ${attempt + 1}/${this.retryAttempts} in ~${delay}ms`);
-        await this.sleep(delay, abortSignal);
       }
+    } finally {
+      cleanupSignal();
     }
   }
 
@@ -328,6 +328,7 @@ export class OzonApiService {
       clusterType?: string;
     } = {},
     credentials?: OzonCredentials,
+    abortSignal?: AbortSignal,
   ): Promise<{ clusters: OzonCluster[]; warehouses: OzonAvailableWarehouse[] }> {
     const body = {
       cluster_ids: payload.clusterIds ?? [],
@@ -338,6 +339,7 @@ export class OzonApiService {
       body,
       undefined,
       credentials,
+      abortSignal,
     );
     return {
       clusters: response.data?.clusters ?? [],
@@ -345,8 +347,11 @@ export class OzonApiService {
     };
   }
 
-  async listAvailableWarehouses(credentials?: OzonCredentials): Promise<OzonAvailableWarehouse[]> {
-    const { warehouses } = await this.listClusters({}, credentials);
+  async listAvailableWarehouses(
+    credentials?: OzonCredentials,
+    abortSignal?: AbortSignal,
+  ): Promise<OzonAvailableWarehouse[]> {
+    const { warehouses } = await this.listClusters({}, credentials, abortSignal);
     return warehouses;
   }
 
@@ -583,12 +588,14 @@ export class OzonApiService {
   async getSupplyCreateStatus(
     operationId: string,
     credentials?: OzonCredentials,
+    abortSignal?: AbortSignal,
   ): Promise<OzonSupplyCreateStatus> {
     const response = await this.post<OzonSupplyCreateStatus>(
       '/v1/draft/supply/create/status',
       { operation_id: operationId },
       undefined,
       credentials,
+      abortSignal,
     );
     return response.data;
   }
@@ -646,6 +653,33 @@ export class OzonApiService {
     );
 
     return response.data?.orders ?? [];
+  }
+
+  private composeAbortSignal(
+    axiosSignal?: GenericAbortSignal,
+    abortSignal?: AbortSignal,
+  ): { signal?: GenericAbortSignal; cleanupSignal: () => void } {
+    if (axiosSignal) {
+      return { signal: axiosSignal, cleanupSignal: () => undefined };
+    }
+    if (!abortSignal) {
+      return { signal: undefined, cleanupSignal: () => undefined };
+    }
+
+    if (abortSignal.aborted) {
+      const controller = new AbortController();
+      controller.abort();
+      return { signal: controller.signal, cleanupSignal: () => undefined };
+    }
+
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    abortSignal.addEventListener('abort', onAbort);
+
+    return {
+      signal: controller.signal,
+      cleanupSignal: () => abortSignal.removeEventListener('abort', onAbort),
+    };
   }
 
   private resolveUrl(baseUrl: string, url?: string): string | undefined {

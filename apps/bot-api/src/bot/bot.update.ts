@@ -143,7 +143,7 @@ export class BotUpdate {
 
     const state = this.wizardState(chatId);
     if (!state) {
-      await ctx.reply('Используйте /start, чтобы начать оформление поставки.');
+      await this.wizard.start(ctx);
       return;
     }
 

@@ -168,7 +168,7 @@ export class SupplyWizardHandler {
         }
 
         if (!state || state.stage !== 'awaitSpreadsheet') {
-            await ctx.reply('Сначала запустите мастер командой /start.');
+            await ctx.reply('Сначала пройдите шаги мастера до шага загрузки файла.');
             return;
         }
 
@@ -1111,7 +1111,8 @@ export class SupplyWizardHandler {
 
         const state = this.wizardStore.get(chatId);
         if (!state) {
-            await this.safeAnswerCbQuery(ctx, chatId, 'Перезапустите бота, нажав /start');
+            await this.start(ctx);
+            await this.safeAnswerCbQuery(ctx, chatId, 'Мастер перезапущен, повторите действие');
             return;
         }
 

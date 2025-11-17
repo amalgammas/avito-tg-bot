@@ -125,7 +125,7 @@ export class OzonSupplyService {
       throw new Error('Пункт сдачи (drop-off) не задан. Укажите его в мастере или через OZON_SUPPLY_DROP_OFF_ID.');
     }
     if (!options.skipDropOffValidation) {
-      await this.ensureDropOffWarehouseAvailable(dropOffWarehouseId, credentials);
+      await this.ensureDropOffWarehouseAvailable(dropOffWarehouseId, credentials, abortSignal);
     }
     const seenUnavailableWarehouses = new Set<number>();
 
@@ -153,7 +153,7 @@ export class OzonSupplyService {
           await this.emitEvent(options.onEvent, result);
 
           if (eventType === OzonSupplyEventType.SupplyCreated && result.operationId) {
-            await this.emitSupplyStatus(result.operationId, state, credentials, options.onEvent);
+            await this.emitSupplyStatus(result.operationId, state, credentials, options.onEvent, abortSignal);
           }
 
           if (state.orderFlag === 1) {
@@ -203,13 +203,14 @@ export class OzonSupplyService {
 
   private async ensureDropOffWarehouseAvailable(
     dropOffId: number,
-    credentials?: OzonCredentials,
+    credentials: OzonCredentials | undefined,
+    abortSignal?: AbortSignal,
   ): Promise<void> {
     if (!dropOffId) {
       throw new Error('Пункт сдачи не задан. Выберите склад drop-off перед запуском.');
     }
 
-    const warehouses = await this.getAvailableWarehouses(credentials);
+    const warehouses = await this.getAvailableWarehouses(credentials, abortSignal);
     const found = warehouses.some(
       (warehouse) => Number(warehouse.warehouse_id) === dropOffId,
     );
@@ -231,7 +232,10 @@ export class OzonSupplyService {
     }
   }
 
-  private async getAvailableWarehouses(credentials?: OzonCredentials): Promise<OzonAvailableWarehouse[]> {
+  private async getAvailableWarehouses(
+    credentials: OzonCredentials | undefined,
+    abortSignal?: AbortSignal,
+  ): Promise<OzonAvailableWarehouse[]> {
     const now = Date.now();
     const cached = this.availableWarehousesCache;
     if (cached && cached.expiresAt > now) {
@@ -243,7 +247,7 @@ export class OzonSupplyService {
       throw new Error('Не заданы ключи для проверки доступного склада');
     }
 
-    const warehouses = await this.ozonApi.listAvailableWarehouses(creds);
+    const warehouses = await this.ozonApi.listAvailableWarehouses(creds, abortSignal);
     this.availableWarehousesCache = {
       warehouses,
       expiresAt: now + this.availableWarehousesTtlMs,
@@ -267,9 +271,10 @@ export class OzonSupplyService {
     task: OzonSupplyTask,
     credentials: OzonCredentials | undefined,
     handler: OzonSupplyProcessOptions['onEvent'],
+    abortSignal?: AbortSignal,
   ): Promise<void> {
     try {
-      const status = await this.ozonApi.getSupplyCreateStatus(operationId, credentials);
+      const status = await this.ozonApi.getSupplyCreateStatus(operationId, credentials, abortSignal);
       const message = this.describeSupplyStatus(status);
       await this.emitEvent(handler, {
         task,
@@ -586,11 +591,9 @@ export class OzonSupplyService {
     const strict = options.strict === true;
 
     if (typeof preferredWarehouseId === 'number') {
-      const match = warehouses.find(
-        (entry) => entry.warehouseId === preferredWarehouseId,
-      );
+      const match = warehouses.find((entry) => entry.warehouseId === preferredWarehouseId);
       if (match) {
-        if (strict && !match.isFullyAvailable) {
+        if (!match.isFullyAvailable) {
           return undefined;
         }
         return { warehouseId: match.warehouseId, name: match.name ?? preferredWarehouseName };
@@ -605,10 +608,7 @@ export class OzonSupplyService {
       return { warehouseId: firstAvailable.warehouseId, name: firstAvailable.name ?? preferredWarehouseName };
     }
 
-    const fallback = warehouses[0];
-    return fallback
-      ? { warehouseId: fallback.warehouseId, name: fallback.name ?? preferredWarehouseName }
-      : undefined;
+    return undefined;
   }
 
   private collectDraftWarehouses(
