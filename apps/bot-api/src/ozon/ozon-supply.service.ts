@@ -392,9 +392,10 @@ export class OzonSupplyService {
   ): Promise<OzonSupplyProcessResult> {
     this.ensureNotAborted(abortSignal);
     let info: OzonDraftStatus;
-    try {
-      info = await this.ozonApi.getDraftInfo(task.draftOperationId, credentials, abortSignal);
-    } catch (error) {
+      try {
+        await this.throttleDraftRequests(abortSignal);
+        info = await this.ozonApi.getDraftInfo(task.draftOperationId, credentials, abortSignal);
+      } catch (error) {
       const axiosError = error as AxiosError<any>;
       const response = axiosError?.response;
       const data = response?.data as { code?: number };
@@ -515,7 +516,7 @@ export class OzonSupplyService {
     this.ensureNotAborted(abortSignal);
     const ozonItems = await this.buildOzonItems(task, credentials);
     this.ensureNotAborted(abortSignal);
-    await this.throttleDraftCreation(abortSignal);
+    await this.throttleDraftRequests(abortSignal);
 
     const operationId = await this.ozonApi.createDraft(
       {
@@ -736,7 +737,7 @@ export class OzonSupplyService {
     return diffDays;
   }
 
-  private async throttleDraftCreation(abortSignal?: AbortSignal): Promise<void> {
+  private async throttleDraftRequests(abortSignal?: AbortSignal): Promise<void> {
     while (true) {
       this.ensureNotAborted(abortSignal);
       const now = Date.now();
