@@ -43,11 +43,10 @@ export class OzonSupplyService {
   private readonly timeslotWindowMaxDays = 28;
   private readonly dayMs = 24 * 60 * 60 * 1000;
   private readonly draftMinuteLimit = 2;
-  private readonly draftHourLimit = 50;
+  private readonly draftDayLimit = 50;
   private readonly draftMinuteWindowMs = 60 * 1000;
-  private readonly draftHourWindowMs = 60 * 60 * 1000;
-  private draftMinuteTimestamps: number[] = [];
-  private draftHourTimestamps: number[] = [];
+  private readonly draftDayWindowMs = 24 * 60 * 60 * 1000;
+  private draftRequestHistory = new Map<string, { minute: number[]; day: number[] }>();
   private lastClusters: OzonCluster[] = [];
   private availableWarehousesCache?: {
     warehouses: OzonAvailableWarehouse[];
@@ -393,7 +392,7 @@ export class OzonSupplyService {
     this.ensureNotAborted(abortSignal);
     let info: OzonDraftStatus;
       try {
-        await this.throttleDraftRequests(abortSignal);
+        await this.throttleDraftRequests(credentials, abortSignal);
         info = await this.ozonApi.getDraftInfo(task.draftOperationId, credentials, abortSignal);
       } catch (error) {
       const axiosError = error as AxiosError<any>;
@@ -516,7 +515,7 @@ export class OzonSupplyService {
     this.ensureNotAborted(abortSignal);
     const ozonItems = await this.buildOzonItems(task, credentials);
     this.ensureNotAborted(abortSignal);
-    await this.throttleDraftRequests(abortSignal);
+    await this.throttleDraftRequests(credentials, abortSignal);
 
     const operationId = await this.ozonApi.createDraft(
       {
@@ -737,45 +736,51 @@ export class OzonSupplyService {
     return diffDays;
   }
 
-  private async throttleDraftRequests(abortSignal?: AbortSignal): Promise<void> {
+  private getDraftThrottleKey(credentials?: OzonCredentials): string {
+    const raw = credentials?.clientId?.trim();
+    return raw && raw.length ? raw : 'default';
+  }
+
+  private async throttleDraftRequests(credentials: OzonCredentials | undefined, abortSignal?: AbortSignal): Promise<void> {
+    const key = this.getDraftThrottleKey(credentials);
     while (true) {
       this.ensureNotAborted(abortSignal);
       const now = Date.now();
+      const entry = this.draftRequestHistory.get(key) ?? { minute: [], day: [] };
 
-      this.draftMinuteTimestamps = this.draftMinuteTimestamps.filter(
-        (ts) => now - ts < this.draftMinuteWindowMs,
-      );
-      this.draftHourTimestamps = this.draftHourTimestamps.filter(
-        (ts) => now - ts < this.draftHourWindowMs,
-      );
+      entry.minute = entry.minute.filter((ts) => now - ts < this.draftMinuteWindowMs);
+      entry.day = entry.day.filter((ts) => now - ts < this.draftDayWindowMs);
 
-      const minuteExceeded = this.draftMinuteTimestamps.length >= this.draftMinuteLimit;
-      const hourExceeded = this.draftHourTimestamps.length >= this.draftHourLimit;
+      const minuteExceeded = entry.minute.length >= this.draftMinuteLimit;
+      const dayExceeded = entry.day.length >= this.draftDayLimit;
 
-      if (!minuteExceeded && !hourExceeded) {
-        this.draftMinuteTimestamps.push(now);
-        this.draftHourTimestamps.push(now);
+      if (!minuteExceeded && !dayExceeded) {
+        entry.minute.push(now);
+        entry.day.push(now);
+        this.draftRequestHistory.set(key, entry);
         return;
       }
 
       const waitCandidates: number[] = [];
-      if (minuteExceeded && this.draftMinuteTimestamps.length) {
-        waitCandidates.push(this.draftMinuteTimestamps[0] + this.draftMinuteWindowMs);
+      if (minuteExceeded && entry.minute.length) {
+        waitCandidates.push(entry.minute[0] + this.draftMinuteWindowMs);
       }
-      if (hourExceeded && this.draftHourTimestamps.length) {
-        waitCandidates.push(this.draftHourTimestamps[0] + this.draftHourWindowMs);
+      if (dayExceeded && entry.day.length) {
+        waitCandidates.push(entry.day[0] + this.draftDayWindowMs);
       }
 
       if (!waitCandidates.length) {
-        // Should not happen, but guard against empty lists.
-        this.draftMinuteTimestamps = [];
-        this.draftHourTimestamps = [];
+        entry.minute = [];
+        entry.day = [];
+        this.draftRequestHistory.set(key, entry);
         continue;
       }
 
       const waitUntil = Math.min(...waitCandidates);
       const delay = Math.max(waitUntil - now, 250);
-      this.logger.debug(`Draft creation throttled for ${delay}ms due to Ozon limits`);
+      this.logger.debug(
+        `Draft request throttled for ${delay}ms (key=${key}, minute=${entry.minute.length}/${this.draftMinuteLimit}, day=${entry.day.length}/${this.draftDayLimit})`,
+      );
       await this.sleep(delay, abortSignal);
     }
   }
