@@ -43,11 +43,11 @@ export class OzonSupplyService {
   private readonly timeslotWindowMaxDays = 28;
   private readonly dayMs = 24 * 60 * 60 * 1000;
   private readonly draftMinuteLimit = 2;
-  private readonly draftDayLimit = 50;
+  private readonly draftHourLimit = 50;
   private readonly draftSecondIntervalMs = 1_000;
   private readonly draftMinuteWindowMs = 60 * 1000;
-  private readonly draftDayWindowMs = 24 * 60 * 60 * 1000;
-  private draftRequestHistory = new Map<string, { minute: number[]; day: number[]; lastTs?: number }>();
+  private readonly draftHourWindowMs = 60 * 60 * 1000;
+  private draftRequestHistory = new Map<string, { minute: number[]; hour: number[]; lastTs?: number }>();
   private lastClusters: OzonCluster[] = [];
   private availableWarehousesCache?: {
     warehouses: OzonAvailableWarehouse[];
@@ -747,20 +747,20 @@ export class OzonSupplyService {
     while (true) {
       this.ensureNotAborted(abortSignal);
       const now = Date.now();
-      const entry = this.draftRequestHistory.get(key) ?? { minute: [], day: [] };
+      const entry = this.draftRequestHistory.get(key) ?? { minute: [], hour: [] };
 
       entry.minute = entry.minute.filter((ts) => now - ts < this.draftMinuteWindowMs);
-      entry.day = entry.day.filter((ts) => now - ts < this.draftDayWindowMs);
+      entry.hour = entry.hour.filter((ts) => now - ts < this.draftHourWindowMs);
 
       const minuteExceeded = entry.minute.length >= this.draftMinuteLimit;
-      const dayExceeded = entry.day.length >= this.draftDayLimit;
+      const hourExceeded = entry.hour.length >= this.draftHourLimit;
 
       const sinceLast = typeof entry.lastTs === 'number' ? now - entry.lastTs : Infinity;
       const secondExceeded = sinceLast < this.draftSecondIntervalMs;
 
-      if (!minuteExceeded && !dayExceeded && !secondExceeded) {
+      if (!minuteExceeded && !hourExceeded && !secondExceeded) {
         entry.minute.push(now);
-        entry.day.push(now);
+        entry.hour.push(now);
         entry.lastTs = now;
         this.draftRequestHistory.set(key, entry);
         return;
@@ -770,8 +770,8 @@ export class OzonSupplyService {
       if (minuteExceeded && entry.minute.length) {
         waitCandidates.push(entry.minute[0] + this.draftMinuteWindowMs);
       }
-      if (dayExceeded && entry.day.length) {
-        waitCandidates.push(entry.day[0] + this.draftDayWindowMs);
+      if (hourExceeded && entry.hour.length) {
+        waitCandidates.push(entry.hour[0] + this.draftHourWindowMs);
       }
       if (secondExceeded && typeof entry.lastTs === 'number') {
         waitCandidates.push(entry.lastTs + this.draftSecondIntervalMs);
@@ -779,7 +779,7 @@ export class OzonSupplyService {
 
       if (!waitCandidates.length) {
         entry.minute = [];
-        entry.day = [];
+        entry.hour = [];
         this.draftRequestHistory.set(key, entry);
         continue;
       }
@@ -787,7 +787,7 @@ export class OzonSupplyService {
       const waitUntil = Math.min(...waitCandidates);
       const delay = Math.max(waitUntil - now, 250);
       this.logger.debug(
-        `Draft request throttled for ${delay}ms (key=${key}, minute=${entry.minute.length}/${this.draftMinuteLimit}, day=${entry.day.length}/${this.draftDayLimit})`,
+        `Draft request throttled for ${delay}ms (key=${key}, minute=${entry.minute.length}/${this.draftMinuteLimit}, hour=${entry.hour.length}/${this.draftHourLimit})`,
       );
       await this.sleep(delay, abortSignal);
     }
