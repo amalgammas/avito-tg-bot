@@ -44,9 +44,10 @@ export class OzonSupplyService {
   private readonly dayMs = 24 * 60 * 60 * 1000;
   private readonly draftMinuteLimit = 2;
   private readonly draftDayLimit = 50;
+  private readonly draftSecondIntervalMs = 1_000;
   private readonly draftMinuteWindowMs = 60 * 1000;
   private readonly draftDayWindowMs = 24 * 60 * 60 * 1000;
-  private draftRequestHistory = new Map<string, { minute: number[]; day: number[] }>();
+  private draftRequestHistory = new Map<string, { minute: number[]; day: number[]; lastTs?: number }>();
   private lastClusters: OzonCluster[] = [];
   private availableWarehousesCache?: {
     warehouses: OzonAvailableWarehouse[];
@@ -754,9 +755,13 @@ export class OzonSupplyService {
       const minuteExceeded = entry.minute.length >= this.draftMinuteLimit;
       const dayExceeded = entry.day.length >= this.draftDayLimit;
 
-      if (!minuteExceeded && !dayExceeded) {
+      const sinceLast = typeof entry.lastTs === 'number' ? now - entry.lastTs : Infinity;
+      const secondExceeded = sinceLast < this.draftSecondIntervalMs;
+
+      if (!minuteExceeded && !dayExceeded && !secondExceeded) {
         entry.minute.push(now);
         entry.day.push(now);
+        entry.lastTs = now;
         this.draftRequestHistory.set(key, entry);
         return;
       }
@@ -767,6 +772,9 @@ export class OzonSupplyService {
       }
       if (dayExceeded && entry.day.length) {
         waitCandidates.push(entry.day[0] + this.draftDayWindowMs);
+      }
+      if (secondExceeded && typeof entry.lastTs === 'number') {
+        waitCandidates.push(entry.lastTs + this.draftSecondIntervalMs);
       }
 
       if (!waitCandidates.length) {
