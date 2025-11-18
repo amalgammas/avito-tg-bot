@@ -41,6 +41,7 @@ export class OzonSupplyService {
   private readonly pollIntervalMs: number;
   private readonly availableWarehousesTtlMs = 10 * 60 * 1000; // 10 минут
   private readonly timeslotWindowMaxDays = 28;
+  private readonly timeslotRetryDelayMs = 5_000;
   private readonly dayMs = 24 * 60 * 60 * 1000;
   private readonly draftMinuteLimit = 2;
   private readonly draftHourLimit = 50;
@@ -599,13 +600,17 @@ export class OzonSupplyService {
     entries: Array<{ warehouseId: number; name?: string }>,
     abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult | undefined> {
-    for (const entry of entries) {
-      const result = await this.tryCreateSupplyOnWarehouse(task, credentials, info, entry, abortSignal);
-      if (result) {
-        return result;
+    while (true) {
+      for (const entry of entries) {
+        this.ensureNotAborted(abortSignal);
+        const result = await this.tryCreateSupplyOnWarehouse(task, credentials, info, entry, abortSignal);
+        if (result) {
+          return result;
+        }
       }
+      this.ensureNotAborted(abortSignal);
+      await this.sleep(this.timeslotRetryDelayMs, abortSignal);
     }
-    return undefined;
   }
 
   private async tryCreateSupplyOnWarehouse(
