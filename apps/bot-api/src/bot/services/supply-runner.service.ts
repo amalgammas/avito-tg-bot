@@ -44,7 +44,6 @@ export class SupplyRunnerService {
         dropOffWarehouseId,
         skipDropOffValidation: true,
         abortSignal: abortController.signal,
-        priority: 'high',
         onEvent: async (result) => {
           const type = result.event?.type ?? OzonSupplyEventType.Error;
 
@@ -91,3 +90,4 @@ export class SupplyRunnerService {
     return error instanceof Error && error.name === 'AbortError';
   }
 }
+

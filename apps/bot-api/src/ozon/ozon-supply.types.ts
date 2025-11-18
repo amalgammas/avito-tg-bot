@@ -32,8 +32,6 @@ export interface OzonSupplyProcessResult {
   operationId?: string;
 }
 
-export type OzonSupplyRequestPriority = 'high' | 'normal';
-
 export enum OzonSupplyEventType {
   DraftCreated = 'draftCreated',
   DraftValid = 'draftValid',
@@ -70,5 +68,4 @@ export interface OzonSupplyProcessOptions {
   dropOffWarehouseId?: number;
   skipDropOffValidation?: boolean;
   abortSignal?: AbortSignal;
-  priority?: OzonSupplyRequestPriority;
 }

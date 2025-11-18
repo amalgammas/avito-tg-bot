@@ -21,9 +21,8 @@ import {
   OzonSupplyEventType,
   OzonSupplyProcessOptions,
   OzonSupplyProcessResult,
-  OzonSupplyRequestPriority,
   OzonSupplyTask,
-  OzonSupplyTaskMap,
+  OzonSupplyTaskMap
 } from './ozon-supply.types';
 
 import { OzonSheetService } from './ozon-sheet.service';
@@ -32,24 +31,6 @@ interface PrepareTasksOptions {
   credentials?: OzonCredentials;
   spreadsheet?: string;
   buffer?: Buffer;
-}
-
-type DraftThrottlePriority = OzonSupplyRequestPriority;
-
-interface DraftThrottleWaiter {
-  priority: DraftThrottlePriority;
-  resolve: () => void;
-  reject: (error: Error) => void;
-  cleanup?: () => void;
-}
-
-interface DraftThrottleState {
-  minute: number[];
-  hour: number[];
-  lastTs?: number;
-  highQueue: DraftThrottleWaiter[];
-  normalQueue: DraftThrottleWaiter[];
-  processing: boolean;
 }
 
 @Injectable()
@@ -66,7 +47,7 @@ export class OzonSupplyService {
   private readonly draftSecondIntervalMs = 90_000;
   private readonly draftMinuteWindowMs = 60 * 1000;
   private readonly draftHourWindowMs = 60 * 60 * 1000;
-  private draftThrottleStates = new Map<string, DraftThrottleState>();
+  private draftRequestHistory = new Map<string, { minute: number[]; hour: number[]; lastTs?: number }>();
   private lastClusters: OzonCluster[] = [];
   private availableWarehousesCache?: {
     warehouses: OzonAvailableWarehouse[];
@@ -136,7 +117,6 @@ export class OzonSupplyService {
     const delayBetweenCalls = options.delayBetweenCallsMs ?? this.pollIntervalMs;
     const credentials = options.credentials;
     const abortSignal = options.abortSignal;
-    let nextPriority: DraftThrottlePriority = options.priority ?? 'normal';
 
     this.ensureNotAborted(abortSignal);
 
@@ -155,16 +135,7 @@ export class OzonSupplyService {
       for (const [taskId, state] of Array.from(taskMap.entries())) {
         this.ensureNotAborted(abortSignal);
         try {
-          const result = await this.processSingleTask(
-            state,
-            credentials,
-            dropOffWarehouseId,
-            nextPriority,
-            abortSignal,
-          );
-          if (nextPriority === 'high') {
-            nextPriority = 'normal';
-          }
+          const result = await this.processSingleTask(state, credentials, dropOffWarehouseId, abortSignal);
           const eventType = result.event?.type ?? OzonSupplyEventType.Error;
 
           if (eventType === OzonSupplyEventType.Error && /Склад отгрузки/.test(result.message ?? '')) {
@@ -393,7 +364,6 @@ export class OzonSupplyService {
     task: OzonSupplyTask,
     credentials: OzonCredentials | undefined,
     dropOffWarehouseId: number,
-    priority: DraftThrottlePriority,
     abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult> {
     this.ensureNotAborted(abortSignal);
@@ -409,22 +379,21 @@ export class OzonSupplyService {
     const creds = credentials ?? this.ozonApiDefaultCredentials();
 
     if (task.draftOperationId) {
-      return this.handleExistingDraft(task, creds, priority, abortSignal);
+      return this.handleExistingDraft(task, creds, abortSignal);
     }
 
-    return this.createDraft(task, creds, dropOffWarehouseId, priority, abortSignal);
+    return this.createDraft(task, creds, dropOffWarehouseId, abortSignal);
   }
 
   private async handleExistingDraft(
     task: OzonSupplyTask,
     credentials: OzonCredentials,
-    priority: DraftThrottlePriority,
     abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult> {
     this.ensureNotAborted(abortSignal);
     let info: OzonDraftStatus;
       try {
-        await this.throttleDraftRequests(credentials, abortSignal, priority);
+        await this.throttleDraftRequests(credentials, abortSignal);
         info = await this.ozonApi.getDraftInfo(task.draftOperationId, credentials, abortSignal);
       } catch (error) {
       const axiosError = error as AxiosError<any>;
@@ -542,13 +511,12 @@ export class OzonSupplyService {
     task: OzonSupplyTask,
     credentials: OzonCredentials,
     dropOffWarehouseId: number,
-    priority: DraftThrottlePriority,
     abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult> {
     this.ensureNotAborted(abortSignal);
     const ozonItems = await this.buildOzonItems(task, credentials);
     this.ensureNotAborted(abortSignal);
-    await this.throttleDraftRequests(credentials, abortSignal, priority);
+    await this.throttleDraftRequests(credentials, abortSignal);
 
     const operationId = await this.ozonApi.createDraft(
       {
@@ -774,139 +742,55 @@ export class OzonSupplyService {
     return raw && raw.length ? raw : 'default';
   }
 
-  private async throttleDraftRequests(
-    credentials: OzonCredentials | undefined,
-    abortSignal: AbortSignal | undefined,
-    priority: DraftThrottlePriority,
-  ): Promise<void> {
+  private async throttleDraftRequests(credentials: OzonCredentials | undefined, abortSignal?: AbortSignal): Promise<void> {
     const key = this.getDraftThrottleKey(credentials);
-    const state = this.getDraftThrottleState(key);
-
-    if (abortSignal?.aborted) {
-      throw this.createAbortError();
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      const waiter: DraftThrottleWaiter = {
-        priority,
-        resolve: () => {
-          waiter.cleanup?.();
-          resolve();
-        },
-        reject: (error) => {
-          waiter.cleanup?.();
-          reject(error);
-        },
-      };
-
-      if (abortSignal) {
-        const onAbort = () => {
-          this.removeDraftWaiter(state, waiter);
-          abortSignal.removeEventListener('abort', onAbort);
-          reject(this.createAbortError());
-        };
-        abortSignal.addEventListener('abort', onAbort);
-        waiter.cleanup = () => abortSignal.removeEventListener('abort', onAbort);
-      }
-
-      if (priority === 'high') {
-        state.highQueue.push(waiter);
-      } else {
-        state.normalQueue.push(waiter);
-      }
-
-      void this.processDraftQueue(key);
-    });
-  }
-
-  private getDraftThrottleState(key: string): DraftThrottleState {
-    const existing = this.draftThrottleStates.get(key);
-    if (existing) {
-      return existing;
-    }
-
-    const state: DraftThrottleState = {
-      minute: [],
-      hour: [],
-      highQueue: [],
-      normalQueue: [],
-      processing: false,
-    };
-    this.draftThrottleStates.set(key, state);
-    return state;
-  }
-
-  private removeDraftWaiter(state: DraftThrottleState, waiter: DraftThrottleWaiter): void {
-    state.highQueue = state.highQueue.filter((entry) => entry !== waiter);
-    state.normalQueue = state.normalQueue.filter((entry) => entry !== waiter);
-  }
-
-  private async processDraftQueue(key: string): Promise<void> {
-    const state = this.draftThrottleStates.get(key);
-    if (!state || state.processing) {
-      return;
-    }
-
-    state.processing = true;
-    try {
-      while (state.highQueue.length || state.normalQueue.length) {
-        const { delay, minuteCount, hourCount } = this.computeDraftQueueDelay(state);
-        if (delay > 0) {
-          this.logger.debug(
-            `Draft request throttled for ${delay}ms (key=${key}, minute=${minuteCount}/${this.draftMinuteLimit}, hour=${hourCount}/${this.draftHourLimit})`,
-          );
-          await this.sleep(delay);
-          continue;
-        }
-
-        const waiter = state.highQueue.length ? state.highQueue.shift()! : state.normalQueue.shift()!;
-        const now = Date.now();
-        state.minute.push(now);
-        state.hour.push(now);
-        state.lastTs = now;
-        waiter.resolve();
-      }
-    } finally {
-      state.processing = false;
+    while (true) {
+      this.ensureNotAborted(abortSignal);
       const now = Date.now();
-      state.minute = state.minute.filter((ts) => now - ts < this.draftMinuteWindowMs);
-      state.hour = state.hour.filter((ts) => now - ts < this.draftHourWindowMs);
-      if (!state.highQueue.length && !state.normalQueue.length && !state.minute.length && !state.hour.length) {
-        this.draftThrottleStates.delete(key);
+      const entry = this.draftRequestHistory.get(key) ?? { minute: [], hour: [] };
+
+      entry.minute = entry.minute.filter((ts) => now - ts < this.draftMinuteWindowMs);
+      entry.hour = entry.hour.filter((ts) => now - ts < this.draftHourWindowMs);
+
+      const minuteExceeded = entry.minute.length >= this.draftMinuteLimit;
+      const hourExceeded = entry.hour.length >= this.draftHourLimit;
+
+      const sinceLast = typeof entry.lastTs === 'number' ? now - entry.lastTs : Infinity;
+      const secondExceeded = sinceLast < this.draftSecondIntervalMs;
+
+      if (!minuteExceeded && !hourExceeded && !secondExceeded) {
+        entry.minute.push(now);
+        entry.hour.push(now);
+        entry.lastTs = now;
+        this.draftRequestHistory.set(key, entry);
+        return;
       }
-    }
-  }
 
-  private computeDraftQueueDelay(state: DraftThrottleState): {
-    delay: number;
-    minuteCount: number;
-    hourCount: number;
-  } {
-    const now = Date.now();
-    state.minute = state.minute.filter((ts) => now - ts < this.draftMinuteWindowMs);
-    state.hour = state.hour.filter((ts) => now - ts < this.draftHourWindowMs);
+      const waitCandidates: number[] = [];
+      if (minuteExceeded && entry.minute.length) {
+        waitCandidates.push(entry.minute[0] + this.draftMinuteWindowMs);
+      }
+      if (hourExceeded && entry.hour.length) {
+        waitCandidates.push(entry.hour[0] + this.draftHourWindowMs);
+      }
+      if (secondExceeded && typeof entry.lastTs === 'number') {
+        waitCandidates.push(entry.lastTs + this.draftSecondIntervalMs);
+      }
 
-    const minuteExceeded = state.minute.length >= this.draftMinuteLimit;
-    const hourExceeded = state.hour.length >= this.draftHourLimit;
-    const secondExceeded = typeof state.lastTs === 'number' ? now - state.lastTs < this.draftSecondIntervalMs : false;
+      if (!waitCandidates.length) {
+        entry.minute = [];
+        entry.hour = [];
+        this.draftRequestHistory.set(key, entry);
+        continue;
+      }
 
-    if (!minuteExceeded && !hourExceeded && !secondExceeded) {
-      return { delay: 0, minuteCount: state.minute.length, hourCount: state.hour.length };
+      const waitUntil = Math.min(...waitCandidates);
+      const delay = Math.max(waitUntil - now, 250);
+      this.logger.debug(
+        `Draft request throttled for ${delay}ms (key=${key}, minute=${entry.minute.length}/${this.draftMinuteLimit}, hour=${entry.hour.length}/${this.draftHourLimit})`,
+      );
+      await this.sleep(delay, abortSignal);
     }
-
-    const waitCandidates: number[] = [];
-    if (minuteExceeded && state.minute.length) {
-      waitCandidates.push(this.draftMinuteWindowMs - (now - state.minute[0]));
-    }
-    if (hourExceeded && state.hour.length) {
-      waitCandidates.push(this.draftHourWindowMs - (now - state.hour[0]));
-    }
-    if (secondExceeded && typeof state.lastTs === 'number') {
-      waitCandidates.push(this.draftSecondIntervalMs - (now - state.lastTs));
-    }
-
-    const delay = Math.max(Math.min(...waitCandidates), 250);
-    return { delay, minuteCount: state.minute.length, hourCount: state.hour.length };
   }
 
   private cloneTask(task: OzonSupplyTask): OzonSupplyTask {
