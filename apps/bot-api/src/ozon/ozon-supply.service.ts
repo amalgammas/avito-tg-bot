@@ -410,11 +410,22 @@ export class OzonSupplyService {
 
     if (info.status === 'CALCULATION_STATUS_SUCCESS') {
       const strictWarehouse = task.warehouseAutoSelect === false && typeof task.warehouseId === 'number';
-      const warehouseChoice = this.resolveWarehouseFromDraft(info, task.warehouseId, task.warehouseName, {
-        strict: strictWarehouse,
-      });
-      if (!warehouseChoice) {
-        if (strictWarehouse) {
+      const warehouses = this.collectDraftWarehouses(info);
+
+      if (!warehouses.length) {
+        return {
+          task,
+          event: { type: OzonSupplyEventType.DraftError },
+          message: 'Черновик не содержит доступных складов для отгрузки',
+        };
+      }
+
+      if (strictWarehouse) {
+        const warehouseChoice = this.resolveWarehouseFromDraft(info, task.warehouseId, task.warehouseName, {
+          strict: true,
+        });
+
+        if (!warehouseChoice) {
           const message = task.warehouseSelectionPendingNotified
             ? undefined
             : `Ждём склад ${task.warehouseId}. Ozon пока его не подтвердил.`;
@@ -425,67 +436,36 @@ export class OzonSupplyService {
             message,
           };
         }
-        return {
-          task,
-          event: { type: OzonSupplyEventType.DraftError },
-          message: 'Черновик не содержит доступных складов для отгрузки',
-        };
-      }
-      task.warehouseSelectionPendingNotified = false;
 
-      const selectedWarehouseId = warehouseChoice.warehouseId;
-      const selectedWarehouseName = warehouseChoice.name;
-      const warehouseChanged =
-        typeof task.warehouseId === 'number' && task.warehouseId !== selectedWarehouseId;
+        const result = await this.tryCreateSupplyOnWarehouse(task, credentials, info, warehouseChoice, abortSignal);
+        if (result) {
+          return result;
+        }
 
-      task.warehouseId = selectedWarehouseId;
-      task.warehouseName = selectedWarehouseName ?? task.warehouseName;
-      task.draftId = info.draft_id ?? task.draftId;
-      this.ensureNotAborted(abortSignal);
-
-      const window = this.computeTimeslotWindow(task);
-      if (window.expired) {
-        task.orderFlag = 1;
-        return {
-          task,
-          event: { type: OzonSupplyEventType.WindowExpired },
-          message: 'Временной диапазон для поиска таймслотов истёк.',
-        };
-      }
-
-      const timeslot = await this.pickTimeslot(task, credentials, window, abortSignal);
-
-      if (!timeslot) {
         return { task, event: { type: OzonSupplyEventType.TimeslotMissing }, message: 'Свободных таймслотов нет' };
       }
 
-      task.selectedTimeslot = timeslot;
+      const warehouseChoice = this.resolveWarehouseFromDraft(info, task.warehouseId, task.warehouseName);
+      const prioritizedEntries = warehouseChoice
+        ? [
+            ...warehouses.filter((entry) => entry.warehouseId === warehouseChoice.warehouseId),
+            ...warehouses.filter((entry) => entry.warehouseId !== warehouseChoice.warehouseId),
+          ]
+        : warehouses;
 
-      const operationId = await this.ozonApi.createSupply(
-        {
-          draftId: task.draftId,
-          warehouseId: task.warehouseId!,
-          timeslot,
-        },
+      const result = await this.tryWarehousesSequentially(
+        task,
         credentials,
+        info,
+        prioritizedEntries,
         abortSignal,
       );
 
-      if (operationId) {
-        task.orderFlag = 1;
-        const messageParts = [`Создана поставка, operation_id=${operationId}`];
-        if (warehouseChanged) {
-          messageParts.push(`выбран склад ${selectedWarehouseId}`);
-        }
-        return {
-          task,
-          event: { type: OzonSupplyEventType.SupplyCreated },
-          message: messageParts.join(', '),
-          operationId,
-        };
+      if (result) {
+        return result;
       }
 
-      return { task, event: { type: OzonSupplyEventType.Error }, message: 'Ответ без operation_id при создании поставки' };
+      return { task, event: { type: OzonSupplyEventType.TimeslotMissing }, message: 'Свободных таймслотов нет' };
     }
 
     if (info.code === 5) {
@@ -612,10 +592,93 @@ export class OzonSupplyService {
     return undefined;
   }
 
+  private async tryWarehousesSequentially(
+    task: OzonSupplyTask,
+    credentials: OzonCredentials,
+    info: OzonDraftStatus,
+    entries: Array<{ warehouseId: number; name?: string }>,
+    abortSignal?: AbortSignal,
+  ): Promise<OzonSupplyProcessResult | undefined> {
+    for (const entry of entries) {
+      const result = await this.tryCreateSupplyOnWarehouse(task, credentials, info, entry, abortSignal);
+      if (result) {
+        return result;
+      }
+    }
+    return undefined;
+  }
+
+  private async tryCreateSupplyOnWarehouse(
+    task: OzonSupplyTask,
+    credentials: OzonCredentials,
+    info: OzonDraftStatus,
+    entry: { warehouseId: number; name?: string },
+    abortSignal?: AbortSignal,
+  ): Promise<OzonSupplyProcessResult | undefined> {
+    const previousWarehouseId = typeof task.warehouseId === 'number' ? task.warehouseId : undefined;
+    const previousWarehouseName = task.warehouseName;
+    const selectedWarehouseId = entry.warehouseId;
+    const selectedWarehouseName = entry.name ?? task.warehouseName;
+    const warehouseChanged =
+      typeof previousWarehouseId === 'number' && previousWarehouseId !== selectedWarehouseId;
+
+    task.warehouseId = selectedWarehouseId;
+    task.warehouseName = selectedWarehouseName;
+    task.draftId = info.draft_id ?? task.draftId;
+    this.ensureNotAborted(abortSignal);
+
+    const window = this.computeTimeslotWindow(task);
+    if (window.expired) {
+      task.orderFlag = 1;
+      return {
+        task,
+        event: { type: OzonSupplyEventType.WindowExpired },
+        message: 'Временной диапазон для поиска таймслотов истёк.',
+      };
+    }
+
+    const timeslot = await this.pickTimeslot(task, credentials, window, abortSignal);
+
+    if (!timeslot) {
+      task.warehouseId = previousWarehouseId;
+      task.warehouseName = previousWarehouseName;
+      return undefined;
+    }
+
+    task.selectedTimeslot = timeslot;
+    task.warehouseSelectionPendingNotified = false;
+
+    const operationId = await this.ozonApi.createSupply(
+      {
+        draftId: task.draftId,
+        warehouseId: task.warehouseId!,
+        timeslot,
+      },
+      credentials,
+      abortSignal,
+    );
+
+    if (operationId) {
+      task.orderFlag = 1;
+      const messageParts = [`Создана поставка, operation_id=${operationId}`];
+      if (warehouseChanged) {
+        messageParts.push(`выбран склад ${selectedWarehouseId}`);
+      }
+      return {
+        task,
+        event: { type: OzonSupplyEventType.SupplyCreated },
+        message: messageParts.join(', '),
+        operationId,
+      };
+    }
+
+    return { task, event: { type: OzonSupplyEventType.Error }, message: 'Ответ без operation_id при создании поставки' };
+  }
+
   private collectDraftWarehouses(
     info: OzonDraftStatus,
-  ): Array<{ warehouseId: number; name?: string; isFullyAvailable?: boolean }> {
-    const result: Array<{ warehouseId: number; name?: string; isFullyAvailable?: boolean }> = [];
+  ): Array<{ warehouseId: number; name?: string; state?: string; isFullyAvailable?: boolean }> {
+    const result: Array<{ warehouseId: number; name?: string; state?: string; isFullyAvailable?: boolean }> = [];
     for (const cluster of info.clusters ?? []) {
       for (const warehouseInfo of cluster.warehouses ?? []) {
         const rawId =
@@ -629,7 +692,7 @@ export class OzonSupplyService {
         const name = warehouseInfo?.supply_warehouse?.name?.trim();
         const state = warehouseInfo?.status?.state;
         const isFullyAvailable = state === 'WAREHOUSE_SCORING_STATUS_FULL_AVAILABLE';
-        result.push({ warehouseId, name, isFullyAvailable });
+        result.push({ warehouseId, name, state, isFullyAvailable });
       }
     }
     return result;
