@@ -44,7 +44,7 @@ export class OzonSupplyService {
   private readonly dayMs = 24 * 60 * 60 * 1000;
   private readonly draftMinuteLimit = 2;
   private readonly draftHourLimit = 50;
-  private readonly draftSecondIntervalMs = 45_000;
+  private readonly draftSecondIntervalMs = 90_000;
   private readonly draftMinuteWindowMs = 60 * 1000;
   private readonly draftHourWindowMs = 60 * 60 * 1000;
   private draftRequestHistory = new Map<string, { minute: number[]; hour: number[]; lastTs?: number }>();
