@@ -552,6 +552,10 @@ export class OzonApiService {
       abortSignal,
     );
 
+      this.logger.debug(
+          `[OzonApiService] timeslot response: ${this.stringifySafe(response.data) ?? 'empty body'}`,
+      );
+
     return response.data;
   }
 
