@@ -87,6 +87,8 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
         if (task.clusterName) parts.push(`cluster: ${task.clusterName}`);
         if (task.warehouseName) parts.push(`склад: ${task.warehouseName}`);
         if (task.readyInDays !== undefined) parts.push(`готовность ${task.readyInDays}д`);
+        const deadlineLabel = this.formatSearchDeadline(task);
+        if (deadlineLabel) parts.push(`Крайняя дата: до ${deadlineLabel}`);
         lines.push(parts.join('\n • '));
       });
       if (tasks.length > sample.length) {
@@ -145,6 +147,21 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     } finally {
       this.taskAbortService.clear(taskKey);
     }
+  }
+
+  private formatSearchDeadline(task: SupplyOrderEntity): string | undefined {
+    const deadlineIso = task.taskPayload?.lastDay;
+    if (!deadlineIso) {
+      return undefined;
+    }
+    const parsed = new Date(deadlineIso);
+    if (Number.isNaN(parsed.getTime())) {
+      return undefined;
+    }
+    return new Intl.DateTimeFormat('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+    }).format(parsed);
   }
 
   private async handleTaskEvent(

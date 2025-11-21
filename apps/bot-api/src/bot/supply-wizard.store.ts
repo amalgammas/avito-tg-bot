@@ -68,6 +68,7 @@ export interface SupplyWizardOrderSummary {
   timeslotLabel?: string;
   dropOffName?: string;
   clusterName?: string;
+  readyInDays?: number;
   items: SupplyWizardSupplyItem[];
   createdAt: number;
   searchDeadlineAt?: number;
@@ -95,6 +96,7 @@ export type SupplyWizardStage =
   | 'tasksList'
   | 'taskDetails'
   | 'authResetConfirm'
+  | 'awaitSearchDeadline'
   | 'awaitReadyDays'
   | 'processing';
 
@@ -112,6 +114,7 @@ export interface SupplyWizardState {
   draftCreatedAt?: number;
   draftExpiresAt?: number;
   draftError?: string;
+  lastDay?: string;
   selectedClusterId?: number;
   selectedClusterName?: string;
   selectedWarehouseId?: number;
@@ -146,6 +149,7 @@ export interface SupplyWizardTaskContext {
   draftCreatedAt?: number;
   draftExpiresAt?: number;
   draftError?: string;
+  lastDay?: string;
   draftWarehouses: SupplyWizardDraftWarehouseOption[];
   draftTimeslots: SupplyWizardTimeslotOption[];
   selectedClusterId?: number;

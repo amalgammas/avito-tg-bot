@@ -181,6 +181,11 @@ export class BotUpdate {
       return;
     }
 
+    if (state.stage === 'awaitSearchDeadline') {
+      await this.wizard.handleSearchDeadline(ctx, text);
+      return;
+    }
+
     await ctx.reply('Команда не распознана. Если хотите загрузить файл, отправьте его или используйте /start.');
   }
 

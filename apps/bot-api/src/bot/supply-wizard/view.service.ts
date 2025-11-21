@@ -209,6 +209,59 @@ export class SupplyWizardViewService {
         return keyboard;
     }
 
+    renderDeadlinePrompt(): string {
+        return [
+            '<b>Укажите дату, не позже которой должен быть найден слот.</b>',
+            '',
+            'Например, вам нужно отгрузиться не позднее 30 декабря.',
+            '',
+            'Если бот не найдёт слот до указанной даты, задача будет отменена и вы получите уведомление.',
+        ].join('\n');
+    }
+
+    buildDeadlineKeyboard(readyInDays: number, maxDays: number): Array<Array<{ text: string; callback_data: string }>> {
+        const offsets = Array.from(new Set([
+            readyInDays,
+            readyInDays + 1,
+            readyInDays + 2,
+            readyInDays + 3,
+            readyInDays + 5,
+            readyInDays + 7,
+            readyInDays + 14,
+            readyInDays + 21,
+            maxDays,
+        ]))
+            .filter((value) => value >= readyInDays && value <= maxDays)
+            .sort((a, b) => a - b);
+
+        const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+        for (let index = 0; index < offsets.length; index += 3) {
+            const chunk = offsets.slice(index, index + 3);
+            rows.push(
+                chunk.map((days) => ({
+                    text: this.formatDeadlineOption(days),
+                    callback_data: `wizard:deadline:select:${days}`,
+                })),
+            );
+        }
+
+        const keyboard = this.withNavigation(rows, { back: 'wizard:deadline:back' });
+        keyboard.push([{ text: 'Отмена', callback_data: 'wizard:cancel' }]);
+        return keyboard;
+    }
+
+    private formatDeadlineOption(daysOffset: number): string {
+        const now = new Date();
+        const target = new Date(now.getTime());
+        target.setUTCDate(target.getUTCDate() + daysOffset);
+        const formatter = new Intl.DateTimeFormat('ru-RU', {
+            day: '2-digit',
+            month: 'short',
+        });
+        const label = formatter.format(target).replace('.', '');
+        return `${label} (${daysOffset} дн.)`;
+    }
+
     renderAuthResetPrompt(): string {
         return [
             '<b>Сбросить авторизацию?</b>',
@@ -263,6 +316,7 @@ export class SupplyWizardViewService {
             order.clusterName ? `Кластер: ${order.clusterName}` : undefined,
             order.dropOffName ? `Пункт сдачи: ${order.dropOffName}` : undefined,
             order.warehouse ? `Склад: ${order.warehouse}` : undefined,
+            typeof order.readyInDays === 'number' ? `Готовность: ${order.readyInDays} дн.` : undefined,
             searchWindowLine,
             order.timeslotLabel
                 ? `Таймслот: ${order.timeslotLabel}`

@@ -51,7 +51,7 @@ describe('OzonSupplyService', () => {
     draftId: 0,
     draftOperationId: 'op-1',
     orderFlag: 0,
-  items: [{ article: 'A', quantity: 1, sku: 123 }],
+    items: [{ article: 'A', quantity: 1, sku: 123 }],
   };
 
   it('computeTimeslotWindow marks expired windows when readyInDays exceeds deadline', () => {
@@ -63,6 +63,7 @@ describe('OzonSupplyService', () => {
 
     const window = (service as any).computeTimeslotWindow(task);
     expect(window.expired).toBe(true);
+    expect(window.preparationExpired).toBe(true);
   });
 
   it('resolveReadyInDays falls back to lastDay when readyInDays missing', () => {

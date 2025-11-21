@@ -226,6 +226,7 @@ export class SupplyOrderStore {
       timeslotLabel: record.arrival ?? undefined,
       dropOffName: record.dropOffName ?? undefined,
       clusterName: record.clusterName ?? undefined,
+      readyInDays: record.readyInDays ?? undefined,
       items,
       createdAt: record.completedAt ?? record.createdAt,
       searchDeadlineAt: this.computeSearchDeadline(record),

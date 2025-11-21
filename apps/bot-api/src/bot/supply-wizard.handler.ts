@@ -37,6 +37,7 @@ import { SupplyProcessingCoordinatorService } from './services/supply-processing
 import { WizardEvent } from './services/wizard-event.types';
 import { SupplyWizardViewService } from './supply-wizard/view.service';
 import { SupplyTaskAbortService } from './services/supply-task-abort.service';
+import { addUtcDays, endOfUtcDay, startOfUtcDay, toOzonIso } from '@bot/utils/time.utils';
 
 @Injectable()
 export class SupplyWizardHandler {
@@ -522,6 +523,35 @@ export class SupplyWizardHandler {
         }
     }
 
+    async handleSearchDeadline(ctx: Context, text: string): Promise<void> {
+        const chatId = this.extractChatId(ctx);
+        if (!chatId) return;
+
+        const state = this.wizardStore.get(chatId);
+        if (!state || state.stage !== 'awaitSearchDeadline') {
+            await ctx.reply('Сначала выберите готовность к отгрузке.');
+            return;
+        }
+
+        const readyInDays = this.normalizeReadyDaysValue(state.readyInDays ?? NaN);
+        if (readyInDays === undefined) {
+            await this.promptReadyDays(ctx, chatId, state);
+            return;
+        }
+
+        const deadlineIso = this.parseDeadlineInput(text, readyInDays);
+        if (!deadlineIso) {
+            await ctx.reply('Введите дату в формате ДД.ММ (или ГГГГ-ММ-ДД), либо число дней от сегодняшнего дня, не меньше времени подготовки.');
+            return;
+        }
+
+        const handled = await this.applySearchDeadline(ctx, chatId, state, deadlineIso, readyInDays);
+        if (!handled) {
+            await ctx.reply('Не удалось принять дату. Убедитесь, что она не раньше времени на подготовку и не дальше 28 дней.');
+            await this.promptSearchDeadline(ctx, chatId, state, readyInDays);
+        }
+    }
+
     private normalizeReadyDaysValue(value: number): number | undefined {
         if (!Number.isFinite(value)) {
             return undefined;
@@ -552,7 +582,31 @@ export class SupplyWizardHandler {
             return false;
         }
 
-        await this.startSupplyProcessing(ctx, chatId, state, normalized);
+        const updated =
+            this.updateWizardState(chatId, (current) => {
+                if (!current) return undefined;
+                return {
+                    ...current,
+                    stage: 'awaitSearchDeadline',
+                    readyInDays: normalized,
+                    lastDay: undefined,
+                    warehouseSearchQuery: undefined,
+                    warehousePage: 0,
+                };
+            }) ?? state;
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: 'awaitSearchDeadline',
+                readyInDays: normalized,
+                lastDay: undefined,
+                updatedAt: Date.now(),
+            }));
+        }
+
+        await this.promptSearchDeadline(ctx, chatId, updated, normalized);
         return true;
     }
 
@@ -569,6 +623,7 @@ export class SupplyWizardHandler {
                     ...current,
                     stage: 'awaitReadyDays',
                     readyInDays: undefined,
+                    lastDay: undefined,
                     warehouseSearchQuery: undefined,
                     warehousePage: 0,
                 };
@@ -580,6 +635,7 @@ export class SupplyWizardHandler {
                 ...context,
                 stage: 'awaitReadyDays',
                 readyInDays: undefined,
+                lastDay: undefined,
                 updatedAt: Date.now(),
             }));
         }
@@ -602,6 +658,160 @@ export class SupplyWizardHandler {
         );
     }
 
+    private async promptSearchDeadline(
+        ctx: Context,
+        chatId: string,
+        fallback: SupplyWizardState,
+        readyInDays: number,
+    ): Promise<void> {
+        const normalizedReadyDays = this.normalizeReadyDaysValue(readyInDays);
+        if (normalizedReadyDays === undefined) {
+            await this.promptReadyDays(ctx, chatId, fallback);
+            return;
+        }
+
+        const updated =
+            this.updateWizardState(chatId, (current) => {
+                if (!current) return undefined;
+                return {
+                    ...current,
+                    stage: 'awaitSearchDeadline',
+                    readyInDays: normalizedReadyDays,
+                };
+            }) ?? fallback;
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: 'awaitSearchDeadline',
+                readyInDays: normalizedReadyDays,
+                updatedAt: Date.now(),
+            }));
+        }
+
+        const summary = this.buildReadyContext(updated).filter((line): line is string => Boolean(line?.length));
+        const prompt = summary.length
+            ? [...summary, '', this.view.renderDeadlinePrompt()].join('\n')
+            : this.view.renderDeadlinePrompt();
+
+        await this.view.updatePrompt(
+            ctx,
+            chatId,
+            updated,
+            prompt,
+            this.view.buildDeadlineKeyboard(normalizedReadyDays, this.readyDaysMax),
+            { parseMode: 'HTML' },
+        );
+    }
+
+    private normalizeDeadlineFromOffset(daysOffset: number, readyInDays: number): string | undefined {
+        if (!Number.isFinite(daysOffset)) {
+            return undefined;
+        }
+        const rounded = Math.floor(daysOffset);
+        if (rounded < readyInDays || rounded > this.readyDaysMax) {
+            return undefined;
+        }
+        const target = addUtcDays(new Date(), rounded);
+        const endOfDay = endOfUtcDay(target);
+        return toOzonIso(endOfDay);
+    }
+
+    private normalizeDeadlineDate(date: Date, readyInDays: number): string | undefined {
+        if (Number.isNaN(date.getTime())) {
+            return undefined;
+        }
+
+        const todayUtc = startOfUtcDay(new Date());
+        const targetUtc = startOfUtcDay(date);
+
+        const diffMs = targetUtc.getTime() - todayUtc.getTime();
+        const dayMs = 24 * 60 * 60 * 1000;
+        const diffDays = Math.round(diffMs / dayMs);
+
+        if (diffDays < readyInDays || diffDays > this.readyDaysMax) {
+            return undefined;
+        }
+
+        return toOzonIso(endOfUtcDay(targetUtc));
+    }
+
+    private parseDeadlineInput(text: string, readyInDays: number): string | undefined {
+        const normalizedText = text.trim();
+        if (!normalizedText) {
+            return undefined;
+        }
+
+        const numeric = Number(normalizedText.replace(',', '.'));
+        if (Number.isFinite(numeric)) {
+            return this.normalizeDeadlineFromOffset(Math.floor(numeric), readyInDays);
+        }
+
+        const dateMatch = normalizedText.match(/^(\d{1,2})[.\/-](\d{1,2})(?:[.\/-](\d{2,4}))?$/);
+        if (dateMatch) {
+            const day = Number(dateMatch[1]);
+            const month = Number(dateMatch[2]) - 1;
+            const yearRaw = dateMatch[3];
+            const now = new Date();
+            const year = yearRaw ? Number(yearRaw.length === 2 ? `20${yearRaw}` : yearRaw) : now.getUTCFullYear();
+            const candidate = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+            return this.normalizeDeadlineDate(candidate, readyInDays);
+        }
+
+        const parsed = new Date(normalizedText);
+        return this.normalizeDeadlineDate(parsed, readyInDays);
+    }
+
+    private async applySearchDeadline(
+        ctx: Context,
+        chatId: string,
+        fallback: SupplyWizardState,
+        deadlineIso: string,
+        readyInDays: number,
+    ): Promise<boolean> {
+        const state = this.wizardStore.get(chatId) ?? fallback;
+        if (!state || state.stage !== 'awaitSearchDeadline') {
+            return false;
+        }
+
+        const normalizedReady = this.normalizeReadyDaysValue(readyInDays ?? state.readyInDays ?? this.readyDaysMin);
+        if (normalizedReady === undefined) {
+            await this.promptReadyDays(ctx, chatId, state);
+            return false;
+        }
+
+        const normalizedDeadline = this.normalizeDeadlineDate(new Date(deadlineIso), normalizedReady);
+        if (!normalizedDeadline) {
+            return false;
+        }
+
+        const updated =
+            this.updateWizardState(chatId, (current) => {
+                if (!current) return undefined;
+                return {
+                    ...current,
+                    stage: 'awaitSearchDeadline',
+                    readyInDays: normalizedReady,
+                    lastDay: normalizedDeadline,
+                };
+            }) ?? state;
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: 'awaitSearchDeadline',
+                readyInDays: normalizedReady,
+                lastDay: normalizedDeadline,
+                updatedAt: Date.now(),
+            }));
+        }
+
+        await this.startSupplyProcessing(ctx, chatId, updated, normalizedReady);
+        return true;
+    }
+
     private buildReadyContext(state: SupplyWizardState): string[] {
         const lines: string[] = [];
 
@@ -617,6 +827,18 @@ export class SupplyWizardHandler {
 
         if (state.selectedDropOffName || state.selectedDropOffId) {
             lines.push(`Пункт сдачи: ${state.selectedDropOffName ?? state.selectedDropOffId}.`);
+        }
+
+        if (state.readyInDays !== undefined) {
+            lines.push(`Готовность: ${state.readyInDays} дн.`);
+        }
+
+        const deadline = this.parseSupplyDeadline(state.lastDay);
+        if (deadline) {
+            const deadlineLabel = this.formatTimeslotSearchDeadline(deadline);
+            if (deadlineLabel) {
+                lines.push(`Крайняя дата слота: ${deadlineLabel}.`);
+            }
         }
 
         if (state.selectedTimeslot?.label) {
@@ -667,6 +889,7 @@ export class SupplyWizardHandler {
 
         const wasAutoWarehouseSelection = typeof state.selectedWarehouseId !== 'number';
         const effectiveTask = this.cloneTask(task);
+        const searchDeadlineIso = this.resolveSearchDeadlineIso(state, readyInDays);
 
         const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
@@ -674,6 +897,7 @@ export class SupplyWizardHandler {
                 ...current,
                 stage: 'landing',
                 readyInDays,
+                lastDay: searchDeadlineIso,
                 autoWarehouseSelection: current.autoWarehouseSelection,
                 warehouseSearchQuery: undefined,
                 warehousePage: 0,
@@ -694,6 +918,7 @@ export class SupplyWizardHandler {
             : updated.selectedWarehouseName ?? effectiveTask.warehouseName;
         effectiveTask.selectedTimeslot = updated.selectedTimeslot?.data ?? effectiveTask.selectedTimeslot;
         effectiveTask.readyInDays = readyInDays;
+        effectiveTask.lastDay = searchDeadlineIso;
         effectiveTask.warehouseAutoSelect = wasAutoWarehouseSelection;
         effectiveTask.warehouseSelectionPendingNotified = false;
         if (updated.draftOperationId) {
@@ -719,6 +944,9 @@ export class SupplyWizardHandler {
 
         summaryLines.push(`Готовность к отгрузке: ${readyInDays} дн.`);
         summaryLines.push(`Диапазон поиска: ${searchDeadlineLabel ? `до ${searchDeadlineLabel}` : '—'}`);
+        if (searchDeadlineLabel) {
+            summaryLines.push('Если слот не появится до этой даты, задача остановится автоматически.');
+        }
 
         if (task.taskId) {
             this.updateTaskContext(chatId, task.taskId, (context) => {
@@ -734,6 +962,7 @@ export class SupplyWizardHandler {
                     selectedDropOffName: updated.selectedDropOffName,
                     selectedTimeslot: updated.selectedTimeslot,
                     readyInDays,
+                    lastDay: searchDeadlineIso,
                     autoWarehouseSelection: wasAutoWarehouseSelection,
                     draftOperationId: updated.draftOperationId,
                     draftId: updated.draftId,
@@ -788,8 +1017,6 @@ export class SupplyWizardHandler {
             const landingText = this.view.renderLanding(landingState);
             const promptText = [
                 'Задача запущена. Проверяйте раздел «Мои задачи».',
-                '',
-                '<b>Указать конечную дату искомого тайм - слота пока нельзя. Бот ищет тайм-слоты в пределах 28 дней от сегодняшнего дня.</b>',
                 '',
                 ...summaryLines,
                 '',
@@ -850,6 +1077,19 @@ export class SupplyWizardHandler {
         });
     }
 
+    private resolveSearchDeadlineIso(state: SupplyWizardState, readyInDays: number): string {
+        const normalizedReady = this.normalizeReadyDaysValue(readyInDays ?? state.readyInDays ?? this.readyDaysMin);
+        const effectiveReady = normalizedReady ?? this.readyDaysMin;
+
+        const candidate = state.lastDay ? this.normalizeDeadlineDate(new Date(state.lastDay), effectiveReady) : undefined;
+        const fallback =
+            this.normalizeDeadlineFromOffset(this.readyDaysMax, effectiveReady) ??
+            this.normalizeDeadlineFromOffset(effectiveReady, effectiveReady) ??
+            toOzonIso(endOfUtcDay(addUtcDays(new Date(), this.readyDaysMax)));
+
+        return candidate ?? fallback;
+    }
+
     private createTaskContext(options: {
         task: OzonSupplyTask;
         stage: SupplyWizardTaskContext['stage'];
@@ -889,6 +1129,7 @@ export class SupplyWizardHandler {
                   }
                 : undefined,
             readyInDays: overrides.readyInDays,
+            lastDay: overrides.lastDay ?? task.lastDay,
             autoWarehouseSelection: overrides.autoWarehouseSelection,
             dropOffSearchQuery: overrides.dropOffSearchQuery,
             promptMessageId: overrides.promptMessageId,
@@ -965,14 +1206,17 @@ export class SupplyWizardHandler {
             (typeof fallback.selectedWarehouseId === 'number' ? `Склад ${fallback.selectedWarehouseId}` : '—');
         const totalItems = task.items.reduce((sum, item) => sum + (item.quantity ?? 0), 0);
         const skuCount = task.items.length;
+        const deadlineLabel =
+            this.formatTimeslotSearchDeadline(this.parseSupplyDeadline(task.lastDay ?? fallback.lastDay)) ?? undefined;
 
         const messageLines = [
             `Задача ${task.taskId ?? '—'} остановлена ⛔️`,
             `Откуда: ${dropOffLabel ?? '—'}`,
             `Куда: ${warehouseLabel ?? '—'}`,
-            `Товаров: ${skuCount} SKU / ${totalItems} шт.`,
+            deadlineLabel ? `Крайняя дата: ${deadlineLabel}` : undefined,
+            `Сколько товаров: ${skuCount} SKU / ${totalItems} шт.`,
             'Слот не был найден в заданном временном диапазоне. Пересоздайте задачу.',
-        ];
+        ].filter((line): line is string => Boolean(line));
 
         await ctx.reply(messageLines.join('\n'));
 
@@ -1059,6 +1303,7 @@ export class SupplyWizardHandler {
 
         const contextOverride = this.wizardStore.getTaskContext(chatId, baseContext.taskId);
         const effectiveTask = contextOverride ? this.cloneTask(contextOverride.task) : this.cloneTask(baseContext.task);
+        effectiveTask.lastDay = state.lastDay ?? effectiveTask.lastDay;
         return {
             ...baseContext,
             stage: state.stage,
@@ -1076,6 +1321,7 @@ export class SupplyWizardHandler {
             selectedDropOffName: state.selectedDropOffName ?? baseContext.selectedDropOffName,
             selectedTimeslot: state.selectedTimeslot ?? baseContext.selectedTimeslot,
             readyInDays: state.readyInDays ?? baseContext.readyInDays,
+            lastDay: state.lastDay ?? baseContext.lastDay,
             autoWarehouseSelection: state.autoWarehouseSelection ?? baseContext.autoWarehouseSelection,
             dropOffSearchQuery: state.dropOffSearchQuery ?? baseContext.dropOffSearchQuery,
             promptMessageId: state.promptMessageId ?? baseContext.promptMessageId,
@@ -1142,6 +1388,9 @@ export class SupplyWizardHandler {
                 return;
             case 'ready':
                 await this.onReadyCallback(ctx, chatId, state, rest);
+                return;
+            case 'deadline':
+                await this.onDeadlineCallback(ctx, chatId, state, rest);
                 return;
             case 'clusterStart':
                 await this.onClusterStart(ctx, chatId, state);
@@ -1466,6 +1715,7 @@ export class SupplyWizardHandler {
                         ...current,
                         stage: 'warehouseSelect',
                         readyInDays: undefined,
+                        lastDay: undefined,
                         selectedTimeslot: undefined,
                         draftTimeslots: [],
                     };
@@ -1492,6 +1742,7 @@ export class SupplyWizardHandler {
                     ...current,
                     stage: 'draftWarehouseSelect',
                     readyInDays: undefined,
+                    lastDay: undefined,
                     selectedTimeslot: undefined,
                     draftTimeslots: [],
                 };
@@ -1839,6 +2090,47 @@ export class SupplyWizardHandler {
             }
             case 'back': {
                 await this.handleReadyBack(ctx, chatId, state);
+                return;
+            }
+            default:
+                await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
+                return;
+        }
+    }
+
+    private async onDeadlineCallback(
+        ctx: Context,
+        chatId: string,
+        state: SupplyWizardState,
+        parts: string[],
+    ): Promise<void> {
+        const action = parts[0];
+        const latest = this.wizardStore.get(chatId) ?? state;
+        const readyInDays = this.normalizeReadyDaysValue(latest?.readyInDays ?? state.readyInDays ?? NaN);
+
+        switch (action) {
+            case 'select': {
+                if (readyInDays === undefined) {
+                    await this.safeAnswerCbQuery(ctx, chatId, 'Сначала укажите готовность');
+                    await this.promptReadyDays(ctx, chatId, latest ?? state);
+                    return;
+                }
+
+                const offset = Number(parts[1]);
+                const deadlineIso = this.normalizeDeadlineFromOffset(offset, readyInDays);
+                const handled = deadlineIso
+                    ? await this.applySearchDeadline(ctx, chatId, latest ?? state, deadlineIso, readyInDays)
+                    : false;
+
+                await this.safeAnswerCbQuery(ctx, chatId, handled ? 'Дата выбрана' : 'Некорректная дата');
+                if (!handled) {
+                    await this.promptSearchDeadline(ctx, chatId, latest ?? state, readyInDays);
+                }
+                return;
+            }
+            case 'back': {
+                await this.promptReadyDays(ctx, chatId, latest ?? state);
+                await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись к готовности');
                 return;
             }
             default:
@@ -3318,6 +3610,8 @@ export class SupplyWizardHandler {
                 return {
                     ...current,
                     stage: 'draftWarehouseSelect',
+                    readyInDays: undefined,
+                    lastDay: undefined,
                     draftTimeslots: [],
                     selectedTimeslot: undefined,
                 };
@@ -3325,13 +3619,15 @@ export class SupplyWizardHandler {
 
             const [firstTimeslot] = limited;
 
-            return {
-                ...current,
-                stage: 'awaitReadyDays',
-                draftTimeslots: limited,
-                selectedTimeslot: firstTimeslot,
-            };
-        });
+                return {
+                    ...current,
+                    stage: 'awaitReadyDays',
+                    readyInDays: undefined,
+                    lastDay: undefined,
+                    draftTimeslots: limited,
+                    selectedTimeslot: firstTimeslot,
+                };
+            });
 
         if (!stored) {
             return undefined;
@@ -3344,6 +3640,8 @@ export class SupplyWizardHandler {
                     return {
                         ...context,
                         stage: 'draftWarehouseSelect',
+                        readyInDays: undefined,
+                        lastDay: undefined,
                         draftTimeslots: [],
                         selectedTimeslot: undefined,
                         updatedAt: Date.now(),
@@ -3354,6 +3652,8 @@ export class SupplyWizardHandler {
                 return {
                     ...context,
                     stage: 'awaitReadyDays',
+                    readyInDays: undefined,
+                    lastDay: undefined,
                     draftTimeslots: limited.map((item) => ({ ...item })),
                     selectedTimeslot: firstTimeslot ? { ...firstTimeslot, data: firstTimeslot.data ? { ...firstTimeslot.data } : firstTimeslot.data } : undefined,
                     updatedAt: Date.now(),
@@ -3440,6 +3740,8 @@ export class SupplyWizardHandler {
             return {
                 ...current,
                 stage: 'awaitReadyDays',
+                readyInDays: undefined,
+                lastDay: undefined,
                 selectedTimeslot: option,
                 draftTimeslots: current.draftTimeslots,
             };
@@ -3455,6 +3757,8 @@ export class SupplyWizardHandler {
             this.updateTaskContext(chatId, activeTaskId, (context) => ({
                 ...context,
                 stage: 'awaitReadyDays',
+                readyInDays: undefined,
+                lastDay: undefined,
                 selectedTimeslot: {
                     ...option,
                     data: option.data ? { ...option.data } : option.data,
@@ -3846,13 +4150,45 @@ export class SupplyWizardHandler {
         return parts.length ? parts.join('; ') : undefined;
     }
 
+    private extractUnknownClusterIds(info?: OzonDraftStatus | any): number[] {
+        const results = new Set<number>();
+        const errors = (info as any)?.errors;
+        if (!Array.isArray(errors)) {
+            return [];
+        }
+
+        for (const error of errors) {
+            const direct = error?.unknown_cluster_ids;
+            if (Array.isArray(direct)) {
+                for (const value of direct) {
+                    const parsed = typeof value === 'number' ? value : Number(value);
+                    if (Number.isFinite(parsed)) {
+                        results.add(Math.round(parsed));
+                    }
+                }
+            }
+
+            const details = error?.details?.cluster_ids;
+            if (Array.isArray(details)) {
+                for (const value of details) {
+                    const parsed = typeof value === 'number' ? value : Number(value);
+                    if (Number.isFinite(parsed)) {
+                        results.add(Math.round(parsed));
+                    }
+                }
+            }
+        }
+
+        return Array.from(results.values()).sort((a, b) => a - b);
+    }
+
     private async ensureDraftCreated(
         ctx: Context,
         chatId: string,
         state: SupplyWizardState,
         retryAttempt = 0,
     ): Promise<void> {
-        if (!['awaitReadyDays', 'draftWarehouseSelect', 'timeslotSelect'].includes(state.stage)) {
+        if (!['awaitReadyDays', 'awaitSearchDeadline', 'draftWarehouseSelect', 'timeslotSelect'].includes(state.stage)) {
             return;
         }
 
@@ -4093,6 +4429,17 @@ export class SupplyWizardHandler {
         retryAttempt: number,
     ): Promise<void> {
         const creationAttempt = retryAttempt;
+        const unknownClusters = this.extractUnknownClusterIds(pollResult.draftInfo);
+        if (unknownClusters.length) {
+            await this.notifications.notifyWizard(WizardEvent.DraftError, {
+                ctx,
+                lines: [
+                    `unknown_cluster_ids: ${unknownClusters.join(', ')}`,
+                    `chat: ${chatId}`,
+                    `task: ${task.taskId ?? 'n/a'}`,
+                ],
+            });
+        }
 
         switch (pollResult.status) {
             case 'success':

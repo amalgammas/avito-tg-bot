@@ -191,7 +191,12 @@ export class OzonSupplyService {
   ): Promise<void> {
     const cloned = this.cloneTask(task);
     cloned.readyInDays = options.readyInDays;
-    cloned.lastDay = this.computeTimeslotUpperBound();
+    const upperBound = this.computeTimeslotUpperBoundDate();
+    const parsedDeadline = parseIsoDate(task.lastDay);
+    const normalizedDeadline = parsedDeadline
+      ? new Date(Math.min(parsedDeadline.getTime(), upperBound.getTime()))
+      : upperBound;
+    cloned.lastDay = toOzonIso(endOfUtcDay(normalizedDeadline));
     cloned.orderFlag = cloned.orderFlag ?? 0;
 
     const map: OzonSupplyTaskMap = new Map([[cloned.taskId, cloned]]);
@@ -635,10 +640,13 @@ export class OzonSupplyService {
     const window = this.computeTimeslotWindow(task);
     if (window.expired) {
       task.orderFlag = 1;
+      const message = window.preparationExpired
+        ? 'Недостаточно времени на подготовку: крайняя дата раньше, чем выбранное время на готовность.'
+        : 'Временной диапазон для поиска таймслотов истёк.';
       return {
         task,
         event: { type: OzonSupplyEventType.WindowExpired },
-        message: 'Временной диапазон для поиска таймслотов истёк.',
+        message,
       };
     }
 
@@ -737,19 +745,29 @@ export class OzonSupplyService {
     return endOfUtcDay(upper);
   }
 
-  private computeTimeslotWindow(task: OzonSupplyTask): { dateFromIso: string; dateToIso: string; expired: boolean } {
+  private computeTimeslotWindow(task: OzonSupplyTask): {
+    dateFromIso: string;
+    dateToIso: string;
+    expired: boolean;
+    preparationExpired: boolean;
+  } {
     const readyInDays = this.resolveReadyInDays(task);
     const from = startOfUtcDay(addUtcDays(new Date(), readyInDays));
 
-    const deadline = parseIsoDate(task.lastDay) ?? this.computeTimeslotUpperBoundDate();
-    const to = new Date(deadline.getTime());
+    const upperBound = this.computeTimeslotUpperBoundDate();
+    const parsedDeadline = parseIsoDate(task.lastDay);
+    const deadline = parsedDeadline ? new Date(Math.min(parsedDeadline.getTime(), upperBound.getTime())) : upperBound;
+    const to = endOfUtcDay(deadline);
 
-    const expired = from.getTime() > to.getTime();
+    const preparationThreshold = endOfUtcDay(addUtcDays(startOfUtcDay(deadline), -readyInDays));
+    const preparationExpired = Date.now() > preparationThreshold.getTime();
+    const expired = preparationExpired || from.getTime() > to.getTime();
 
     return {
       dateFromIso: toOzonIso(from),
       dateToIso: toOzonIso(to),
       expired,
+      preparationExpired,
     };
   }
 
