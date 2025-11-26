@@ -9,7 +9,7 @@ import type {
 } from '@bot/config/ozon-api.service';
 import type { OzonSupplyItem, OzonSupplyTask } from '@bot/ozon/ozon-supply.types';
 import {
-  addUtcDays,
+  addMoscowDays,
   describeTimeslot as describeTimeslotText,
   formatTimeslotRange as formatTimeslotRangeText,
   toOzonIso,
@@ -124,8 +124,8 @@ export class SupplyProcessService {
 
   computeTimeslotWindow(options: TimeslotWindowOptions): { fromIso: string; toIso: string } {
     const { fromDays, toDays, now = new Date() } = options;
-    const start = addUtcDays(now, fromDays);
-    const end = addUtcDays(now, toDays);
+    const start = addMoscowDays(now, fromDays);
+    const end = addMoscowDays(now, toDays);
     return {
       fromIso: toOzonIso(start),
       toIso: toOzonIso(end),

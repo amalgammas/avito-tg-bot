@@ -37,7 +37,14 @@ import { SupplyProcessingCoordinatorService } from './services/supply-processing
 import { WizardEvent } from './services/wizard-event.types';
 import { SupplyWizardViewService } from './supply-wizard/view.service';
 import { SupplyTaskAbortService } from './services/supply-task-abort.service';
-import { addUtcDays, endOfUtcDay, startOfUtcDay, toOzonIso } from '@bot/utils/time.utils';
+import {
+    addMoscowDays,
+    endOfMoscowDay,
+    MOSCOW_TIMEZONE,
+    MOSCOW_UTC_OFFSET_MINUTES,
+    startOfMoscowDay,
+    toOzonIso,
+} from '@bot/utils/time.utils';
 
 @Injectable()
 export class SupplyWizardHandler {
@@ -713,8 +720,8 @@ export class SupplyWizardHandler {
         if (rounded < readyInDays || rounded > this.readyDaysMax) {
             return undefined;
         }
-        const target = addUtcDays(new Date(), rounded);
-        const endOfDay = endOfUtcDay(target);
+        const target = addMoscowDays(new Date(), rounded);
+        const endOfDay = endOfMoscowDay(target);
         return toOzonIso(endOfDay);
     }
 
@@ -723,10 +730,10 @@ export class SupplyWizardHandler {
             return undefined;
         }
 
-        const todayUtc = startOfUtcDay(new Date());
-        const targetUtc = startOfUtcDay(date);
+        const todayMoscow = startOfMoscowDay(new Date());
+        const targetMoscow = startOfMoscowDay(date);
 
-        const diffMs = targetUtc.getTime() - todayUtc.getTime();
+        const diffMs = targetMoscow.getTime() - todayMoscow.getTime();
         const dayMs = 24 * 60 * 60 * 1000;
         const diffDays = Math.round(diffMs / dayMs);
 
@@ -734,7 +741,7 @@ export class SupplyWizardHandler {
             return undefined;
         }
 
-        return toOzonIso(endOfUtcDay(targetUtc));
+        return toOzonIso(endOfMoscowDay(targetMoscow));
     }
 
     private parseDeadlineInput(text: string, readyInDays: number): string | undefined {
@@ -754,7 +761,8 @@ export class SupplyWizardHandler {
             const month = Number(dateMatch[2]) - 1;
             const yearRaw = dateMatch[3];
             const now = new Date();
-            const year = yearRaw ? Number(yearRaw.length === 2 ? `20${yearRaw}` : yearRaw) : now.getUTCFullYear();
+            const nowMoscow = new Date(now.getTime() + MOSCOW_UTC_OFFSET_MINUTES * 60 * 1000);
+            const year = yearRaw ? Number(yearRaw.length === 2 ? `20${yearRaw}` : yearRaw) : nowMoscow.getUTCFullYear();
             const candidate = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
             return this.normalizeDeadlineDate(candidate, readyInDays);
         }
@@ -1085,7 +1093,7 @@ export class SupplyWizardHandler {
         const fallback =
             this.normalizeDeadlineFromOffset(this.readyDaysMax, effectiveReady) ??
             this.normalizeDeadlineFromOffset(effectiveReady, effectiveReady) ??
-            toOzonIso(endOfUtcDay(addUtcDays(new Date(), this.readyDaysMax)));
+            toOzonIso(endOfMoscowDay(addMoscowDays(new Date(), this.readyDaysMax)));
 
         return candidate ?? fallback;
     }
@@ -4818,6 +4826,7 @@ export class SupplyWizardHandler {
         return new Intl.DateTimeFormat('ru-RU', {
             day: '2-digit',
             month: '2-digit',
+            timeZone: MOSCOW_TIMEZONE,
         }).format(deadline);
     }
 
@@ -4826,10 +4835,7 @@ export class SupplyWizardHandler {
         if (parsedDeadline) {
             return parsedDeadline;
         }
-        const fallback = new Date();
-        fallback.setUTCHours(23, 59, 59, 0);
-        fallback.setUTCDate(fallback.getUTCDate() + this.readyDaysMax);
-        return fallback;
+        return endOfMoscowDay(addMoscowDays(new Date(), this.readyDaysMax));
     }
 
     private parseSupplyDeadline(value?: string): Date | undefined {

@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Context } from 'telegraf';
 
 import { OzonSupplyEventType } from '@bot/ozon/ozon-supply.types';
+import { addMoscowDays, MOSCOW_TIMEZONE } from '@bot/utils/time.utils';
 
 import {
     SupplyWizardClusterOption,
@@ -220,23 +221,15 @@ export class SupplyWizardViewService {
     }
 
     buildDeadlineKeyboard(readyInDays: number, maxDays: number): Array<Array<{ text: string; callback_data: string }>> {
-        const offsets = Array.from(new Set([
-            readyInDays,
-            readyInDays + 1,
-            readyInDays + 2,
-            readyInDays + 3,
-            readyInDays + 5,
-            readyInDays + 7,
-            readyInDays + 14,
-            readyInDays + 21,
-            maxDays,
-        ]))
-            .filter((value) => value >= readyInDays && value <= maxDays)
-            .sort((a, b) => a - b);
+        const offsets: number[] = [];
+        const end = Math.min(readyInDays + 27, maxDays);
+        for (let offset = readyInDays; offset <= end; offset += 1) {
+            offsets.push(offset);
+        }
 
         const rows: Array<Array<{ text: string; callback_data: string }>> = [];
-        for (let index = 0; index < offsets.length; index += 3) {
-            const chunk = offsets.slice(index, index + 3);
+        for (let index = 0; index < offsets.length; index += 4) {
+            const chunk = offsets.slice(index, index + 4);
             rows.push(
                 chunk.map((days) => ({
                     text: this.formatDeadlineOption(days),
@@ -251,15 +244,14 @@ export class SupplyWizardViewService {
     }
 
     private formatDeadlineOption(daysOffset: number): string {
-        const now = new Date();
-        const target = new Date(now.getTime());
-        target.setUTCDate(target.getUTCDate() + daysOffset);
+        const target = addMoscowDays(new Date(), daysOffset);
         const formatter = new Intl.DateTimeFormat('ru-RU', {
             day: '2-digit',
             month: 'short',
+            timeZone: MOSCOW_TIMEZONE,
         });
         const label = formatter.format(target).replace('.', '');
-        return `${label} (${daysOffset} дн.)`;
+        return label;
     }
 
     renderAuthResetPrompt(): string {

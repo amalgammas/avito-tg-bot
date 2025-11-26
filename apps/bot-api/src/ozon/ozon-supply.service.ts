@@ -11,10 +11,10 @@ import {
   OzonDraftStatus,
 } from '../config/ozon-api.service';
 import {
-  addUtcDays,
-  endOfUtcDay,
+  addMoscowDays,
+  endOfMoscowDay,
   parseIsoDate,
-  startOfUtcDay,
+  startOfMoscowDay,
   toOzonIso,
 } from '@bot/utils/time.utils';
 import {
@@ -196,7 +196,7 @@ export class OzonSupplyService {
     const normalizedDeadline = parsedDeadline
       ? new Date(Math.min(parsedDeadline.getTime(), upperBound.getTime()))
       : upperBound;
-    cloned.lastDay = toOzonIso(endOfUtcDay(normalizedDeadline));
+    cloned.lastDay = toOzonIso(endOfMoscowDay(normalizedDeadline));
     cloned.orderFlag = cloned.orderFlag ?? 0;
 
     const map: OzonSupplyTaskMap = new Map([[cloned.taskId, cloned]]);
@@ -736,13 +736,9 @@ export class OzonSupplyService {
     };
   }
 
-  private computeTimeslotUpperBound(): string {
-    return toOzonIso(this.computeTimeslotUpperBoundDate());
-  }
-
   private computeTimeslotUpperBoundDate(): Date {
-    const upper = addUtcDays(new Date(), this.timeslotWindowMaxDays);
-    return endOfUtcDay(upper);
+    const upper = addMoscowDays(new Date(), this.timeslotWindowMaxDays);
+    return endOfMoscowDay(upper);
   }
 
   private computeTimeslotWindow(task: OzonSupplyTask): {
@@ -752,14 +748,14 @@ export class OzonSupplyService {
     preparationExpired: boolean;
   } {
     const readyInDays = this.resolveReadyInDays(task);
-    const from = startOfUtcDay(addUtcDays(new Date(), readyInDays));
+    const from = startOfMoscowDay(addMoscowDays(new Date(), readyInDays));
 
     const upperBound = this.computeTimeslotUpperBoundDate();
     const parsedDeadline = parseIsoDate(task.lastDay);
     const deadline = parsedDeadline ? new Date(Math.min(parsedDeadline.getTime(), upperBound.getTime())) : upperBound;
-    const to = endOfUtcDay(deadline);
+    const to = endOfMoscowDay(deadline);
 
-    const preparationThreshold = endOfUtcDay(addUtcDays(startOfUtcDay(deadline), -readyInDays));
+    const preparationThreshold = endOfMoscowDay(addMoscowDays(startOfMoscowDay(deadline), -readyInDays));
     const preparationExpired = Date.now() > preparationThreshold.getTime();
     const expired = preparationExpired || from.getTime() > to.getTime();
 
@@ -809,7 +805,7 @@ export class OzonSupplyService {
       return undefined;
     }
 
-    const baseline = startOfUtcDay(new Date());
+    const baseline = startOfMoscowDay(new Date());
     const diffMs = parsed.getTime() - baseline.getTime();
     if (!Number.isFinite(diffMs)) {
       return undefined;

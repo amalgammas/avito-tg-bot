@@ -1,10 +1,10 @@
 import {
-  addUtcDays,
+  addMoscowDays,
   describeTimeslot,
-  endOfUtcDay,
+  endOfMoscowDay,
   formatTimeslotRange,
   parseIsoDate,
-  startOfUtcDay,
+  startOfMoscowDay,
   toOzonIso,
 } from './time.utils';
 
@@ -14,28 +14,21 @@ describe('time.utils', () => {
     expect(toOzonIso(source)).toBe('2025-05-10T12:34:56Z');
   });
 
-  it('startOfUtcDay normalises time to 00:00:00.000 UTC', () => {
+  it('startOfMoscowDay normalises time to 00:00:00.000 Moscow time (UTC+3)', () => {
     const source = new Date(Date.UTC(2025, 0, 1, 23, 59, 59, 999));
-    const normalized = startOfUtcDay(source);
-    expect(normalized.getUTCHours()).toBe(0);
-    expect(normalized.getUTCMinutes()).toBe(0);
-    expect(normalized.getUTCSeconds()).toBe(0);
-    expect(normalized.getUTCMilliseconds()).toBe(0);
-    expect(normalized.getUTCDate()).toBe(1);
+    const normalized = startOfMoscowDay(source);
+    expect(normalized.toISOString()).toBe('2024-12-31T21:00:00.000Z');
   });
 
-  it('endOfUtcDay normalises time to 23:59:59.000 UTC', () => {
+  it('endOfMoscowDay normalises time to 23:59:59.000 Moscow time (UTC+3)', () => {
     const source = new Date(Date.UTC(2025, 0, 1, 0, 0, 0, 0));
-    const normalized = endOfUtcDay(source);
-    expect(normalized.getUTCHours()).toBe(23);
-    expect(normalized.getUTCMinutes()).toBe(59);
-    expect(normalized.getUTCSeconds()).toBe(59);
-    expect(normalized.getUTCMilliseconds()).toBe(0);
+    const normalized = endOfMoscowDay(source);
+    expect(normalized.toISOString()).toBe('2025-01-01T20:59:59.000Z');
   });
 
-  it('addUtcDays shifts date keeping time component', () => {
+  it('addMoscowDays shifts date keeping Moscow time component', () => {
     const source = new Date(Date.UTC(2025, 0, 1, 8, 30, 0, 0));
-    const shifted = addUtcDays(source, 3);
+    const shifted = addMoscowDays(source, 3);
     expect(shifted.toISOString()).toBe('2025-01-04T08:30:00.000Z');
   });
 
