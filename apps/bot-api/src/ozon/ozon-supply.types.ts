@@ -21,6 +21,7 @@ export interface OzonSupplyTask {
   selectedTimeslot?: OzonDraftTimeslot;
   warehouseAutoSelect?: boolean;
   warehouseSelectionPendingNotified?: boolean;
+  strictWarehouseConfirmed?: boolean;
 }
 
 export type OzonSupplyTaskMap = Map<string, OzonSupplyTask>;

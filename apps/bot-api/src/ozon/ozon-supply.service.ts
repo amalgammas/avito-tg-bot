@@ -396,6 +396,22 @@ export class OzonSupplyService {
     credentials: OzonCredentials,
     abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult> {
+    const strictWarehouse = task.warehouseAutoSelect === false && typeof task.warehouseId === 'number';
+
+    if (strictWarehouse && task.strictWarehouseConfirmed && task.draftId) {
+      const result = await this.tryCreateSupplyOnWarehouse(
+        task,
+        credentials,
+        this.createDraftInfoStub(task),
+        { warehouseId: task.warehouseId, name: task.warehouseName },
+        abortSignal,
+      );
+      if (result) {
+        return result;
+      }
+      return { task, event: { type: OzonSupplyEventType.TimeslotMissing }, message: 'Свободных таймслотов нет' };
+    }
+
     this.ensureNotAborted(abortSignal);
     let info: OzonDraftStatus;
       try {
@@ -415,7 +431,6 @@ export class OzonSupplyService {
     this.ensureNotAborted(abortSignal);
 
     if (info.status === 'CALCULATION_STATUS_SUCCESS') {
-      const strictWarehouse = task.warehouseAutoSelect === false && typeof task.warehouseId === 'number';
       const warehouses = this.collectDraftWarehouses(info);
 
       if (!warehouses.length) {
@@ -427,9 +442,7 @@ export class OzonSupplyService {
       }
 
       if (strictWarehouse) {
-        const warehouseChoice = this.resolveWarehouseFromDraft(info, task.warehouseId, task.warehouseName, {
-          strict: true,
-        });
+        const warehouseChoice = this.findWarehouseInCluster(info, task.warehouseId, task.clusterId, task.warehouseName);
 
         if (!warehouseChoice) {
           const message = task.warehouseSelectionPendingNotified
@@ -443,6 +456,7 @@ export class OzonSupplyService {
           };
         }
 
+        task.strictWarehouseConfirmed = true;
         const result = await this.tryCreateSupplyOnWarehouse(task, credentials, info, warehouseChoice, abortSignal);
         if (result) {
           return result;
@@ -564,6 +578,48 @@ export class OzonSupplyService {
     return undefined;
   }
 
+  private createDraftInfoStub(task: OzonSupplyTask): OzonDraftStatus {
+    return {
+      status: 'CALCULATION_STATUS_SUCCESS',
+      draft_id: task.draftId,
+      clusters: [],
+    };
+  }
+
+  private findWarehouseInCluster(
+    info: OzonDraftStatus,
+    warehouseId: number,
+    clusterId: string | number | undefined,
+    preferredName?: string,
+  ): { warehouseId: number; name?: string } | undefined {
+    if (!warehouseId) {
+      return undefined;
+    }
+
+    const targetClusterId = this.parseClusterId(clusterId);
+
+    for (const cluster of info.clusters ?? []) {
+      const currentClusterId = this.parseClusterId(cluster.cluster_id);
+      if (targetClusterId !== undefined && currentClusterId !== targetClusterId) {
+        continue;
+      }
+
+      for (const warehouseInfo of cluster.warehouses ?? []) {
+        const parsedId = this.parseWarehouseId(
+          warehouseInfo?.supply_warehouse?.warehouse_id ?? (warehouseInfo as any)?.warehouse_id,
+        );
+        if (parsedId !== warehouseId) {
+          continue;
+        }
+
+        const name = warehouseInfo?.supply_warehouse?.name?.trim() || preferredName;
+        return { warehouseId: parsedId, name };
+      }
+    }
+
+    return undefined;
+  }
+
   private resolveWarehouseFromDraft(
     info: OzonDraftStatus,
     preferredWarehouseId: number | undefined,
@@ -595,6 +651,19 @@ export class OzonSupplyService {
       return { warehouseId: firstAvailable.warehouseId, name: firstAvailable.name ?? preferredWarehouseName };
     }
 
+    return undefined;
+  }
+
+  private parseClusterId(value: unknown): number | undefined {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.round(value);
+    }
+    if (typeof value === 'string') {
+      const parsed = Number(value.trim());
+      if (Number.isFinite(parsed)) {
+        return Math.round(parsed);
+      }
+    }
     return undefined;
   }
 
