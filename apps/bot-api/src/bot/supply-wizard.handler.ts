@@ -162,6 +162,295 @@ export class SupplyWizardHandler {
         }
     }
 
+    private async onSupplyTypeCallback(
+        ctx: Context,
+        chatId: string,
+        state: SupplyWizardState,
+        parts: string[],
+    ): Promise<void> {
+        const action = parts[0];
+        const latest = this.wizardStore.get(chatId) ?? state;
+
+        if (action === 'back') {
+            await this.presentUploadPrompt(ctx, chatId, latest);
+            await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись к загрузке файла');
+            return;
+        }
+
+        const isDirect = action === 'direct';
+        const isCrossdock = action === 'crossdock';
+        if (!isDirect && !isCrossdock) {
+            await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестный тип поставки');
+            return;
+        }
+
+        const supplyType = isDirect ? 'CREATE_TYPE_DIRECT' : 'CREATE_TYPE_CROSSDOCK';
+        const nextStage = isDirect ? 'clusterSelect' : 'awaitDropOffQuery';
+
+        const updated =
+            this.updateWizardState(chatId, (current) => {
+                if (!current) return undefined;
+                return {
+                    ...current,
+                    stage: nextStage,
+                    supplyType,
+                    dropOffs: [],
+                    dropOffSearchQuery: undefined,
+                    selectedDropOffId: undefined,
+                    selectedDropOffName: undefined,
+                    selectedClusterId: isDirect ? undefined : current.selectedClusterId,
+                    selectedClusterName: isDirect ? undefined : current.selectedClusterName,
+                    selectedWarehouseId: undefined,
+                    selectedWarehouseName: undefined,
+                    draftWarehouses: [],
+                    draftTimeslots: [],
+                    selectedTimeslot: undefined,
+                    draftStatus: 'idle',
+                    draftOperationId: undefined,
+                    draftId: undefined,
+                    draftCreatedAt: undefined,
+                    draftExpiresAt: undefined,
+                    draftError: undefined,
+                    autoWarehouseSelection: false,
+                    warehouseSearchQuery: undefined,
+                    warehousePage: 0,
+                    readyInDays: undefined,
+                    lastDay: undefined,
+                    timeslotFirstAvailable: undefined,
+                    timeslotFromHour: undefined,
+                    timeslotToHour: undefined,
+                };
+            }) ?? latest;
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: nextStage,
+                supplyType,
+                selectedDropOffId: undefined,
+                selectedDropOffName: undefined,
+                selectedClusterId: isDirect ? undefined : context.selectedClusterId,
+                selectedClusterName: isDirect ? undefined : context.selectedClusterName,
+                selectedWarehouseId: undefined,
+                selectedWarehouseName: undefined,
+                draftWarehouses: [],
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                autoWarehouseSelection: false,
+                warehouseSearchQuery: undefined,
+                warehousePage: 0,
+                readyInDays: undefined,
+                lastDay: undefined,
+                timeslotFirstAvailable: undefined,
+                timeslotFromHour: undefined,
+                timeslotToHour: undefined,
+                task: {
+                    ...context.task,
+                    supplyType,
+                },
+                updatedAt: Date.now(),
+            }));
+        }
+
+        const selectedTask = this.getSelectedTask(chatId, updated);
+        const summary = selectedTask ? this.view.formatItemsSummary(selectedTask) : '';
+
+        if (isDirect) {
+            const promptLines = [
+                summary,
+                '',
+                'Выберите кластер для прямой поставки.',
+            ]
+                .filter(Boolean)
+                .join('\n');
+
+            await this.view.updatePrompt(
+                ctx,
+                chatId,
+                updated,
+                promptLines,
+                this.view.buildClusterKeyboard(updated),
+                { parseMode: 'HTML' },
+            );
+            await this.safeAnswerCbQuery(ctx, chatId, 'Прямая поставка выбрана');
+            return;
+        }
+
+        await this.view.updatePrompt(
+            ctx,
+            chatId,
+            updated,
+            summary,
+            this.view.buildDropOffQueryKeyboard(),
+            { parseMode: 'HTML' },
+        );
+        await this.safeAnswerCbQuery(ctx, chatId, 'Кросс-докинг выбран');
+    }
+
+    private async onTimeWindowCallback(
+        ctx: Context,
+        chatId: string,
+        state: SupplyWizardState,
+        parts: string[],
+    ): Promise<void> {
+        const action = parts[0];
+        const latest = this.wizardStore.get(chatId) ?? state;
+        const readyInDays = this.normalizeReadyDaysValue(latest.readyInDays ?? state.readyInDays ?? NaN);
+
+        if (action === 'backToDeadline') {
+            if (readyInDays === undefined) {
+                await this.promptReadyDays(ctx, chatId, latest);
+            } else {
+                await this.promptSearchDeadline(ctx, chatId, latest, readyInDays);
+            }
+            await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись к дате');
+            return;
+        }
+
+        if (readyInDays === undefined) {
+            await this.promptReadyDays(ctx, chatId, latest);
+            await this.safeAnswerCbQuery(ctx, chatId, 'Сначала укажите готовность');
+            return;
+        }
+
+        if (!['timeslotWindowFrom', 'timeslotWindowTo'].includes(latest.stage)) {
+            await this.safeAnswerCbQuery(ctx, chatId, 'Сначала выберите дату для поиска');
+            return;
+        }
+
+        if (action === 'start') {
+            const choice = parts[1];
+            if (choice === 'any') {
+                const updated =
+                    this.updateWizardState(chatId, (current) => {
+                        if (!current) return undefined;
+                        return {
+                            ...current,
+                            stage: 'timeslotWindowFrom',
+                            timeslotFirstAvailable: true,
+                            timeslotFromHour: undefined,
+                            timeslotToHour: undefined,
+                        };
+                    }) ?? latest;
+
+                const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+                if (activeTaskId) {
+                    this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                        ...context,
+                        stage: 'timeslotWindowFrom',
+                        timeslotFirstAvailable: true,
+                        timeslotFromHour: undefined,
+                        timeslotToHour: undefined,
+                        updatedAt: Date.now(),
+                    }));
+                }
+
+                await this.startSupplyProcessing(ctx, chatId, updated, readyInDays);
+                await this.safeAnswerCbQuery(ctx, chatId, 'Ищу первый доступный слот');
+                return;
+            }
+
+            const hour = Number(choice);
+            if (!Number.isFinite(hour) || hour < 0 || hour > 23) {
+                await this.safeAnswerCbQuery(ctx, chatId, 'Выберите час 00-23');
+                return;
+            }
+
+            const nextHour = Math.floor(hour);
+            const updated =
+                this.updateWizardState(chatId, (current) => {
+                    if (!current) return undefined;
+                    return {
+                        ...current,
+                        stage: 'timeslotWindowTo',
+                        timeslotFirstAvailable: false,
+                        timeslotFromHour: nextHour,
+                        timeslotToHour: undefined,
+                    };
+                }) ?? latest;
+
+            const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+            if (activeTaskId) {
+                this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                    ...context,
+                    stage: 'timeslotWindowTo',
+                    timeslotFirstAvailable: false,
+                    timeslotFromHour: nextHour,
+                    timeslotToHour: undefined,
+                    updatedAt: Date.now(),
+                }));
+            }
+
+            await this.promptTimeslotWindowEnd(ctx, chatId, updated, nextHour);
+            await this.safeAnswerCbQuery(ctx, chatId);
+            return;
+        }
+
+        if (action === 'end') {
+            const hour = Number(parts[1]);
+            if (!Number.isFinite(hour) || hour < 0 || hour > 23) {
+                await this.safeAnswerCbQuery(ctx, chatId, 'Выберите час 00-23');
+                return;
+            }
+
+            const fromHour = latest.timeslotFromHour ?? state.timeslotFromHour;
+            if (typeof fromHour !== 'number') {
+                await this.promptTimeslotWindowStart(ctx, chatId, latest);
+                await this.safeAnswerCbQuery(ctx, chatId, 'Сначала выберите начало поиска');
+                return;
+            }
+
+            if (hour < fromHour) {
+                await this.safeAnswerCbQuery(ctx, chatId, 'Конец должен быть не раньше начала');
+                return;
+            }
+
+            const toHour = Math.floor(hour);
+            const updated =
+                this.updateWizardState(chatId, (current) => {
+                    if (!current) return undefined;
+                    return {
+                        ...current,
+                        stage: 'timeslotWindowTo',
+                        timeslotFirstAvailable: false,
+                        timeslotFromHour: fromHour,
+                        timeslotToHour: toHour,
+                    };
+                }) ?? latest;
+
+            const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+            if (activeTaskId) {
+                this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                    ...context,
+                    stage: 'timeslotWindowTo',
+                    timeslotFirstAvailable: false,
+                    timeslotFromHour: fromHour,
+                    timeslotToHour: toHour,
+                    updatedAt: Date.now(),
+                }));
+            }
+
+            await this.startSupplyProcessing(ctx, chatId, updated, readyInDays);
+            await this.safeAnswerCbQuery(ctx, chatId, 'Запускаю поиск слотов');
+            return;
+        }
+
+        if (action === 'backToStart') {
+            await this.promptTimeslotWindowStart(ctx, chatId, latest);
+            await this.safeAnswerCbQuery(ctx, chatId, 'Обновите начало поиска');
+            return;
+        }
+
+        await this.safeAnswerCbQuery(ctx, chatId, 'Неизвестное действие');
+    }
+
     async handleDocument(ctx: Context): Promise<void> {
         const chatId = this.extractChatId(ctx);
         if (!chatId) {
@@ -347,6 +636,11 @@ export class SupplyWizardHandler {
         if (!chatId) return;
 
         const state = this.wizardStore.get(chatId);
+        const supplyType = state?.supplyType ?? 'CREATE_TYPE_CROSSDOCK';
+        if (supplyType === 'CREATE_TYPE_DIRECT') {
+            await ctx.reply('Для прямой поставки пункт сдачи не требуется. Выберите кластер и склад.');
+            return;
+        }
         if (
             !state ||
             !['awaitDropOffQuery', 'dropOffSelect', 'clusterPrompt', 'draftWarehouseSelect'].includes(state.stage)
@@ -597,6 +891,9 @@ export class SupplyWizardHandler {
                     stage: 'awaitSearchDeadline',
                     readyInDays: normalized,
                     lastDay: undefined,
+                    timeslotFirstAvailable: undefined,
+                    timeslotFromHour: undefined,
+                    timeslotToHour: undefined,
                     warehouseSearchQuery: undefined,
                     warehousePage: 0,
                 };
@@ -631,6 +928,9 @@ export class SupplyWizardHandler {
                     stage: 'awaitReadyDays',
                     readyInDays: undefined,
                     lastDay: undefined,
+                    timeslotFirstAvailable: undefined,
+                    timeslotFromHour: undefined,
+                    timeslotToHour: undefined,
                     warehouseSearchQuery: undefined,
                     warehousePage: 0,
                 };
@@ -799,9 +1099,12 @@ export class SupplyWizardHandler {
                 if (!current) return undefined;
                 return {
                     ...current,
-                    stage: 'awaitSearchDeadline',
+                    stage: 'timeslotWindowFrom',
                     readyInDays: normalizedReady,
                     lastDay: normalizedDeadline,
+                    timeslotFirstAvailable: undefined,
+                    timeslotFromHour: undefined,
+                    timeslotToHour: undefined,
                 };
             }) ?? state;
 
@@ -809,19 +1112,129 @@ export class SupplyWizardHandler {
         if (activeTaskId) {
             this.updateTaskContext(chatId, activeTaskId, (context) => ({
                 ...context,
-                stage: 'awaitSearchDeadline',
+                stage: 'timeslotWindowFrom',
                 readyInDays: normalizedReady,
                 lastDay: normalizedDeadline,
+                timeslotFirstAvailable: undefined,
+                timeslotFromHour: undefined,
+                timeslotToHour: undefined,
                 updatedAt: Date.now(),
             }));
         }
 
-        await this.startSupplyProcessing(ctx, chatId, updated, normalizedReady);
+        await this.promptTimeslotWindowStart(ctx, chatId, updated);
         return true;
+    }
+
+    private async promptTimeslotWindowStart(
+        ctx: Context,
+        chatId: string,
+        fallback: SupplyWizardState,
+    ): Promise<void> {
+        const readyInDays = this.normalizeReadyDaysValue(fallback.readyInDays ?? NaN);
+        if (readyInDays === undefined) {
+            await this.promptReadyDays(ctx, chatId, fallback);
+            return;
+        }
+
+        const state =
+            this.updateWizardState(chatId, (current) => {
+                if (!current) return undefined;
+                return {
+                    ...current,
+                    stage: 'timeslotWindowFrom',
+                    readyInDays,
+                    timeslotFirstAvailable: undefined,
+                    timeslotFromHour: undefined,
+                    timeslotToHour: undefined,
+                };
+            }) ?? fallback;
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, state);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: 'timeslotWindowFrom',
+                readyInDays,
+                timeslotFirstAvailable: undefined,
+                timeslotFromHour: undefined,
+                timeslotToHour: undefined,
+                updatedAt: Date.now(),
+            }));
+        }
+
+        await this.view.updatePrompt(
+            ctx,
+            chatId,
+            state,
+            this.view.renderTimeslotWindowPrompt({ phase: 'from' }),
+            this.view.buildTimeslotWindowKeyboard({
+                phase: 'from',
+                backAction: 'wizard:timeWindow:backToDeadline',
+                includeFirstAvailable: true,
+            }),
+            { parseMode: 'HTML' },
+        );
+    }
+
+    private async promptTimeslotWindowEnd(
+        ctx: Context,
+        chatId: string,
+        fallback: SupplyWizardState,
+        fromHour: number,
+    ): Promise<void> {
+        const readyInDays = this.normalizeReadyDaysValue(fallback.readyInDays ?? NaN);
+        if (readyInDays === undefined) {
+            await this.promptReadyDays(ctx, chatId, fallback);
+            return;
+        }
+
+        const state =
+            this.updateWizardState(chatId, (current) => {
+                if (!current) return undefined;
+                return {
+                    ...current,
+                    stage: 'timeslotWindowTo',
+                    readyInDays,
+                    timeslotFirstAvailable: false,
+                    timeslotFromHour: fromHour,
+                    timeslotToHour: undefined,
+                };
+            }) ?? fallback;
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, state);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: 'timeslotWindowTo',
+                readyInDays,
+                timeslotFirstAvailable: false,
+                timeslotFromHour: fromHour,
+                timeslotToHour: undefined,
+                updatedAt: Date.now(),
+            }));
+        }
+
+        await this.view.updatePrompt(
+            ctx,
+            chatId,
+            state,
+            this.view.renderTimeslotWindowPrompt({ phase: 'to', fromHour }),
+            this.view.buildTimeslotWindowKeyboard({
+                phase: 'to',
+                fromHour,
+                backAction: 'wizard:timeWindow:backToStart',
+                includeFirstAvailable: false,
+            }),
+            { parseMode: 'HTML' },
+        );
     }
 
     private buildReadyContext(state: SupplyWizardState): string[] {
         const lines: string[] = [];
+
+        const supplyType = state.supplyType ?? 'CREATE_TYPE_CROSSDOCK';
+        lines.push(`Тип: ${supplyType === 'CREATE_TYPE_DIRECT' ? 'Прямая поставка' : 'Кросс-докинг'}.`);
 
         if (state.selectedClusterName || state.selectedClusterId) {
             lines.push(`Кластер: ${state.selectedClusterName ?? state.selectedClusterId}.`);
@@ -849,11 +1262,48 @@ export class SupplyWizardHandler {
             }
         }
 
+        const timeWindowLabel = this.describeTimeslotHourWindow(state);
+        if (timeWindowLabel) {
+            lines.push(`Окно слотов: ${timeWindowLabel}.`);
+        }
+
         if (state.selectedTimeslot?.label) {
             lines.push(`Таймслот: ${state.selectedTimeslot.label}.`);
         }
 
         return lines;
+    }
+
+    private describeTimeslotHourWindow(state: {
+        timeslotFirstAvailable?: boolean;
+        timeslotFromHour?: number;
+        timeslotToHour?: number;
+    }): string | undefined {
+        if (state.timeslotFirstAvailable || (state.timeslotFromHour === undefined && state.timeslotToHour === undefined)) {
+            return 'первый доступный';
+        }
+
+        const fromDefined = typeof state.timeslotFromHour === 'number';
+        const toDefined = typeof state.timeslotToHour === 'number';
+
+        if (fromDefined && toDefined) {
+            return `${this.formatHour(state.timeslotFromHour!)}–${this.formatHour(state.timeslotToHour!)}`;
+        }
+
+        if (fromDefined) {
+            return `с ${this.formatHour(state.timeslotFromHour!)} до конца дня`;
+        }
+
+        if (toDefined) {
+            return `до ${this.formatHour(state.timeslotToHour!)}`;
+        }
+
+        return undefined;
+    }
+
+    private formatHour(hour: number): string {
+        const normalized = Math.max(0, Math.min(23, Math.floor(hour)));
+        return `${normalized.toString().padStart(2, '0')}:00`;
     }
 
     private async startSupplyProcessing(
@@ -862,6 +1312,7 @@ export class SupplyWizardHandler {
         state: SupplyWizardState,
         readyInDays: number,
     ): Promise<void> {
+        const supplyType = state.supplyType ?? 'CREATE_TYPE_CROSSDOCK';
         const task = this.getSelectedTask(chatId, state);
         if (!task) {
             await ctx.reply('Не найдены товары для обработки. Запустите мастер заново.');
@@ -876,12 +1327,17 @@ export class SupplyWizardHandler {
             return;
         }
 
+        const requiresDropOff = supplyType === 'CREATE_TYPE_CROSSDOCK';
         if (
             !state.selectedClusterId ||
-            !state.selectedDropOffId ||
-            (!state.selectedWarehouseId && !state.autoWarehouseSelection)
+            (!state.selectedWarehouseId && !state.autoWarehouseSelection) ||
+            (requiresDropOff && !state.selectedDropOffId)
         ) {
-            await ctx.reply('Должны быть выбраны кластер, склад и пункт сдачи. Запустите мастер заново.');
+            await ctx.reply(
+                requiresDropOff
+                    ? 'Должны быть выбраны кластер, склад и пункт сдачи. Запустите мастер заново.'
+                    : 'Должны быть выбраны кластер и склад. Запустите мастер заново.',
+            );
             this.wizardStore.clear(chatId);
             await this.sessions.deleteChatState(chatId);
             return;
@@ -906,6 +1362,7 @@ export class SupplyWizardHandler {
                 stage: 'landing',
                 readyInDays,
                 lastDay: searchDeadlineIso,
+                supplyType,
                 autoWarehouseSelection: current.autoWarehouseSelection,
                 warehouseSearchQuery: undefined,
                 warehousePage: 0,
@@ -929,6 +1386,10 @@ export class SupplyWizardHandler {
         effectiveTask.lastDay = searchDeadlineIso;
         effectiveTask.warehouseAutoSelect = wasAutoWarehouseSelection;
         effectiveTask.warehouseSelectionPendingNotified = false;
+        effectiveTask.supplyType = supplyType;
+        effectiveTask.timeslotFirstAvailable = updated.timeslotFirstAvailable;
+        effectiveTask.timeslotFromHour = updated.timeslotFromHour;
+        effectiveTask.timeslotToHour = updated.timeslotToHour;
         if (updated.draftOperationId) {
             effectiveTask.draftOperationId = updated.draftOperationId;
         }
@@ -941,11 +1402,15 @@ export class SupplyWizardHandler {
             : updated.selectedWarehouseName ??
             (typeof updated.selectedWarehouseId === 'number' ? `Склад ${updated.selectedWarehouseId}` : '—');
 
+        const supplyTypeLabel = supplyType === 'CREATE_TYPE_DIRECT' ? 'Прямая поставка' : 'Кросс-докинг';
         const summaryLines = [
+            `Тип: ${supplyTypeLabel}`,
             `Кластер: ${updated.selectedClusterName ?? '—'}`,
             `Склад: ${warehouseLabel}`,
-            `Пункт сдачи: ${updated.selectedDropOffName ?? updated.selectedDropOffId ?? '—'}`,
         ];
+        if (requiresDropOff) {
+            summaryLines.push(`Пункт сдачи: ${updated.selectedDropOffName ?? updated.selectedDropOffId ?? '—'}`);
+        }
 
         const searchDeadlineDate = this.resolveTimeslotSearchDeadline(effectiveTask);
         const searchDeadlineLabel = this.formatTimeslotSearchDeadline(searchDeadlineDate);
@@ -954,6 +1419,10 @@ export class SupplyWizardHandler {
         summaryLines.push(`Диапазон поиска: ${searchDeadlineLabel ? `до ${searchDeadlineLabel}` : '—'}`);
         if (searchDeadlineLabel) {
             summaryLines.push('Если слот не появится до этой даты, задача остановится автоматически.');
+        }
+        const timeWindowLabel = this.describeTimeslotHourWindow(updated);
+        if (timeWindowLabel) {
+            summaryLines.push(`Окно слотов: ${timeWindowLabel}.`);
         }
 
         if (task.taskId) {
@@ -966,9 +1435,13 @@ export class SupplyWizardHandler {
                     selectedClusterName: updated.selectedClusterName,
                     selectedWarehouseId: updated.selectedWarehouseId,
                     selectedWarehouseName: updated.selectedWarehouseName,
-                    selectedDropOffId: updated.selectedDropOffId,
-                    selectedDropOffName: updated.selectedDropOffName,
+                    selectedDropOffId: updated.selectedDropOffId ?? context.selectedDropOffId,
+                    selectedDropOffName: updated.selectedDropOffName ?? context.selectedDropOffName,
                     selectedTimeslot: updated.selectedTimeslot,
+                    supplyType,
+                    timeslotFirstAvailable: updated.timeslotFirstAvailable,
+                    timeslotFromHour: updated.timeslotFromHour,
+                    timeslotToHour: updated.timeslotToHour,
                     readyInDays,
                     lastDay: searchDeadlineIso,
                     autoWarehouseSelection: wasAutoWarehouseSelection,
@@ -1004,8 +1477,8 @@ export class SupplyWizardHandler {
                         (typeof updated.selectedWarehouseId === 'number'
                             ? String(updated.selectedWarehouseId)
                             : undefined),
-                dropOffId: updated.selectedDropOffId!,
-                dropOffName: updated.selectedDropOffName ?? String(updated.selectedDropOffId),
+                dropOffId: updated.selectedDropOffId,
+                dropOffName: updated.selectedDropOffName ?? (updated.selectedDropOffId ? String(updated.selectedDropOffId) : undefined),
                 readyInDays,
                 timeslotLabel:
                     updated.selectedTimeslot?.label ?? this.process.describeTimeslot(effectiveTask.selectedTimeslot),
@@ -1060,7 +1533,7 @@ export class SupplyWizardHandler {
             task: effectiveTask,
             credentials,
             readyInDays,
-            dropOffWarehouseId: updated.selectedDropOffId,
+            dropOffWarehouseId: requiresDropOff ? updated.selectedDropOffId : undefined,
             abortController,
             callbacks: {
                 onEvent: async (result) => {
@@ -1126,21 +1599,25 @@ export class SupplyWizardHandler {
             selectedClusterName: overrides.selectedClusterName,
             selectedWarehouseId: overrides.selectedWarehouseId,
             selectedWarehouseName: overrides.selectedWarehouseName,
-            selectedDropOffId: overrides.selectedDropOffId,
-            selectedDropOffName: overrides.selectedDropOffName,
-            selectedTimeslot: overrides.selectedTimeslot
-                ? {
-                      ...overrides.selectedTimeslot,
+                selectedDropOffId: overrides.selectedDropOffId,
+                selectedDropOffName: overrides.selectedDropOffName,
+                selectedTimeslot: overrides.selectedTimeslot
+                    ? {
+                          ...overrides.selectedTimeslot,
                       data: overrides.selectedTimeslot.data
                           ? { ...overrides.selectedTimeslot.data }
                           : overrides.selectedTimeslot.data,
                   }
                 : undefined,
-            readyInDays: overrides.readyInDays,
-            lastDay: overrides.lastDay ?? task.lastDay,
-            autoWarehouseSelection: overrides.autoWarehouseSelection,
-            dropOffSearchQuery: overrides.dropOffSearchQuery,
-            promptMessageId: overrides.promptMessageId,
+                supplyType: overrides.supplyType ?? task.supplyType ?? 'CREATE_TYPE_CROSSDOCK',
+                timeslotFromHour: overrides.timeslotFromHour ?? task.timeslotFromHour,
+                timeslotToHour: overrides.timeslotToHour ?? task.timeslotToHour,
+                timeslotFirstAvailable: overrides.timeslotFirstAvailable ?? task.timeslotFirstAvailable,
+                readyInDays: overrides.readyInDays,
+                lastDay: overrides.lastDay ?? task.lastDay,
+                autoWarehouseSelection: overrides.autoWarehouseSelection,
+                dropOffSearchQuery: overrides.dropOffSearchQuery,
+                promptMessageId: overrides.promptMessageId,
             task: this.cloneTask(task),
             summaryItems,
             createdAt: createdAt ?? Date.now(),
@@ -1399,6 +1876,12 @@ export class SupplyWizardHandler {
                 return;
             case 'deadline':
                 await this.onDeadlineCallback(ctx, chatId, state, rest);
+                return;
+            case 'supplyType':
+                await this.onSupplyTypeCallback(ctx, chatId, state, rest);
+                return;
+            case 'timeWindow':
+                await this.onTimeWindowCallback(ctx, chatId, state, rest);
                 return;
             case 'clusterStart':
                 await this.onClusterStart(ctx, chatId, state);
@@ -1858,6 +2341,11 @@ export class SupplyWizardHandler {
                     draftError: undefined,
                     selectedTimeslot: undefined,
                     readyInDays: undefined,
+                    lastDay: undefined,
+                    supplyType: undefined,
+                    timeslotFirstAvailable: undefined,
+                    timeslotFromHour: undefined,
+                    timeslotToHour: undefined,
                 };
             }) ?? fallback;
 
@@ -2694,7 +3182,7 @@ export class SupplyWizardHandler {
         for (const [index, task] of clonedTasks.entries()) {
             const context = this.createTaskContext({
                 task,
-                stage: 'awaitDropOffQuery',
+                stage: 'supplyTypeSelect',
                 createdAt: now + index,
             });
             if (task.taskId) {
@@ -2728,7 +3216,7 @@ export class SupplyWizardHandler {
             const selectedTaskId = createdContexts[0]?.taskId ?? current.selectedTaskId;
             return {
                 ...current,
-                stage: 'awaitDropOffQuery',
+                stage: 'supplyTypeSelect',
                 spreadsheet: source.label,
                 selectedTaskId,
                 clusters: options.clusters,
@@ -2747,6 +3235,10 @@ export class SupplyWizardHandler {
                 selectedWarehouseName: undefined,
                 selectedDropOffId: undefined,
                 selectedDropOffName: undefined,
+                supplyType: undefined,
+                timeslotFirstAvailable: undefined,
+                timeslotFromHour: undefined,
+                timeslotToHour: undefined,
             };
         });
 
@@ -2755,21 +3247,47 @@ export class SupplyWizardHandler {
             return true;
         }
 
-        const promptText = [
-            summary,
-            '',
-        ].join('\n');
+        await this.promptSupplyType(ctx, chatId, updated, summary);
+
+        return true;
+    }
+
+    private async promptSupplyType(
+        ctx: Context,
+        chatId: string,
+        fallback: SupplyWizardState,
+        summary?: string,
+    ): Promise<void> {
+        const state =
+            this.updateWizardState(chatId, (current) => {
+                if (!current) return undefined;
+                return {
+                    ...current,
+                    stage: 'supplyTypeSelect',
+                    supplyType: current.supplyType,
+                };
+            }) ?? fallback;
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, state);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: 'supplyTypeSelect',
+                updatedAt: Date.now(),
+            }));
+        }
+
+        const selectedTask = this.getSelectedTask(chatId, state);
+        const text = summary ?? (selectedTask ? this.view.formatItemsSummary(selectedTask) : '');
 
         await this.view.updatePrompt(
             ctx,
             chatId,
-            updated,
-            promptText,
-            this.view.buildDropOffQueryKeyboard(),
+            state,
+            this.view.renderSupplyTypePrompt(text),
+            this.view.buildSupplyTypeKeyboard(),
             { parseMode: 'HTML' },
         );
-
-        return true;
     }
 
     private async onClusterStart(
@@ -2881,6 +3399,8 @@ export class SupplyWizardHandler {
             return;
         }
 
+        const supplyType = state.supplyType ?? 'CREATE_TYPE_CROSSDOCK';
+
         let refreshedWarehouses: SupplyWizardWarehouseOption[] | undefined;
         try {
             const response = await this.ozonApi.listClusters(
@@ -2898,7 +3418,7 @@ export class SupplyWizardHandler {
             );
         }
 
-        const hasDropOffSelection = Boolean(state.selectedDropOffId);
+        const hasDropOffSelection = supplyType === 'CREATE_TYPE_DIRECT' ? true : Boolean(state.selectedDropOffId);
         const activeTaskId = this.resolveActiveTaskId(chatId, state);
 
         const updated = this.updateWizardState(chatId, (current) => {
@@ -3004,6 +3524,7 @@ export class SupplyWizardHandler {
         }
 
         state = this.wizardStore.get(chatId) ?? state;
+        const supplyType = state.supplyType ?? 'CREATE_TYPE_CROSSDOCK';
 
         const action = payloadParts?.[0];
         const extra = payloadParts?.[1];
@@ -3114,7 +3635,7 @@ export class SupplyWizardHandler {
             return;
         }
 
-        const hasDropOffSelection = Boolean(state.selectedDropOffId);
+        const hasDropOffSelection = supplyType === 'CREATE_TYPE_DIRECT' ? true : Boolean(state.selectedDropOffId);
 
         const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;

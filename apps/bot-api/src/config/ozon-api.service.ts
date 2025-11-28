@@ -481,21 +481,25 @@ export class OzonApiService {
   async createDraft(
     payload: {
       clusterIds: Array<string | number>;
-      dropOffPointWarehouseId: number | string;
+      dropOffPointWarehouseId?: number | string;
       items: Array<{ sku: number; quantity: number }>;
       type: 'CREATE_TYPE_DIRECT' | 'CREATE_TYPE_CROSSDOCK';
     },
     credentials?: OzonCredentials,
     abortSignal?: AbortSignal,
   ): Promise<string | undefined> {
+    const body: Record<string, unknown> = {
+      cluster_ids: payload.clusterIds,
+      items: payload.items,
+      type: payload.type,
+    };
+    if (typeof payload.dropOffPointWarehouseId !== 'undefined') {
+      body.drop_off_point_warehouse_id = payload.dropOffPointWarehouseId;
+    }
+
     const response = await this.post<{ operation_id?: string }>(
       '/v1/draft/create',
-      {
-        cluster_ids: payload.clusterIds,
-        drop_off_point_warehouse_id: payload.dropOffPointWarehouseId,
-        items: payload.items,
-        type: payload.type,
-      },
+      body,
       undefined,
       credentials,
       abortSignal,

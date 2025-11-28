@@ -104,7 +104,9 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       this.logger.warn(`Skip task ${record.taskId ?? record.id}: payload not found`);
       return;
     }
-    if (!record.dropOffId) {
+    const supplyType = record.taskPayload.supplyType ?? 'CREATE_TYPE_CROSSDOCK';
+    const requiresDropOff = supplyType === 'CREATE_TYPE_CROSSDOCK';
+    if (requiresDropOff && !record.dropOffId) {
       this.logger.warn(`Skip task ${record.taskId ?? record.id}: drop-off warehouse is not stored`);
       return;
     }
@@ -126,7 +128,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       await this.supplyService.runSingleTask(clonedTask, {
         credentials,
         readyInDays,
-        dropOffWarehouseId: record.dropOffId,
+        dropOffWarehouseId: requiresDropOff ? record.dropOffId : undefined,
         skipDropOffValidation: true,
         abortSignal: abortController.signal,
         onEvent: async (result) => this.handleTaskEvent(record, result, credentials),

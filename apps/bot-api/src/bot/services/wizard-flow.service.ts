@@ -74,7 +74,7 @@ export class WizardFlowService {
   async createDraft(
     payload: {
       clusterIds: Array<string | number>;
-      dropOffPointWarehouseId: number | string;
+      dropOffPointWarehouseId?: number | string;
       items: Array<{ sku: number; quantity: number }>;
       type: 'CREATE_TYPE_DIRECT' | 'CREATE_TYPE_CROSSDOCK';
     },

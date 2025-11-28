@@ -12,7 +12,7 @@ export interface SupplyOrderTaskPayload {
   clusterName?: string;
   warehouseId?: number;
   warehouseName?: string;
-  dropOffId: number;
+  dropOffId?: number;
   dropOffName?: string;
   readyInDays: number;
   timeslotLabel?: string;

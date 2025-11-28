@@ -78,6 +78,10 @@ export class OzonSupplyService {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
   }
 
+  private resolveSupplyType(task: OzonSupplyTask): 'CREATE_TYPE_CROSSDOCK' | 'CREATE_TYPE_DIRECT' {
+    return task.supplyType === 'CREATE_TYPE_DIRECT' ? 'CREATE_TYPE_DIRECT' : 'CREATE_TYPE_CROSSDOCK';
+  }
+
   async prepareTasks(options: PrepareTasksOptions = {}): Promise<OzonSupplyTaskMap> {
     const credentials = options.credentials;
     const tasks = await this.sheetService.loadTasks({
@@ -88,6 +92,7 @@ export class OzonSupplyService {
     this.lastClusters = clusters;
 
     for (const task of tasks) {
+      task.supplyType = task.supplyType ?? 'CREATE_TYPE_CROSSDOCK';
       if (!task.city) continue;
       const clusterId = this.ozonApi.findClusterIdByName(task.city, clusters);
       const warehouseId = task.warehouseName
@@ -121,12 +126,18 @@ export class OzonSupplyService {
 
     this.ensureNotAborted(abortSignal);
 
-    const dropOffWarehouseId = options.dropOffWarehouseId ?? this.getDefaultDropOffId();
-    if (!dropOffWarehouseId) {
-      throw new Error('Пункт сдачи (drop-off) не задан. Укажите его в мастере или через OZON_SUPPLY_DROP_OFF_ID.');
-    }
-    if (!options.skipDropOffValidation) {
-      await this.ensureDropOffWarehouseAvailable(dropOffWarehouseId, credentials, abortSignal);
+    const requiresDropOff = Array.from(taskMap.values()).some(
+      (task) => this.resolveSupplyType(task) === 'CREATE_TYPE_CROSSDOCK',
+    );
+    const dropOffWarehouseId = requiresDropOff ? options.dropOffWarehouseId ?? this.getDefaultDropOffId() : undefined;
+
+    if (requiresDropOff) {
+      if (!dropOffWarehouseId) {
+        throw new Error('Пункт сдачи (drop-off) не задан. Укажите его в мастере или через OZON_SUPPLY_DROP_OFF_ID.');
+      }
+      if (!options.skipDropOffValidation) {
+        await this.ensureDropOffWarehouseAvailable(dropOffWarehouseId, credentials, abortSignal);
+      }
     }
     const seenUnavailableWarehouses = new Set<number>();
 
@@ -369,7 +380,7 @@ export class OzonSupplyService {
   private async processSingleTask(
     task: OzonSupplyTask,
     credentials: OzonCredentials | undefined,
-    dropOffWarehouseId: number,
+    dropOffWarehouseId: number | undefined,
     abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult> {
     this.ensureNotAborted(abortSignal);
@@ -510,7 +521,7 @@ export class OzonSupplyService {
   private async createDraft(
     task: OzonSupplyTask,
     credentials: OzonCredentials,
-    dropOffWarehouseId: number,
+    dropOffWarehouseId: number | undefined,
     abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult> {
     this.ensureNotAborted(abortSignal);
@@ -518,12 +529,21 @@ export class OzonSupplyService {
     this.ensureNotAborted(abortSignal);
     await this.throttleDraftRequests(credentials, abortSignal);
 
+    const supplyType = this.resolveSupplyType(task);
+    if (supplyType === 'CREATE_TYPE_CROSSDOCK' && !dropOffWarehouseId) {
+      return {
+        task,
+        event: { type: OzonSupplyEventType.Error },
+        message: 'Пункт сдачи не выбран для кросс-докинг поставки',
+      };
+    }
+
     const operationId = await this.ozonApi.createDraft(
       {
         clusterIds: [task.clusterId!],
-        dropOffPointWarehouseId: dropOffWarehouseId,
         items: ozonItems,
-        type: 'CREATE_TYPE_CROSSDOCK',
+        ...(supplyType === 'CREATE_TYPE_CROSSDOCK' ? { dropOffPointWarehouseId: dropOffWarehouseId! } : {}),
+        type: supplyType,
       },
       credentials,
       abortSignal,
@@ -545,6 +565,9 @@ export class OzonSupplyService {
     window: { dateFromIso: string; dateToIso: string },
     abortSignal?: AbortSignal,
   ): Promise<OzonDraftTimeslot | undefined> {
+    const fromHour = task.timeslotFirstAvailable ? undefined : task.timeslotFromHour;
+    const toHour = task.timeslotFirstAvailable ? undefined : task.timeslotToHour;
+
     if (task.selectedTimeslot) {
       return task.selectedTimeslot;
     }
@@ -553,22 +576,39 @@ export class OzonSupplyService {
       return undefined;
     }
 
-    const response = await this.ozonApi.getDraftTimeslots(
-      {
-        draftId: task.draftId,
-        warehouseIds: [task.warehouseId!],
-        dateFrom: window.dateFromIso,
-        dateTo: window.dateToIso,
-      },
-      credentials,
-      abortSignal,
-    );
+    let response: ReturnType<OzonApiService['getDraftTimeslots']> extends Promise<infer R> ? R : never;
+    try {
+      response = await this.ozonApi.getDraftTimeslots(
+        {
+          draftId: task.draftId,
+          warehouseIds: [task.warehouseId!],
+          dateFrom: window.dateFromIso,
+          dateTo: window.dateToIso,
+        },
+        credentials,
+        abortSignal,
+      );
+    } catch (error) {
+      const axiosError = error as AxiosError<any>;
+      const status = axiosError?.response?.status;
+      const code = (axiosError?.response?.data as any)?.code;
+      if (status === 404 && code === 5) {
+        task.draftId = 0;
+        task.draftOperationId = '';
+        throw this.createDraftExpiredError();
+      }
+      throw error;
+    }
     this.ensureNotAborted(abortSignal);
 
     for (const warehouse of response.drop_off_warehouse_timeslots ?? []) {
       for (const day of warehouse.days ?? []) {
         for (const slot of day.timeslots ?? []) {
           if (slot.from_in_timezone && slot.to_in_timezone) {
+            const slotHour = this.extractHourFromIso(slot.from_in_timezone);
+            if (!this.isTimeslotInHourRange(slotHour, fromHour, toHour)) {
+              continue;
+            }
             return slot;
           }
         }
@@ -576,6 +616,16 @@ export class OzonSupplyService {
     }
 
     return undefined;
+  }
+
+  private createDraftExpiredError(): Error {
+    const error = new Error('DraftExpired');
+    error.name = 'DraftExpired';
+    return error;
+  }
+
+  private isDraftExpiredError(error: unknown): boolean {
+    return error instanceof Error && error.name === 'DraftExpired';
   }
 
   private createDraftInfoStub(task: OzonSupplyTask): OzonDraftStatus {
@@ -719,7 +769,21 @@ export class OzonSupplyService {
       };
     }
 
-    const timeslot = await this.pickTimeslot(task, credentials, window, abortSignal);
+    let timeslot: OzonDraftTimeslot | undefined;
+    try {
+      timeslot = await this.pickTimeslot(task, credentials, window, abortSignal);
+    } catch (error) {
+      if (this.isDraftExpiredError(error)) {
+        task.draftId = 0;
+        task.draftOperationId = '';
+        return {
+          task,
+          event: { type: OzonSupplyEventType.DraftExpired },
+          message: 'Черновик не найден, создаём заново',
+        };
+      }
+      throw error;
+    }
 
     if (!timeslot) {
       task.warehouseId = previousWarehouseId;
@@ -791,6 +855,31 @@ export class OzonSupplyService {
       }
     }
     return undefined;
+  }
+
+  private extractHourFromIso(value?: string): number | undefined {
+    if (!value) {
+      return undefined;
+    }
+    const match = value.match(/T(\d{2}):(\d{2})/);
+    if (!match) {
+      return undefined;
+    }
+    const hour = Number(match[1]);
+    return Number.isFinite(hour) ? hour : undefined;
+  }
+
+  private isTimeslotInHourRange(hour: number | undefined, fromHour?: number, toHour?: number): boolean {
+    if (typeof hour !== 'number') {
+      return true;
+    }
+    if (typeof fromHour === 'number' && hour < fromHour) {
+      return false;
+    }
+    if (typeof toHour === 'number' && hour > toHour) {
+      return false;
+    }
+    return true;
   }
 
   private ozonApiDefaultCredentialsAvailable(): boolean {
@@ -948,6 +1037,7 @@ export class OzonSupplyService {
     return {
       ...task,
       items: task.items.map((item) => ({ ...item })),
+      selectedTimeslot: task.selectedTimeslot ? { ...task.selectedTimeslot } : undefined,
     };
   }
 

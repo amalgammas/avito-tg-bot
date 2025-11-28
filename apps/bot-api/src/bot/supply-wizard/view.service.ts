@@ -168,6 +168,25 @@ export class SupplyWizardViewService {
         return this.withNavigation([], { back: 'wizard:landing:back' });
     }
 
+    renderSupplyTypePrompt(summary: string): string {
+        return [
+            summary,
+            '',
+            '<b>Выберите тип поставки:</b>',
+            '• Кросс-докинг — сдаёте на пункт приёма, Ozon отвозит на склад.',
+            '• Прямая поставка — сами отвезёте товар на склад Ozon.',
+        ].join('\n');
+    }
+
+    buildSupplyTypeKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+        return [
+            [{ text: 'Кросс-докинг', callback_data: 'wizard:supplyType:crossdock' }],
+            [{ text: 'Прямая поставка', callback_data: 'wizard:supplyType:direct' }],
+            [{ text: 'Назад', callback_data: 'wizard:supplyType:back' }],
+            [{ text: 'Отмена', callback_data: 'wizard:cancel' }],
+        ];
+    }
+
     buildDropOffQueryKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
         return [
             [{ text: 'Назад', callback_data: 'wizard:upload:restart' }],
@@ -241,6 +260,50 @@ export class SupplyWizardViewService {
         const keyboard = this.withNavigation(rows, { back: 'wizard:deadline:back' });
         keyboard.push([{ text: 'Отмена', callback_data: 'wizard:cancel' }]);
         return keyboard;
+    }
+
+    renderTimeslotWindowPrompt(options: { phase: 'from' | 'to'; fromHour?: number }): string {
+        const lines = [
+            '<b>Укажите границы для поиска таймлота.</b>',
+            options.phase === 'from' ? 'НАЧАЛО ПОИСКА' : 'КОНЕЦ ПОИСКА',
+        ];
+
+        if (typeof options.fromHour === 'number') {
+            lines.push(`Начало: ${this.formatHour(options.fromHour)}`);
+        }
+
+        lines.push('Выберите удобный час на клавиатуре.');
+        return lines.join('\n');
+    }
+
+    buildTimeslotWindowKeyboard(params: {
+        phase: 'from' | 'to';
+        fromHour?: number;
+        backAction: string;
+        includeFirstAvailable?: boolean;
+    }): Array<Array<{ text: string; callback_data: string }>> {
+        const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+        const includeFirstAvailable = params.phase === 'from' && params.includeFirstAvailable !== false;
+        const prefix = params.phase === 'from' ? 'wizard:timeWindow:start' : 'wizard:timeWindow:end';
+
+        if (includeFirstAvailable) {
+            rows.push([{ text: 'Первый доступный', callback_data: `${prefix}:any` }]);
+        }
+
+        const hours = Array.from({ length: 24 }, (_, index) => index);
+        for (let i = 0; i < hours.length; i += 4) {
+            const chunk = hours.slice(i, i + 4);
+            rows.push(
+                chunk.map((hour) => ({
+                    text: this.formatHour(hour, { short: true }),
+                    callback_data: `${prefix}:${hour.toString().padStart(2, '0')}`,
+                })),
+            );
+        }
+
+        rows.push([{ text: 'Назад', callback_data: params.backAction }]);
+        rows.push([{ text: 'Отмена', callback_data: 'wizard:cancel' }]);
+        return rows;
     }
 
     private formatDeadlineOption(daysOffset: number): string {
@@ -804,7 +867,7 @@ export class SupplyWizardViewService {
                 callback_data: `wizard:cluster:${cluster.id}`,
             },
         ]);
-        return this.withCancel(rows);
+        return this.withNavigation(rows, { cancel: 'wizard:cancel' });
     }
 
     buildWarehouseKeyboard(
@@ -843,6 +906,12 @@ export class SupplyWizardViewService {
         }
 
         return keyboard;
+    }
+
+    private formatHour(hour: number, options: { short?: boolean } = {}): string {
+        const normalized = Math.max(0, Math.min(23, Math.floor(hour)));
+        const label = normalized.toString().padStart(2, '0');
+        return options.short ? label : `${label}:00`;
     }
 
     async updatePrompt(

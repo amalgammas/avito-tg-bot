@@ -147,6 +147,8 @@ export class BotUpdate {
       return;
     }
 
+    const supplyType = state.supplyType ?? 'CREATE_TYPE_CROSSDOCK';
+
     if (state.stage === 'authApiKey') {
       await this.wizard.handleAuthApiKeyInput(ctx, chatId, state, text);
       return;
@@ -172,8 +174,10 @@ export class BotUpdate {
       state.stage === 'dropOffSelect' ||
       state.stage === 'clusterPrompt'
     ) {
-      await this.wizard.handleDropOffSearch(ctx, text);
-      return;
+      if (supplyType === 'CREATE_TYPE_CROSSDOCK') {
+        await this.wizard.handleDropOffSearch(ctx, text);
+        return;
+      }
     }
 
     if (state.stage === 'awaitReadyDays') {

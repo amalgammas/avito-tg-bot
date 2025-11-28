@@ -82,6 +82,7 @@ export type SupplyWizardStage =
   | 'authApiKey'
   | 'authClientId'
   | 'landing'
+  | 'supplyTypeSelect'
   | 'support'
   | 'awaitSpreadsheet'
   | 'awaitDropOffQuery'
@@ -90,6 +91,8 @@ export type SupplyWizardStage =
   | 'warehouseSelect'
   | 'draftWarehouseSelect'
   | 'timeslotSelect'
+  | 'timeslotWindowFrom'
+  | 'timeslotWindowTo'
   | 'dropOffSelect'
   | 'ordersList'
   | 'orderDetails'
@@ -122,9 +125,13 @@ export interface SupplyWizardState {
   selectedDropOffId?: number;
   selectedDropOffName?: string;
   selectedTimeslot?: SupplyWizardTimeslotOption;
+  supplyType?: 'CREATE_TYPE_CROSSDOCK' | 'CREATE_TYPE_DIRECT';
   spreadsheet?: string;
   selectedTaskId?: string;
   readyInDays?: number;
+  timeslotFromHour?: number;
+  timeslotToHour?: number;
+  timeslotFirstAvailable?: boolean;
   promptMessageId?: number;
   pendingApiKey?: string;
   pendingClientId?: string;
@@ -150,6 +157,7 @@ export interface SupplyWizardTaskContext {
   draftExpiresAt?: number;
   draftError?: string;
   lastDay?: string;
+  supplyType?: 'CREATE_TYPE_CROSSDOCK' | 'CREATE_TYPE_DIRECT';
   draftWarehouses: SupplyWizardDraftWarehouseOption[];
   draftTimeslots: SupplyWizardTimeslotOption[];
   selectedClusterId?: number;
@@ -159,6 +167,9 @@ export interface SupplyWizardTaskContext {
   selectedDropOffId?: number;
   selectedDropOffName?: string;
   selectedTimeslot?: SupplyWizardTimeslotOption;
+  timeslotFromHour?: number;
+  timeslotToHour?: number;
+  timeslotFirstAvailable?: boolean;
   readyInDays?: number;
   autoWarehouseSelection?: boolean;
   dropOffSearchQuery?: string;
@@ -197,6 +208,10 @@ export class SupplyWizardStore {
       draftExpiresAt: undefined,
       draftError: undefined,
       selectedTimeslot: undefined,
+      timeslotFirstAvailable: undefined,
+      timeslotFromHour: undefined,
+      timeslotToHour: undefined,
+      supplyType: 'CREATE_TYPE_CROSSDOCK',
       pendingApiKey: undefined,
       pendingClientId: undefined,
       orders: [],

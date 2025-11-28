@@ -73,6 +73,7 @@ export class OzonSheetService {
       city: '',
       warehouseName: '',
       lastDay: '',
+      supplyType: 'CREATE_TYPE_CROSSDOCK',
       draftId: 0,
       draftOperationId: '',
       orderFlag: 0,

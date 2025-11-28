@@ -11,6 +11,7 @@ export interface OzonSupplyTask {
   city: string;
   warehouseName: string;
   lastDay: string;
+  supplyType?: OzonSupplyType;
   draftId: number;
   draftOperationId: string;
   orderFlag: number;
@@ -22,6 +23,9 @@ export interface OzonSupplyTask {
   warehouseAutoSelect?: boolean;
   warehouseSelectionPendingNotified?: boolean;
   strictWarehouseConfirmed?: boolean;
+  timeslotFromHour?: number;
+  timeslotToHour?: number;
+  timeslotFirstAvailable?: boolean;
 }
 
 export type OzonSupplyTaskMap = Map<string, OzonSupplyTask>;
@@ -32,6 +36,8 @@ export interface OzonSupplyProcessResult {
   message?: string;
   operationId?: string;
 }
+
+export type OzonSupplyType = 'CREATE_TYPE_CROSSDOCK' | 'CREATE_TYPE_DIRECT';
 
 export enum OzonSupplyEventType {
   DraftCreated = 'draftCreated',
