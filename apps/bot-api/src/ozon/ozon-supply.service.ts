@@ -403,7 +403,7 @@ export class OzonSupplyService {
         task,
         credentials,
         this.createDraftInfoStub(task),
-        { warehouseId: task.warehouseId, name: task.warehouseName },
+        { warehouseId: task.warehouseId!, name: task.warehouseName },
         abortSignal,
       );
       if (result) {
@@ -442,7 +442,7 @@ export class OzonSupplyService {
       }
 
       if (strictWarehouse) {
-        const warehouseChoice = this.findWarehouseInCluster(info, task.warehouseId, task.clusterId, task.warehouseName);
+        const warehouseChoice = this.findWarehouseInCluster(info, task.warehouseId!, task.clusterId, task.warehouseName);
 
         if (!warehouseChoice) {
           const message = task.warehouseSelectionPendingNotified
