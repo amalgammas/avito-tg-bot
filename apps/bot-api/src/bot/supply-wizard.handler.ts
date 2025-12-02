@@ -55,6 +55,7 @@ export class SupplyWizardHandler {
     private readonly draftRecreateMaxAttempts = 1_000;
     private readonly draftLifetimeMs = 30 * 60 * 1000;
     private readonly readyDaysMin = 0;
+    private readonly readyDaysDefault = 1;
     private readonly readyDaysMax = 28;
     private readonly warehousePageSize = 10;
     private readonly orderIdPollAttempts = 5;
@@ -1559,8 +1560,10 @@ export class SupplyWizardHandler {
     }
 
     private resolveSearchDeadlineIso(state: SupplyWizardState, readyInDays: number): string {
-        const normalizedReady = this.normalizeReadyDaysValue(readyInDays ?? state.readyInDays ?? this.readyDaysMin);
-        const effectiveReady = normalizedReady ?? this.readyDaysMin;
+        const normalizedReady = this.normalizeReadyDaysValue(
+            readyInDays ?? state.readyInDays ?? this.readyDaysDefault,
+        );
+        const effectiveReady = normalizedReady ?? this.readyDaysDefault;
 
         const candidate = state.lastDay ? this.normalizeDeadlineDate(new Date(state.lastDay), effectiveReady) : undefined;
         const fallback =

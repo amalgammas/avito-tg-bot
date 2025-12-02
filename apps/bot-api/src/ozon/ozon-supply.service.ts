@@ -505,6 +505,16 @@ export class OzonSupplyService {
       return { task, event: { type: OzonSupplyEventType.DraftExpired }, message: 'Черновик устарел, создадим заново' };
     }
 
+    if (info.status === 'CALCULATION_STATUS_FAILED') {
+      task.draftOperationId = '';
+      task.draftId = 0;
+      return {
+        task,
+        event: { type: OzonSupplyEventType.DraftInvalid },
+        message: 'Черновик отклонён или отсутствует, создаём заново',
+      };
+    }
+
     if (info.code === 1) {
       task.draftOperationId = '';
       task.draftId = 0;
@@ -936,7 +946,7 @@ export class OzonSupplyService {
       return fallback;
     }
 
-    return 2;
+    return 1;
   }
 
   private normalizeReadyInDays(value: unknown): number | undefined {

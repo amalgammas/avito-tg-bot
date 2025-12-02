@@ -118,7 +118,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     }
 
     const clonedTask = this.cloneTask(record.taskPayload);
-    const readyInDays = record.readyInDays ?? 0;
+    const readyInDays = record.readyInDays ?? 1;
 
     const taskKey = record.taskId ?? record.id ?? `task-${record.chatId}-${Date.now()}`;
     const abortController = new AbortController();
