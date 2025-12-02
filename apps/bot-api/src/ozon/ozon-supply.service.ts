@@ -927,12 +927,18 @@ export class OzonSupplyService {
     const preparationExpired = Date.now() > preparationThreshold.getTime();
     const expired = preparationExpired || from.getTime() > to.getTime();
 
-    return {
+    const window = {
       dateFromIso: toOzonIso(from),
       dateToIso: toOzonIso(to),
       expired,
       preparationExpired,
     };
+
+    this.logger.debug(
+      `[timeslotWindow] task=${task.taskId ?? 'n/a'} readyInDays=${readyInDays} lastDay=${task.lastDay ?? 'n/a'} from=${window.dateFromIso} to=${window.dateToIso} expired=${expired} prepExpired=${preparationExpired}`,
+    );
+
+    return window;
   }
 
   private resolveReadyInDays(task: OzonSupplyTask): number {
