@@ -5156,6 +5156,10 @@ export class SupplyWizardHandler {
         if (!chatId) return;
 
         const eventType = result.event?.type ?? OzonSupplyEventType.Error;
+        // TimeslotMissing happens during retries and floods the admin channel; skip noisy logs
+        if (eventType === OzonSupplyEventType.TimeslotMissing) {
+            return;
+        }
         const wizardEvent = this.mapSupplyEvent(eventType);
 
         const text = this.view.formatSupplyEvent({
