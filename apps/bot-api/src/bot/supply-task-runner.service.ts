@@ -83,6 +83,8 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
         parts.push(`chat: ${task.chatId}`);
         const taskLabel = this.formatTaskName(task.taskId ?? task.id);
         if (taskLabel) parts.push(`task: ${taskLabel}`);
+        const supplyTypeLabel = this.formatSupplyType(task.taskPayload?.supplyType);
+        if (supplyTypeLabel) parts.push(`тип: ${supplyTypeLabel}`);
         if (task.dropOffName) parts.push(`drop-off: ${task.dropOffName}`);
         if (task.clusterName) parts.push(`cluster: ${task.clusterName}`);
         if (task.warehouseName) parts.push(`склад: ${task.warehouseName}`);
@@ -167,6 +169,16 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       day: '2-digit',
       month: '2-digit',
     }).format(parsed);
+  }
+
+  private formatSupplyType(type?: string): string | undefined {
+    if (type === 'CREATE_TYPE_DIRECT') {
+      return 'прямая';
+    }
+    if (type === 'CREATE_TYPE_CROSSDOCK') {
+      return 'кросс-докинг';
+    }
+    return undefined;
   }
 
   private async handleTaskEvent(
