@@ -264,15 +264,17 @@ export class SupplyWizardViewService {
 
     renderTimeslotWindowPrompt(options: { phase: 'from' | 'to'; fromHour?: number }): string {
         const lines = [
-            '<b>Укажите границы для поиска таймлота.</b>',
-            options.phase === 'from' ? 'НАЧАЛО ПОИСКА' : 'КОНЕЦ ПОИСКА',
+            '<b>Укажите границу часового диапазона для поиска тайм-слота. Или выберите “первый доступный”</b>',
+            'Бот будет искать тайм слот не раньше указанного часа. Например для поиска слота 12:00 - 13:00, нужно выбрать 12',
+            '',
+            options.phase === 'from' ? 'ВЕРХНЯЯ ГРАНИЦА — ОТ' : 'НИЖНЯЯ ГРАНИЦА — ДО',
+            '',
         ];
 
         if (typeof options.fromHour === 'number') {
             lines.push(`Начало: ${this.formatHour(options.fromHour)}`);
         }
 
-        lines.push('Выберите удобный час на клавиатуре.');
         return lines.join('\n');
     }
 
@@ -290,7 +292,11 @@ export class SupplyWizardViewService {
             rows.push([{ text: 'Первый доступный', callback_data: `${prefix}:any` }]);
         }
 
-        const hours = Array.from({ length: 24 }, (_, index) => index);
+        const startHour =
+            params.phase === 'to' && typeof params.fromHour === 'number'
+                ? Math.max(0, Math.min(24, Math.floor(params.fromHour) + 1))
+                : 0;
+        const hours = Array.from({ length: Math.max(0, 24 - startHour) }, (_, index) => index + startHour);
         for (let i = 0; i < hours.length; i += 4) {
             const chunk = hours.slice(i, i + 4);
             rows.push(
@@ -364,10 +370,12 @@ export class SupplyWizardViewService {
 
     renderOrderDetails(order: SupplyWizardOrderSummary): string {
         const searchWindowLine = this.buildSearchDeadlineLine(order.searchDeadlineAt);
+        const supplyTypeLabel = this.formatSupplyType(order.supplyType);
 
         const lines = [
             `Поставка №${order.orderId ?? order.operationId ?? order.id}`,
             '',
+            supplyTypeLabel ? `Тип: ${supplyTypeLabel}.` : undefined,
             order.clusterName ? `Кластер: ${order.clusterName}` : undefined,
             order.dropOffName ? `Пункт сдачи: ${order.dropOffName}` : undefined,
             order.warehouse ? `Склад: ${order.warehouse}` : undefined,
@@ -452,10 +460,12 @@ export class SupplyWizardViewService {
         const displayedItems = task.items.slice(0, limit);
         const searchWindowLine = this.buildSearchDeadlineLine(task.searchDeadlineAt);
         const createdLine = this.buildCreatedLine(task.createdAt);
+        const supplyTypeLabel = this.formatSupplyType(task.supplyType);
 
         const lines = [
             `Задача ${this.formatTaskName(task.operationId || task.id)}`,
             '\n',
+            supplyTypeLabel ? `Тип: ${supplyTypeLabel}.` : undefined,
             task.dropOffName ? `Пункт сдачи: ${task.dropOffName}` : undefined,
             task.clusterName ? `Кластер: ${task.clusterName}` : undefined,
             task.warehouse ? `Склад: ${task.warehouse}` : undefined,
@@ -485,10 +495,12 @@ export class SupplyWizardViewService {
     renderSupplySuccess(order: SupplyWizardOrderSummary): string {
         const searchWindowLine = this.buildSearchDeadlineLine(order.searchDeadlineAt);
         const createdLine = this.buildCreatedLine(order.createdAt);
+        const supplyTypeLabel = this.formatSupplyType(order.supplyType);
 
         const lines = [
             'Поставка создана ✅',
             `ID: ${order.orderId ?? order.id}`,
+            supplyTypeLabel ? `Тип: ${supplyTypeLabel}.` : undefined,
             order.timeslotLabel ? `Таймслот: ${order.timeslotLabel}` : order.arrival ? `Время отгрузки: ${order.arrival}` : undefined,
             order.warehouse ? `Склад: ${order.warehouse}` : undefined,
             createdLine,
@@ -966,7 +978,10 @@ export class SupplyWizardViewService {
         });
     }
 
-    formatItemsSummary(task: { items: Array<{ article: string; sku?: number; quantity: number }> }): string {
+    formatItemsSummary(
+        task: { items: Array<{ article: string; sku?: number; quantity: number }> },
+        options: { supplyType?: SupplyWizardState['supplyType'] } = {},
+    ): string {
         const limit = 20;
         const total = task.items.length;
         const displayed = task.items.slice(0, limit);
@@ -976,16 +991,20 @@ export class SupplyWizardViewService {
             lines.push(`… и ещё ${total - limit} позиций без вывода, чтобы не перегружать чат.`);
         }
 
-        return [
+        const parts = [
             'Товары из файла:',
             ...lines,
-            '',
-            '<b>Сейчас бот работает только с кросс-докингом.</b>',
-            '',
-            'Далее необходимо выбрать точку для сдачи поставки по кросс-докингу',
-            '',
-            '<b>Введите ниже город, адрес или название пункта сдачи поставок кросс-докинг.</b>'
-        ].join('\n');
+        ];
+
+        if (options.supplyType === 'CREATE_TYPE_CROSSDOCK') {
+            parts.push(
+                '',
+                '<b>Введите ниже город, адрес или название пункта сдачи поставки кросс-докинг</b>',
+                '',
+            );
+        }
+
+        return parts.join('\n');
     }
 
     formatSupplyEvent(result: { taskId: string; event: OzonSupplyEventType; message?: string }): string | undefined {
@@ -1130,6 +1149,16 @@ export class SupplyWizardViewService {
     private formatDropOffButtonLabel(option: SupplyWizardDropOffOption): string {
         const base = option.name ?? `Пункт ${option.warehouse_id}`;
         return this.truncate(`${base}`, 60);
+    }
+
+    private formatSupplyType(type?: 'CREATE_TYPE_CROSSDOCK' | 'CREATE_TYPE_DIRECT'): string | undefined {
+        if (type === 'CREATE_TYPE_DIRECT') {
+            return 'Прямая поставка';
+        }
+        if (type === 'CREATE_TYPE_CROSSDOCK') {
+            return 'Кросс-докинг';
+        }
+        return undefined;
     }
 
     private formatCreatedAt(value: number | undefined): string | undefined {

@@ -69,6 +69,7 @@ export interface SupplyWizardOrderSummary {
   dropOffName?: string;
   clusterName?: string;
   readyInDays?: number;
+  supplyType?: 'CREATE_TYPE_CROSSDOCK' | 'CREATE_TYPE_DIRECT';
   items: SupplyWizardSupplyItem[];
   createdAt: number;
   searchDeadlineAt?: number;

@@ -227,6 +227,7 @@ export class SupplyOrderStore {
       dropOffName: record.dropOffName ?? undefined,
       clusterName: record.clusterName ?? undefined,
       readyInDays: record.readyInDays ?? undefined,
+      supplyType: record.taskPayload?.supplyType ?? undefined,
       items,
       createdAt: record.completedAt ?? record.createdAt,
       searchDeadlineAt: this.computeSearchDeadline(record),

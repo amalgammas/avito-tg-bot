@@ -261,13 +261,14 @@ export class SupplyWizardHandler {
         }
 
         const selectedTask = this.getSelectedTask(chatId, updated);
-        const summary = selectedTask ? this.view.formatItemsSummary(selectedTask) : '';
+        const summary = selectedTask ? this.view.formatItemsSummary(selectedTask, { supplyType }) : '';
 
         if (isDirect) {
             const promptLines = [
                 summary,
                 '',
-                'Выберите кластер для прямой поставки.',
+                '<b>Выберите кластер для прямой поставки</b>',
+                '',
             ]
                 .filter(Boolean)
                 .join('\n');
@@ -3030,6 +3031,7 @@ export class SupplyWizardHandler {
             dropOffName: dropOffName,
             clusterName: state.selectedClusterName,
             timeslotLabel: timeslotLabel ?? undefined,
+            supplyType: task.supplyType ?? state.supplyType,
             items,
             createdAt: Date.now(),
             searchDeadlineAt: completionSearchDeadline?.getTime()
@@ -3281,7 +3283,7 @@ export class SupplyWizardHandler {
         }
 
         const selectedTask = this.getSelectedTask(chatId, state);
-        const text = summary ?? (selectedTask ? this.view.formatItemsSummary(selectedTask) : '');
+        const text = summary ?? (selectedTask ? this.view.formatItemsSummary(selectedTask, { supplyType: state.supplyType }) : '');
 
         await this.view.updatePrompt(
             ctx,
