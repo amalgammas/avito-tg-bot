@@ -173,8 +173,8 @@ export class SupplyWizardViewService {
             summary,
             '',
             '<b>Выберите тип поставки:</b>',
-            '• Кросс-докинг — сдаёте на пункт приёма, Ozon отвозит на склад.',
-            '• Прямая поставка — сами отвезёте товар на склад Ozon.',
+            '• Кросс-докинг — сдаете поставку на точку отгрузки Ozon, Ozon доставляет на целевой склад',
+            '• Прямая поставка — сами отвезёте товар на склад Ozon',
         ].join('\n');
     }
 
@@ -263,11 +263,11 @@ export class SupplyWizardViewService {
     }
 
     renderTimeslotWindowPrompt(options: { phase: 'from' | 'to'; fromHour?: number }): string {
+        const border = options?.phase === 'to' ? ' нижнюю ' : ' верхнюю ';
+
         const lines = [
-            '<b>Укажите границу часового диапазона для поиска тайм-слота. Или выберите “первый доступный”</b>',
+            `<b>Укажите ${ border } границу часового диапазона для поиска тайм-слота. Или выберите “Первый доступный”</b>`,
             'Бот будет искать тайм слот не раньше указанного часа. Например для поиска слота 12:00 - 13:00, нужно выбрать 12',
-            '',
-            options.phase === 'from' ? 'ВЕРХНЯЯ ГРАНИЦА — ОТ' : 'НИЖНЯЯ ГРАНИЦА — ДО',
             '',
         ];
 
@@ -982,29 +982,18 @@ export class SupplyWizardViewService {
         task: { items: Array<{ article: string; sku?: number; quantity: number }> },
         options: { supplyType?: SupplyWizardState['supplyType'] } = {},
     ): string {
-        const limit = 20;
-        const total = task.items.length;
-        const displayed = task.items.slice(0, limit);
-        const lines = displayed.map((item) => `• ${item.article} → SKU ${item.sku} × ${item.quantity}`);
-
-        if (total > limit) {
-            lines.push(`… и ещё ${total - limit} позиций без вывода, чтобы не перегружать чат.`);
-        }
-
-        const parts = [
-            'Товары из файла:',
-            ...lines,
-        ];
+        const summary = [];
 
         if (options.supplyType === 'CREATE_TYPE_CROSSDOCK') {
-            parts.push(
+            summary.push(
                 '',
-                '<b>Введите ниже город, адрес или название пункта сдачи поставки кросс-докинг</b>',
+                '<b>Необходимо выбрать точку для сдачи поставки по кросс-докингу</b>',
                 '',
+                'Введите ниже город, адрес или название пункта сдачи поставок кросс-докинг'
             );
         }
 
-        return parts.join('\n');
+        return summary.join('\n');
     }
 
     formatSupplyEvent(result: { taskId: string; event: OzonSupplyEventType; message?: string }): string | undefined {

@@ -267,7 +267,7 @@ export class SupplyWizardHandler {
             const promptLines = [
                 summary,
                 '',
-                '<b>Выберите кластер для прямой поставки</b>',
+                '<b>Выберите кластер, в который бот будет искать слоты для прямой поставки</b>',
                 '',
             ]
                 .filter(Boolean)
@@ -885,6 +885,8 @@ export class SupplyWizardHandler {
             return false;
         }
 
+        const filteredTimeslots = this.filterTimeslotsByReadiness(state.draftTimeslots, state.selectedTimeslot, normalized);
+
         const updated =
             this.updateWizardState(chatId, (current) => {
                 if (!current) return undefined;
@@ -893,6 +895,8 @@ export class SupplyWizardHandler {
                     stage: 'awaitSearchDeadline',
                     readyInDays: normalized,
                     lastDay: undefined,
+                    draftTimeslots: filteredTimeslots.options,
+                    selectedTimeslot: filteredTimeslots.selected,
                     timeslotFirstAvailable: undefined,
                     timeslotFromHour: undefined,
                     timeslotToHour: undefined,
@@ -908,6 +912,15 @@ export class SupplyWizardHandler {
                 stage: 'awaitSearchDeadline',
                 readyInDays: normalized,
                 lastDay: undefined,
+                draftTimeslots: filteredTimeslots.options.map((item) => ({ ...item })),
+                selectedTimeslot: filteredTimeslots.selected
+                    ? {
+                        ...filteredTimeslots.selected,
+                        data: filteredTimeslots.selected.data
+                            ? { ...filteredTimeslots.selected.data }
+                            : filteredTimeslots.selected.data,
+                    }
+                    : undefined,
                 updatedAt: Date.now(),
             }));
         }
@@ -1281,7 +1294,7 @@ export class SupplyWizardHandler {
         timeslotFromHour?: number;
         timeslotToHour?: number;
     }): string | undefined {
-        if (state.timeslotFirstAvailable || (state.timeslotFromHour === undefined && state.timeslotToHour === undefined)) {
+        if (state.timeslotFirstAvailable) {
             return 'первый доступный';
         }
 
@@ -1301,6 +1314,27 @@ export class SupplyWizardHandler {
         }
 
         return undefined;
+    }
+
+    private filterTimeslotsByReadiness(
+        options: SupplyWizardTimeslotOption[] | undefined,
+        selected: SupplyWizardTimeslotOption | undefined,
+        readyInDays: number,
+    ): { options: SupplyWizardTimeslotOption[]; selected?: SupplyWizardTimeslotOption } {
+        const cutoff = startOfMoscowDay(addMoscowDays(new Date(), readyInDays)).getTime();
+        const filtered = (options ?? []).filter((slot) => {
+            const fromMs = new Date(slot.from).getTime();
+            if (Number.isNaN(fromMs)) {
+                return true;
+            }
+            return fromMs >= cutoff;
+        });
+
+        const selectedEntry = filtered.find((slot) => slot.id === selected?.id);
+        return {
+            options: filtered,
+            selected: selectedEntry ?? filtered[0],
+        };
     }
 
     private formatHour(hour: number): string {
