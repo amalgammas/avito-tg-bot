@@ -589,7 +589,7 @@ export class OzonSupplyService {
         return task.selectedTimeslot;
       }
       this.logger.warn(
-        `[timeslotWindow] preset timeslot is outside allowed window, ignoring (task=${task.taskId ?? 'n/a'})`,
+        `[timeslotWindow] preset timeslot is outside allowed window, ignoring (task=${task.taskId ?? 'n/a'}) slot=${this.describeTimeslotForLog(task.selectedTimeslot)}`,
       );
       task.selectedTimeslot = undefined;
     }
@@ -627,12 +627,14 @@ export class OzonSupplyService {
       for (const day of warehouse.days ?? []) {
         for (const slot of day.timeslots ?? []) {
           if (slot.from_in_timezone && slot.to_in_timezone) {
-            if (
-              !this.isTimeslotWithinWindow(slot, windowFrom, windowTo, {
-                fromHour,
-                toHour,
-              })
-            ) {
+            const fitsWindow = this.isTimeslotWithinWindow(slot, windowFrom, windowTo, {
+              fromHour,
+              toHour,
+            });
+            if (!fitsWindow) {
+              this.logger.debug(
+                `[timeslotWindow] skip slot outside window (task=${task.taskId ?? 'n/a'} warehouse=${task.warehouseId ?? 'n/a'}) slot=${this.describeTimeslotForLog(slot)}`,
+              );
               continue;
             }
             return slot;
@@ -934,6 +936,13 @@ export class OzonSupplyService {
     return fromMs >= windowFrom.getTime() && toMs <= windowTo.getTime();
   }
 
+  private describeTimeslotForLog(slot: OzonDraftTimeslot | undefined): string {
+    if (!slot?.from_in_timezone || !slot?.to_in_timezone) {
+      return 'n/a';
+    }
+    return `${slot.from_in_timezone}..${slot.to_in_timezone}`;
+  }
+
   private ozonApiDefaultCredentialsAvailable(): boolean {
     const creds = this.ozonApiDefaultCredentials();
     return Boolean(creds.clientId && creds.apiKey);
@@ -958,7 +967,7 @@ export class OzonSupplyService {
     preparationExpired: boolean;
   } {
     const readyInDays = this.resolveReadyInDays(task);
-    const from = startOfMoscowDay(addMoscowDays(new Date(), readyInDays));
+    const from = addMoscowDays(new Date(), readyInDays);
 
     const upperBound = this.computeTimeslotUpperBoundDate();
     const parsedDeadline = parseIsoDate(task.lastDay);

@@ -1321,7 +1321,7 @@ export class SupplyWizardHandler {
         selected: SupplyWizardTimeslotOption | undefined,
         readyInDays: number,
     ): { options: SupplyWizardTimeslotOption[]; selected?: SupplyWizardTimeslotOption } {
-        const cutoff = startOfMoscowDay(addMoscowDays(new Date(), readyInDays)).getTime();
+        const cutoff = addMoscowDays(new Date(), readyInDays).getTime();
         const filtered = (options ?? []).filter((slot) => {
             const fromMs = new Date(slot.from).getTime();
             if (Number.isNaN(fromMs)) {
