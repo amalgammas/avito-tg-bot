@@ -669,7 +669,7 @@ export class OzonSupplyService {
     warehouseId: number,
     clusterId: string | number | undefined,
     preferredName?: string,
-  ): { warehouseId: number; name?: string } | undefined {
+  ): { warehouseId: number; name?: string; state?: string; isFullyAvailable?: boolean } | undefined {
     if (!warehouseId) {
       return undefined;
     }
@@ -691,7 +691,9 @@ export class OzonSupplyService {
         }
 
         const name = warehouseInfo?.supply_warehouse?.name?.trim() || preferredName;
-        return { warehouseId: parsedId, name };
+        const state = warehouseInfo?.status?.state;
+        const isFullyAvailable = state === 'WAREHOUSE_SCORING_STATUS_FULL_AVAILABLE';
+        return { warehouseId: parsedId, name, state, isFullyAvailable };
       }
     }
 
@@ -703,7 +705,7 @@ export class OzonSupplyService {
     preferredWarehouseId: number | undefined,
     preferredWarehouseName: string | undefined,
     options: { strict?: boolean } = {},
-  ): { warehouseId: number; name?: string } | undefined {
+  ): { warehouseId: number; name?: string; state?: string; isFullyAvailable?: boolean } | undefined {
     const warehouses = this.collectDraftWarehouses(info);
     if (!warehouses.length) {
       return undefined;
@@ -717,7 +719,12 @@ export class OzonSupplyService {
         if (!match.isFullyAvailable) {
           return undefined;
         }
-        return { warehouseId: match.warehouseId, name: match.name ?? preferredWarehouseName };
+        return {
+          warehouseId: match.warehouseId,
+          name: match.name ?? preferredWarehouseName,
+          state: match.state,
+          isFullyAvailable: match.isFullyAvailable,
+        };
       }
       if (strict) {
         return undefined;
@@ -726,7 +733,12 @@ export class OzonSupplyService {
 
     const firstAvailable = warehouses.find((entry) => entry.isFullyAvailable);
     if (firstAvailable) {
-      return { warehouseId: firstAvailable.warehouseId, name: firstAvailable.name ?? preferredWarehouseName };
+      return {
+        warehouseId: firstAvailable.warehouseId,
+        name: firstAvailable.name ?? preferredWarehouseName,
+        state: firstAvailable.state,
+        isFullyAvailable: firstAvailable.isFullyAvailable,
+      };
     }
 
     return undefined;
@@ -749,11 +761,21 @@ export class OzonSupplyService {
     task: OzonSupplyTask,
     credentials: OzonCredentials,
     info: OzonDraftStatus,
-    entries: Array<{ warehouseId: number; name?: string }>,
+    entries: Array<{ warehouseId: number; name?: string; state?: string; isFullyAvailable?: boolean }>,
     abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult | undefined> {
+    const availableEntries = entries.filter((entry) => entry.isFullyAvailable);
+    if (!availableEntries.length) {
+      task.warehouseSelectionPendingNotified = true;
+      return {
+        task,
+        event: { type: OzonSupplyEventType.WarehousePending },
+        message: 'Черновик не содержит складов со статусом WAREHOUSE_SCORING_STATUS_FULL_AVAILABLE. Ждём обновления.',
+      };
+    }
+
     while (true) {
-      for (const entry of entries) {
+      for (const entry of availableEntries) {
         this.ensureNotAborted(abortSignal);
         const result = await this.tryCreateSupplyOnWarehouse(task, credentials, info, entry, abortSignal);
         if (result) {
@@ -769,9 +791,21 @@ export class OzonSupplyService {
     task: OzonSupplyTask,
     credentials: OzonCredentials,
     info: OzonDraftStatus,
-    entry: { warehouseId: number; name?: string },
+    entry: { warehouseId: number; name?: string; state?: string; isFullyAvailable?: boolean },
     abortSignal?: AbortSignal,
   ): Promise<OzonSupplyProcessResult | undefined> {
+    if (entry.isFullyAvailable !== true) {
+      const message = task.warehouseAutoSelect === false
+        ? `Ждём склад ${entry.warehouseId}. Ozon вернул статус ${entry.state ?? 'n/a'}, нужен WAREHOUSE_SCORING_STATUS_FULL_AVAILABLE.`
+        : undefined;
+      task.warehouseSelectionPendingNotified = true;
+      return {
+        task,
+        event: { type: OzonSupplyEventType.WarehousePending },
+        message,
+      };
+    }
+
     const previousWarehouseId = typeof task.warehouseId === 'number' ? task.warehouseId : undefined;
     const previousWarehouseName = task.warehouseName;
     const selectedWarehouseId = entry.warehouseId;
