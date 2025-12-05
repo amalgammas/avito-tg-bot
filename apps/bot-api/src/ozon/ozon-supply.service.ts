@@ -577,9 +577,21 @@ export class OzonSupplyService {
   ): Promise<OzonDraftTimeslot | undefined> {
     const fromHour = task.timeslotFirstAvailable ? undefined : task.timeslotFromHour;
     const toHour = task.timeslotFirstAvailable ? undefined : task.timeslotToHour;
+    const windowFrom = parseIsoDate(window.dateFromIso);
+    const windowTo = parseIsoDate(window.dateToIso);
 
     if (task.selectedTimeslot) {
-      return task.selectedTimeslot;
+      const fitsWindow = this.isTimeslotWithinWindow(task.selectedTimeslot, windowFrom, windowTo, {
+        fromHour,
+        toHour,
+      });
+      if (fitsWindow) {
+        return task.selectedTimeslot;
+      }
+      this.logger.warn(
+        `[timeslotWindow] preset timeslot is outside allowed window, ignoring (task=${task.taskId ?? 'n/a'})`,
+      );
+      task.selectedTimeslot = undefined;
     }
 
     if (!task.draftId) {
@@ -615,8 +627,12 @@ export class OzonSupplyService {
       for (const day of warehouse.days ?? []) {
         for (const slot of day.timeslots ?? []) {
           if (slot.from_in_timezone && slot.to_in_timezone) {
-            const slotHour = this.extractHourFromIso(slot.from_in_timezone);
-            if (!this.isTimeslotInHourRange(slotHour, fromHour, toHour)) {
+            if (
+              !this.isTimeslotWithinWindow(slot, windowFrom, windowTo, {
+                fromHour,
+                toHour,
+              })
+            ) {
               continue;
             }
             return slot;
@@ -890,6 +906,32 @@ export class OzonSupplyService {
       return false;
     }
     return true;
+  }
+
+  private isTimeslotWithinWindow(
+    slot: OzonDraftTimeslot | undefined,
+    windowFrom: Date | undefined,
+    windowTo: Date | undefined,
+    options: { fromHour?: number; toHour?: number },
+  ): boolean {
+    if (!slot?.from_in_timezone || !slot?.to_in_timezone || !windowFrom || !windowTo) {
+      return false;
+    }
+
+    const fromDate = parseIsoDate(slot.from_in_timezone);
+    const toDate = parseIsoDate(slot.to_in_timezone);
+    if (!fromDate || !toDate) {
+      return false;
+    }
+
+    const slotHour = this.extractHourFromIso(slot.from_in_timezone);
+    if (!this.isTimeslotInHourRange(slotHour, options.fromHour, options.toHour)) {
+      return false;
+    }
+
+    const fromMs = fromDate.getTime();
+    const toMs = toDate.getTime();
+    return fromMs >= windowFrom.getTime() && toMs <= windowTo.getTime();
   }
 
   private ozonApiDefaultCredentialsAvailable(): boolean {

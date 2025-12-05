@@ -41,6 +41,7 @@ describe('OzonSupplyService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    (service as any).draftRequestHistory = new Map();
   });
 
   const baseTask: OzonSupplyTask = {
@@ -98,5 +99,48 @@ describe('OzonSupplyService', () => {
     expect(result.event.type).toBe(OzonSupplyEventType.DraftCreated);
     expect(task.draftOperationId).toBe('operation-123');
     expect(ozonApi.createDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it('pickTimeslot ignores preset slot outside readiness window', async () => {
+    const credentials = { clientId: 'id', apiKey: 'key' };
+    const staleTimeslot = {
+      from_in_timezone: '2020-01-01T10:00:00+03:00',
+      to_in_timezone: '2020-01-01T12:00:00+03:00',
+    };
+
+    const task: OzonSupplyTask = {
+      ...baseTask,
+      readyInDays: 1,
+      draftId: 123,
+      draftOperationId: 'op-2',
+      warehouseId: 7,
+      selectedTimeslot: staleTimeslot,
+    };
+
+    const window = (service as any).computeTimeslotWindow(task);
+    const nextFrom = window.dateFromIso;
+    const nextTo = new Date(new Date(nextFrom).getTime() + 2 * 60 * 60 * 1000).toISOString();
+
+    ozonApi.getDraftTimeslots.mockResolvedValue({
+      drop_off_warehouse_timeslots: [
+        {
+          days: [
+            {
+              timeslots: [
+                {
+                  from_in_timezone: nextFrom,
+                  to_in_timezone: nextTo,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    const result = await (service as any).pickTimeslot(task, credentials, window);
+    expect(result?.from_in_timezone).toBe(nextFrom);
+    expect(ozonApi.getDraftTimeslots).toHaveBeenCalledTimes(1);
+    expect(task.selectedTimeslot).toBeUndefined();
   });
 });
