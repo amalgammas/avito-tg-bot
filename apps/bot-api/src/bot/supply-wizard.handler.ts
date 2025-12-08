@@ -5194,6 +5194,14 @@ export class SupplyWizardHandler {
         if (eventType === OzonSupplyEventType.TimeslotMissing) {
             return;
         }
+        // WarehousePending with raw Ozon status is also noisy and no longer needed in admin channel
+        if (
+            eventType === OzonSupplyEventType.WarehousePending &&
+            typeof result.message === 'string' &&
+            result.message.includes('Ozon вернул статус')
+        ) {
+            return;
+        }
         const wizardEvent = this.mapSupplyEvent(eventType);
 
         const text = this.view.formatSupplyEvent({
