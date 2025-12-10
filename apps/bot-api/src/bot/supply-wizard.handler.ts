@@ -5202,6 +5202,14 @@ export class SupplyWizardHandler {
         ) {
             return;
         }
+        // WarehousePending when draft still lacks fully available warehouses spams admin channel
+        if (
+            eventType === OzonSupplyEventType.WarehousePending &&
+            typeof result.message === 'string' &&
+            result.message.includes('Черновик не содержит складов со статусом WAREHOUSE_SCORING_STATUS_FULL_AVAILABLE')
+        ) {
+            return;
+        }
         const wizardEvent = this.mapSupplyEvent(eventType);
 
         const text = this.view.formatSupplyEvent({
