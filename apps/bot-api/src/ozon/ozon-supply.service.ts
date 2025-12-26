@@ -393,6 +393,15 @@ export class OzonSupplyService {
       return { task, event: { type: OzonSupplyEventType.Error }, message: 'Не удалось определить cluster_id' };
     }
 
+    const window = this.computeTimeslotWindow(task);
+    if (window.expired) {
+      task.orderFlag = 1;
+      const message = window.preparationExpired
+        ? 'Недостаточно времени на подготовку: крайняя дата раньше, чем выбранное время на готовность.'
+        : 'Временной диапазон для поиска таймслотов истёк.';
+      return { task, event: { type: OzonSupplyEventType.WindowExpired }, message };
+    }
+
     const creds = credentials ?? this.ozonApiDefaultCredentials();
 
     if (task.draftOperationId) {
