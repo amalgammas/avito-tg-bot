@@ -262,6 +262,27 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
           ],
         });
         break;
+      case OzonSupplyEventType.WindowExpired: {
+        this.logger.warn(`Task ${taskLabel} window expired: ${result.message ?? 'window expired'}`);
+        await this.orderStore.deleteByTaskId(record.chatId, taskLabel);
+
+        const lines = [
+          `Задача ${taskLabel} остановлена ⛔️`,
+          record.dropOffName ? `Откуда: ${record.dropOffName}` : undefined,
+          record.warehouse
+            ? `Куда: ${record.warehouse}`
+            : record.warehouseName
+            ? `Куда: ${record.warehouseName}`
+            : undefined,
+          result.message ?? 'Слот не найден в заданном окне. Пересоздайте задачу.',
+        ].filter((line): line is string => Boolean(line));
+
+        await this.notifications.notifyUser(record.chatId, lines.join('\n'));
+        await this.notifications.notifyWizard(WizardEvent.WindowExpired, {
+          lines: [`task: ${taskLabel}`, `chat: ${record.chatId}`, result.message ?? 'window expired'],
+        });
+        break;
+      }
       default:
         this.logger.debug(`Task ${taskLabel} resume event: ${eventType}`);
     }
