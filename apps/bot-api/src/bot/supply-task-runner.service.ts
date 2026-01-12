@@ -15,7 +15,7 @@ import { SupplyTaskAbortService } from './services/supply-task-abort.service';
 @Injectable()
 export class SupplyTaskRunnerService implements OnApplicationBootstrap {
   private readonly logger = new Logger(SupplyTaskRunnerService.name);
-  private readonly summaryIntervalMs = 5 * 60 * 1000;
+  private readonly summaryIntervalMs = 15 * 60 * 1000;
   private summaryTimer?: NodeJS.Timeout;
   private summaryRunning = false;
   private readonly orderIdPollAttempts = 5;
