@@ -5194,6 +5194,10 @@ export class SupplyWizardHandler {
         if (eventType === OzonSupplyEventType.TimeslotMissing) {
             return;
         }
+        // WarehousePending without message becomes spammy; skip silent notifications
+        if (eventType === OzonSupplyEventType.WarehousePending && !result.message) {
+            return;
+        }
         // WarehousePending with raw Ozon status is also noisy and no longer needed in admin channel
         if (
             eventType === OzonSupplyEventType.WarehousePending &&
@@ -5218,7 +5222,13 @@ export class SupplyWizardHandler {
             message: result.message,
         });
 
-        const lines = text ? [text] : [];
+        const lines: string[] = [];
+        if (result.task.taskId) {
+            lines.push(`task: ${result.task.taskId}`);
+        }
+        if (text) {
+            lines.push(text);
+        }
         await this.notifications.notifyWizard(wizardEvent, { ctx, lines });
     }
 
@@ -5256,6 +5266,7 @@ export class SupplyWizardHandler {
         const chatId = (ctx.chat as any)?.id;
         return typeof chatId === 'undefined' || chatId === null ? undefined : String(chatId);
     }
+
 
     private async resolveCredentials(chatId: string): Promise<OzonCredentials | undefined> {
         const stored = await this.credentialsStore.get(chatId);

@@ -1,4 +1,6 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { InjectBot } from 'nestjs-telegraf';
+import { Context, Telegraf } from 'telegraf';
 
 import type { OzonSupplyProcessResult, OzonSupplyTask } from '@bot/ozon/ozon-supply.types';
 import { OzonSupplyEventType } from '@bot/ozon/ozon-supply.types';
@@ -20,6 +22,8 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
   private summaryRunning = false;
   private readonly orderIdPollAttempts = 5;
   private readonly orderIdPollDelayMs = 1_000;
+  private readonly userLabelCache = new Map<string, { label: string; expiresAt: number }>();
+  private readonly userLabelTtlMs = 60 * 60 * 1000;
 
   constructor(
     private readonly orderStore: SupplyOrderStore,
@@ -28,6 +32,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     private readonly notifications: NotificationService,
     private readonly process: SupplyProcessService,
     private readonly taskAbortService: SupplyTaskAbortService,
+    @InjectBot() private readonly bot: Telegraf<Context>,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -77,10 +82,13 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       lines.push(`Всего активных задач: ${tasks.length}`);
       const limit = 20;
       const sample = tasks.slice(0, limit);
-      sample.forEach((task, index) => {
+      for (let index = 0; index < sample.length; index += 1) {
+        const task = sample[index];
         const parts: string[] = [];
         parts.push(`#${index + 1}`);
         parts.push(`chat: ${task.chatId}`);
+        const userLabel = await this.resolveUserLabel(task.chatId);
+        if (userLabel) parts.push(`user: ${userLabel}`);
         const taskLabel = this.formatTaskName(task.taskId ?? task.id);
         if (taskLabel) parts.push(`task: ${taskLabel}`);
         const supplyTypeLabel = this.formatSupplyType(task.taskPayload?.supplyType);
@@ -92,7 +100,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
         const deadlineLabel = this.formatSearchDeadline(task);
         if (deadlineLabel) parts.push(`Крайняя дата: до ${deadlineLabel}`);
         lines.push(parts.join('\n • '));
-      });
+      }
       if (tasks.length > sample.length) {
         lines.push(`… и ещё ${tasks.length - sample.length} задач`);
       }
@@ -179,6 +187,38 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       return 'кросс-докинг';
     }
     return undefined;
+  }
+
+  private async resolveUserLabel(chatId: string): Promise<string | undefined> {
+    const cached = this.userLabelCache.get(chatId);
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) {
+      return cached.label;
+    }
+
+    try {
+      const chat = await this.bot.telegram.getChat(chatId);
+      const label = this.describeChat(chat);
+      if (label) {
+        this.userLabelCache.set(chatId, { label, expiresAt: now + this.userLabelTtlMs });
+      }
+      return label;
+    } catch (error) {
+      this.logger.debug(`Failed to resolve user label for chat ${chatId}: ${String(error)}`);
+      return undefined;
+    }
+  }
+
+  private describeChat(chat: any): string | undefined {
+    if (!chat) return undefined;
+    const parts: string[] = [];
+    if (chat.username) {
+      parts.push(`${chat.username}`);
+    }
+    if (chat.first_name || chat.last_name) {
+      parts.push(`${chat.first_name ?? ''} ${chat.last_name ?? ''}`.trim());
+    }
+    return parts.filter(Boolean).join(' ');
   }
 
   private async handleTaskEvent(
