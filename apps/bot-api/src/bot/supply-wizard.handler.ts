@@ -264,23 +264,7 @@ export class SupplyWizardHandler {
         const summary = selectedTask ? this.view.formatItemsSummary(selectedTask, { supplyType }) : '';
 
         if (isDirect) {
-            const promptLines = [
-                summary,
-                '',
-                '<b>Выберите кластер, в который бот будет искать слоты для прямой поставки</b>',
-                '',
-            ]
-                .filter(Boolean)
-                .join('\n');
-
-            await this.view.updatePrompt(
-                ctx,
-                chatId,
-                updated,
-                promptLines,
-                this.view.buildClusterKeyboard(updated),
-                { parseMode: 'HTML' },
-            );
+            await this.promptClusterTypeSelect(ctx, chatId, updated, { summary });
             await this.safeAnswerCbQuery(ctx, chatId, 'Прямая поставка выбрана');
             return;
         }
@@ -1633,6 +1617,7 @@ export class SupplyWizardHandler {
             draftError: overrides.draftError,
             draftWarehouses: overrides.draftWarehouses?.map((item) => ({ ...item })) ?? [],
             draftTimeslots: overrides.draftTimeslots?.map((item) => ({ ...item })) ?? [],
+            clusterType: overrides.clusterType,
             selectedClusterId: overrides.selectedClusterId,
             selectedClusterName: overrides.selectedClusterName,
             selectedWarehouseId: overrides.selectedWarehouseId,
@@ -1923,6 +1908,9 @@ export class SupplyWizardHandler {
                 return;
             case 'clusterStart':
                 await this.onClusterStart(ctx, chatId, state);
+                return;
+            case 'clusterType':
+                await this.onClusterTypeSelect(ctx, chatId, state, rest[0]);
                 return;
             case 'cluster':
                 await this.onClusterSelect(ctx, chatId, state, rest[0]);
@@ -3268,6 +3256,7 @@ export class SupplyWizardHandler {
                 draftCreatedAt: undefined,
                 draftExpiresAt: undefined,
                 draftError: undefined,
+                clusterType: undefined,
                 selectedClusterId: undefined,
                 selectedClusterName: undefined,
                 selectedWarehouseId: undefined,
@@ -3329,6 +3318,79 @@ export class SupplyWizardHandler {
         );
     }
 
+    private async promptClusterTypeSelect(
+        ctx: Context,
+        chatId: string,
+        fallback: SupplyWizardState,
+        options: { summary?: string } = {},
+    ): Promise<SupplyWizardState | undefined> {
+        const updated = this.updateWizardState(chatId, (current) => {
+            if (!current) return undefined;
+            return {
+                ...current,
+                stage: 'clusterTypeSelect',
+                selectedClusterId: undefined,
+                selectedClusterName: undefined,
+                selectedWarehouseId: current.selectedWarehouseId,
+                selectedWarehouseName: current.selectedWarehouseName,
+                draftWarehouses: current.draftWarehouses,
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+            };
+        }) ?? fallback;
+
+        if (!updated) {
+            return undefined;
+        }
+
+        const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+        if (activeTaskId) {
+            this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                ...context,
+                stage: 'clusterTypeSelect',
+                selectedClusterId: undefined,
+                selectedClusterName: undefined,
+                selectedWarehouseId: updated.selectedWarehouseId ?? context.selectedWarehouseId,
+                selectedWarehouseName: updated.selectedWarehouseName ?? context.selectedWarehouseName,
+                draftWarehouses: updated.draftWarehouses.map((item) => ({ ...item })),
+                draftTimeslots: [],
+                selectedTimeslot: undefined,
+                draftStatus: 'idle',
+                draftOperationId: undefined,
+                draftId: undefined,
+                draftCreatedAt: undefined,
+                draftExpiresAt: undefined,
+                draftError: undefined,
+                updatedAt: Date.now(),
+            }));
+        }
+
+        const promptLines = [
+            options.summary,
+            options.summary ? '' : undefined,
+            '<b>Выберите регион для поиска кластеров.</b>',
+        ]
+            .filter(Boolean)
+            .join('\n');
+
+        await this.view.updatePrompt(
+            ctx,
+            chatId,
+            updated,
+            promptLines,
+            this.view.buildClusterTypeKeyboard(),
+            { parseMode: 'HTML' },
+        );
+
+        return updated;
+    }
+
     private async onClusterStart(
         ctx: Context,
         chatId: string,
@@ -3339,16 +3401,140 @@ export class SupplyWizardHandler {
             return;
         }
 
+        const updated = await this.promptClusterTypeSelect(ctx, chatId, state);
+        if (!updated) {
+            await this.safeAnswerCbQuery(ctx, chatId, 'Мастер закрыт');
+            return;
+        }
+
+        const message = (ctx.callbackQuery as any)?.message;
+        if (message?.chat?.id && message?.message_id) {
+            try {
+                await ctx.telegram.editMessageReplyMarkup(message.chat.id, message.message_id, undefined, undefined);
+            } catch (error) {
+                this.logger.debug(`editMessageReplyMarkup failed: ${this.describeError(error)}`);
+            }
+        }
+
+        await this.safeAnswerCbQuery(ctx, chatId, 'Продолжаем');
+    }
+
+    private async onClusterTypeSelect(
+        ctx: Context,
+        chatId: string,
+        state: SupplyWizardState,
+        payload: string | undefined,
+    ): Promise<void> {
+        if (state.stage !== 'clusterTypeSelect') {
+            await this.safeAnswerCbQuery(ctx, chatId, 'Выбор недоступен.');
+            return;
+        }
+
+        if (payload === 'back') {
+            const latest = this.wizardStore.get(chatId) ?? state;
+            if (latest.supplyType === 'CREATE_TYPE_DIRECT') {
+                await this.promptSupplyType(ctx, chatId, latest);
+                await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись');
+                return;
+            }
+
+            const updated =
+                this.updateWizardState(chatId, (current) => {
+                    if (!current) return undefined;
+                    return {
+                        ...current,
+                        stage: 'clusterPrompt',
+                    };
+                }) ?? latest;
+
+            const activeTaskId = this.resolveActiveTaskId(chatId, updated);
+            if (activeTaskId) {
+                this.updateTaskContext(chatId, activeTaskId, (context) => ({
+                    ...context,
+                    stage: 'clusterPrompt',
+                    updatedAt: Date.now(),
+                }));
+            }
+
+            const lines: string[] = [];
+            if (updated.selectedDropOffName || updated.selectedDropOffId) {
+                const dropOffLabel =
+                    updated.selectedDropOffName ?? (updated.selectedDropOffId ? String(updated.selectedDropOffId) : '');
+                lines.push(`Пункт сдачи выбран: ${dropOffLabel}.`);
+            }
+            if (updated.selectedClusterName || updated.selectedClusterId) {
+                lines.push(`Кластер: ${updated.selectedClusterName ?? updated.selectedClusterId}.`);
+            }
+            lines.push(
+                '',
+                '<b>Нажмите «Выбрать кластер», чтобы выбрать регион (Россия/СНГ) и кластер для поиска слотов.</b>',
+                '',
+                'При необходимости отправьте новый запрос с городом, чтобы сменить пункт сдачи.',
+            );
+
+            await this.view.updatePrompt(
+                ctx,
+                chatId,
+                updated,
+                lines.join('\n'),
+                this.view.withCancel(this.view.buildClusterStartKeyboard()),
+                { parseMode: 'HTML' },
+            );
+            await this.safeAnswerCbQuery(ctx, chatId, 'Вернулись');
+            return;
+        }
+
+        const clusterType =
+            payload === 'cis'
+                ? 'CLUSTER_TYPE_CIS'
+                : payload === 'ozon'
+                  ? 'CLUSTER_TYPE_OZON'
+                  : undefined;
+
+        if (!clusterType) {
+            await this.safeAnswerCbQuery(ctx, chatId, 'Некорректный регион');
+            return;
+        }
+
+        const credentials = await this.resolveCredentials(chatId);
+        if (!credentials) {
+            await ctx.reply('🔐 Сначала сохраните ключи через /start.');
+            return;
+        }
+
+        let clusters: OzonCluster[] = [];
+        try {
+            const response = await this.ozonApi.listClusters({ clusterType }, credentials);
+            clusters = response.clusters;
+        } catch (error) {
+            if (await this.handleOzonAuthFailure(ctx, chatId, error)) {
+                return;
+            }
+            this.logger.error(`listClusters failed: ${this.describeError(error)}`);
+            await ctx.reply('Не удалось получить список кластеров. Попробуйте позже.');
+            return;
+        }
+
+        if (!clusters.length) {
+            await ctx.reply('Ozon вернул пустой список кластеров. Попробуйте позже.');
+            return;
+        }
+
+        const options = this.view.buildOptions(clusters);
+
         const updated = this.updateWizardState(chatId, (current) => {
             if (!current) return undefined;
             return {
                 ...current,
                 stage: 'clusterSelect',
+                clusterType,
+                clusters: options.clusters,
+                warehouses: options.warehouses,
                 selectedClusterId: undefined,
                 selectedClusterName: undefined,
-                selectedWarehouseId: current.selectedWarehouseId,
-                selectedWarehouseName: current.selectedWarehouseName,
-                draftWarehouses: current.draftWarehouses,
+                selectedWarehouseId: undefined,
+                selectedWarehouseName: undefined,
+                draftWarehouses: [],
                 draftTimeslots: [],
                 selectedTimeslot: undefined,
                 draftStatus: 'idle',
@@ -3370,11 +3556,12 @@ export class SupplyWizardHandler {
             this.updateTaskContext(chatId, activeTaskId, (context) => ({
                 ...context,
                 stage: 'clusterSelect',
+                clusterType,
                 selectedClusterId: undefined,
                 selectedClusterName: undefined,
-                selectedWarehouseId: updated.selectedWarehouseId ?? context.selectedWarehouseId,
-                selectedWarehouseName: updated.selectedWarehouseName ?? context.selectedWarehouseName,
-                draftWarehouses: updated.draftWarehouses.map((item) => ({ ...item })),
+                selectedWarehouseId: undefined,
+                selectedWarehouseName: undefined,
+                draftWarehouses: [],
                 draftTimeslots: [],
                 selectedTimeslot: undefined,
                 draftStatus: 'idle',
@@ -3387,15 +3574,6 @@ export class SupplyWizardHandler {
             }));
         }
 
-        const message = (ctx.callbackQuery as any)?.message;
-        if (message?.chat?.id && message?.message_id) {
-            try {
-                await ctx.telegram.editMessageReplyMarkup(message.chat.id, message.message_id, undefined, undefined);
-            } catch (error) {
-                this.logger.debug(`editMessageReplyMarkup failed: ${this.describeError(error)}`);
-            }
-        }
-
         await this.view.updatePrompt(
             ctx,
             chatId,
@@ -3405,7 +3583,7 @@ export class SupplyWizardHandler {
             { parseMode: 'HTML' },
         );
 
-        await this.safeAnswerCbQuery(ctx, chatId, 'Продолжаем');
+        await this.safeAnswerCbQuery(ctx, chatId, 'Регион выбран');
     }
 
     private async onClusterSelect(
@@ -3442,8 +3620,9 @@ export class SupplyWizardHandler {
 
         let refreshedWarehouses: SupplyWizardWarehouseOption[] | undefined;
         try {
+            const clusterType = state.clusterType ?? 'CLUSTER_TYPE_OZON';
             const response = await this.ozonApi.listClusters(
-                { clusterIds: [cluster.id], clusterType: 'CLUSTER_TYPE_OZON' },
+                { clusterIds: [cluster.id], clusterType },
                 credentials,
             );
             const buildResult = this.view.buildOptions(response.clusters ?? []);
@@ -3855,7 +4034,7 @@ export class SupplyWizardHandler {
             }
             lines.push(
                 '',
-                '<b>Нажмите «Выбрать кластер», чтобы выбрать в какой кластер бот будет искать слоты для поставки.</b>',
+                '<b>Нажмите «Выбрать кластер», чтобы выбрать регион (Россия/СНГ) и кластер для поиска слотов.</b>',
                 '',
                 'При необходимости отправьте новый запрос с городом, чтобы сменить пункт сдачи.',
             );

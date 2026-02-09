@@ -894,6 +894,15 @@ export class SupplyWizardViewService {
         return this.withNavigation(rows, { cancel: 'wizard:cancel' });
     }
 
+    buildClusterTypeKeyboard(): Array<Array<{ text: string; callback_data: string }>> {
+        return [
+            [{ text: 'РОССИЯ', callback_data: 'wizard:clusterType:ozon' }],
+            [{ text: 'СНГ', callback_data: 'wizard:clusterType:cis' }],
+            [{ text: 'Назад', callback_data: 'wizard:clusterType:back' }],
+            [{ text: 'Отмена', callback_data: 'wizard:cancel' }],
+        ];
+    }
+
     buildWarehouseKeyboard(
         state: SupplyWizardState,
         clusterId: number,

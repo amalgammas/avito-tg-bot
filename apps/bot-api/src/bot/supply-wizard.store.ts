@@ -87,6 +87,7 @@ export type SupplyWizardStage =
   | 'support'
   | 'awaitSpreadsheet'
   | 'awaitDropOffQuery'
+  | 'clusterTypeSelect'
   | 'clusterPrompt'
   | 'clusterSelect'
   | 'warehouseSelect'
@@ -119,6 +120,7 @@ export interface SupplyWizardState {
   draftExpiresAt?: number;
   draftError?: string;
   lastDay?: string;
+  clusterType?: 'CLUSTER_TYPE_OZON' | 'CLUSTER_TYPE_CIS';
   selectedClusterId?: number;
   selectedClusterName?: string;
   selectedWarehouseId?: number;
@@ -158,6 +160,7 @@ export interface SupplyWizardTaskContext {
   draftExpiresAt?: number;
   draftError?: string;
   lastDay?: string;
+  clusterType?: 'CLUSTER_TYPE_OZON' | 'CLUSTER_TYPE_CIS';
   supplyType?: 'CREATE_TYPE_CROSSDOCK' | 'CREATE_TYPE_DIRECT';
   draftWarehouses: SupplyWizardDraftWarehouseOption[];
   draftTimeslots: SupplyWizardTimeslotOption[];
@@ -208,6 +211,7 @@ export class SupplyWizardStore {
       draftCreatedAt: undefined,
       draftExpiresAt: undefined,
       draftError: undefined,
+      clusterType: undefined,
       selectedTimeslot: undefined,
       timeslotFirstAvailable: undefined,
       timeslotFromHour: undefined,
