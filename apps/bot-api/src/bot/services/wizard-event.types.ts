@@ -32,6 +32,7 @@ export enum WizardEvent {
   TaskSummary = 'tasks.summary',
   TaskResumeFailed = 'task.resumeFailed',
   TaskResumedSupplyCreated = 'task.resumedSupplyCreated',
+  TaskOrderIdRecovered = 'task.orderIdRecovered',
   AuthSaved = 'auth.saved',
   AuthCleared = 'auth.cleared',
 }

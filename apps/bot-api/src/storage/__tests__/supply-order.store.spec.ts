@@ -54,6 +54,25 @@ describe('SupplyOrderStore', () => {
     expect(repository.save).toHaveBeenCalled();
   });
 
+  it('completeTask does not rewrite already completed task', async () => {
+    repository.findOne.mockResolvedValueOnce({
+      id: 'task-1',
+      chatId,
+      taskId: 'task-1',
+      status: 'supply',
+      createdAt: 1,
+    });
+
+    const entity = await store.completeTask(chatId, {
+      taskId: 'task-1',
+      operationId: 'op-1',
+      items: [],
+    });
+
+    expect(entity.status).toBe('supply');
+    expect(repository.save).not.toHaveBeenCalled();
+  });
+
   it('setOrderId updates entity and persists changes', async () => {
     repository.findOne
       .mockResolvedValueOnce(null)

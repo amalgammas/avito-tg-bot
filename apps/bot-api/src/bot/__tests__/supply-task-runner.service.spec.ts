@@ -18,7 +18,9 @@ jest.mock('@nestjs/common', () => {
 describe('SupplyTaskRunnerService', () => {
   const orderStore = {
     listTasks: jest.fn(),
+    findTask: jest.fn(),
     completeTask: jest.fn(),
+    setOrderId: jest.fn(),
   } as any;
   const credentialsStore = {
     get: jest.fn(),
@@ -36,6 +38,15 @@ describe('SupplyTaskRunnerService', () => {
     describeTimeslot: jest.fn(() => 'timeslot'),
     mapTaskItems: jest.fn(() => []),
   } as any;
+  const taskAbortService = {
+    register: jest.fn(),
+    clear: jest.fn(),
+  } as any;
+  const bot = {
+    telegram: {
+      getChat: jest.fn(),
+    },
+  } as any;
 
   const service = new SupplyTaskRunnerService(
     orderStore,
@@ -43,10 +54,13 @@ describe('SupplyTaskRunnerService', () => {
     supplyService,
     notifications,
     process,
+    taskAbortService,
+    bot,
   );
 
   beforeEach(() => {
     jest.clearAllMocks();
+    orderStore.findTask.mockResolvedValue(null);
   });
 
   const sampleTask = {
@@ -109,5 +123,49 @@ describe('SupplyTaskRunnerService', () => {
       lines: expect.arrayContaining([expect.stringContaining('task: task-1'), expect.stringContaining('oops')]),
     });
     expect(notifications.notifyUser).not.toHaveBeenCalled();
+  });
+
+  it('handleTaskEvent skips duplicate SupplyCreated when task already completed', async () => {
+    orderStore.findTask.mockResolvedValueOnce({ status: 'supply' });
+    const result = {
+      event: { type: OzonSupplyEventType.SupplyCreated },
+      task: { taskId: 'task-1', items: [], selectedTimeslot: undefined },
+      operationId: 'op-1',
+    } as any;
+
+    await (service as any).handleTaskEvent(sampleTask, result, {} as any);
+
+    expect(orderStore.completeTask).not.toHaveBeenCalled();
+    expect(notifications.notifyUser).not.toHaveBeenCalled();
+  });
+
+  it('recoverMissingOrderIds resolves and stores orderId for supply records without id', async () => {
+    orderStore.listTasks.mockResolvedValueOnce([
+      {
+        id: 'op-1',
+        chatId: 'chat-1',
+        status: 'supply',
+        operationId: 'op-1',
+        orderId: undefined,
+      },
+    ]);
+    credentialsStore.get.mockResolvedValueOnce({ clientId: 'c', apiKey: 'k' });
+    process.fetchOrderIdWithRetries.mockResolvedValueOnce(999);
+
+    await (service as any).recoverMissingOrderIds();
+
+    expect(process.fetchOrderIdWithRetries).toHaveBeenCalledWith(
+      'op-1',
+      { clientId: 'c', apiKey: 'k' },
+      expect.objectContaining({ attempts: 5, delayMs: 1000 }),
+    );
+    expect(orderStore.setOrderId).toHaveBeenCalledWith('chat-1', 'op-1', 999);
+    expect(notifications.notifyWizard).toHaveBeenCalledWith(WizardEvent.TaskOrderIdRecovered, {
+      lines: expect.arrayContaining([
+        'chat: chat-1',
+        'operation: op-1',
+        'order_id: 999',
+      ]),
+    });
   });
 });

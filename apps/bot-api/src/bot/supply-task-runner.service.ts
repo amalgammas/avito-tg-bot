@@ -18,8 +18,11 @@ import { SupplyTaskAbortService } from './services/supply-task-abort.service';
 export class SupplyTaskRunnerService implements OnApplicationBootstrap {
   private readonly logger = new Logger(SupplyTaskRunnerService.name);
   private readonly summaryIntervalMs = 15 * 60 * 1000;
+  private readonly orderIdRecoveryIntervalMs = 2 * 60 * 1000;
   private summaryTimer?: NodeJS.Timeout;
+  private orderIdRecoveryTimer?: NodeJS.Timeout;
   private summaryRunning = false;
+  private orderIdRecoveryRunning = false;
   private readonly orderIdPollAttempts = 5;
   private readonly orderIdPollDelayMs = 1_000;
   private readonly userLabelCache = new Map<string, { label: string; expiresAt: number }>();
@@ -38,6 +41,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
   onApplicationBootstrap(): void {
     void this.resumePendingTasks();
     this.startSummaryLoop();
+    this.startOrderIdRecoveryLoop();
   }
 
   private async resumePendingTasks(): Promise<void> {
@@ -70,6 +74,23 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
 
     void handler();
     this.summaryTimer = setInterval(handler, this.summaryIntervalMs);
+  }
+
+  private startOrderIdRecoveryLoop(): void {
+    const handler = async () => {
+      if (this.orderIdRecoveryRunning) return;
+      this.orderIdRecoveryRunning = true;
+      try {
+        await this.recoverMissingOrderIds();
+      } catch (error) {
+        this.logger.warn(`Failed to recover missing order_id values: ${this.describeError(error)}`);
+      } finally {
+        this.orderIdRecoveryRunning = false;
+      }
+    };
+
+    void handler();
+    this.orderIdRecoveryTimer = setInterval(handler, this.orderIdRecoveryIntervalMs);
   }
 
   private async publishTasksSummary(): Promise<void> {
@@ -107,6 +128,66 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     }
 
     await this.notifications.notifyWizard(WizardEvent.TaskSummary, { lines });
+  }
+
+  private async recoverMissingOrderIds(): Promise<void> {
+    const supplies = await this.orderStore.listTasks({ status: 'supply' });
+    const candidates = supplies.filter(
+      (record) =>
+        !record.orderId &&
+        Boolean(record.operationId) &&
+        !record.operationId!.startsWith('draft-'),
+    );
+
+    if (!candidates.length) {
+      return;
+    }
+
+    this.logger.log(`Trying to recover order_id for ${candidates.length} supply record(s)`);
+    const credentialsCache = new Map<string, OzonCredentials | null>();
+
+    for (const record of candidates) {
+      const operationId = record.operationId;
+      if (!operationId) {
+        continue;
+      }
+
+      let credentials = credentialsCache.get(record.chatId);
+      if (credentials === undefined) {
+        const stored = await this.credentialsStore.get(record.chatId);
+        credentials = stored ?? null;
+        credentialsCache.set(record.chatId, credentials);
+      }
+
+      if (!credentials) {
+        this.logger.warn(`Skip order_id recovery for ${operationId}: credentials missing for chat ${record.chatId}`);
+        continue;
+      }
+
+      try {
+        const orderId = await this.process.fetchOrderIdWithRetries(operationId, credentials, {
+          attempts: this.orderIdPollAttempts,
+          delayMs: this.orderIdPollDelayMs,
+        });
+
+        if (!orderId) {
+          continue;
+        }
+
+        await this.orderStore.setOrderId(record.chatId, operationId, orderId);
+        await this.notifications.notifyWizard(WizardEvent.TaskOrderIdRecovered, {
+          lines: [
+            `chat: ${record.chatId}`,
+            record.taskId ? `task: ${record.taskId}` : undefined,
+            `operation: ${operationId}`,
+            `order_id: ${orderId}`,
+          ],
+        });
+        this.logger.log(`Recovered order_id=${orderId} for operation ${operationId}`);
+      } catch (error) {
+        this.logger.warn(`Failed to recover order_id for ${operationId}: ${this.describeError(error)}`);
+      }
+    }
   }
 
   private async resumeSingleTask(record: SupplyOrderEntity): Promise<void> {
@@ -231,6 +312,12 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
 
     switch (eventType) {
       case OzonSupplyEventType.SupplyCreated: {
+        const existingTask = await this.orderStore.findTask(record.chatId, taskLabel);
+        if (existingTask?.status === 'supply') {
+          this.logger.warn(`Skip duplicate SupplyCreated for ${taskLabel}: task already completed`);
+          break;
+        }
+
         const operationId =
           result.operationId ??
           record.operationId ??

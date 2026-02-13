@@ -383,6 +383,17 @@ export class SupplyWizardViewService {
     renderOrderDetails(order: SupplyWizardOrderSummary): string {
         const searchWindowLine = this.buildSearchDeadlineLine(order.searchDeadlineAt);
         const supplyTypeLabel = this.formatSupplyType(order.supplyType);
+        const hasOrderId = typeof order.orderId === 'number' && Number.isFinite(order.orderId);
+        const lkLines = hasOrderId
+            ? [
+                '\n',
+                'Посмотреть поставку в ЛК Ozon 👇🏻',
+                `https://seller.ozon.ru/app/supply/orders/${order.orderId}`,
+            ]
+            : [
+                '\n',
+                'Ссылка на поставку в ЛК Ozon появится после подтверждения order_id.',
+            ];
 
         const lines = [
             `Поставка №${order.orderId ?? order.operationId ?? order.id}`,
@@ -401,9 +412,7 @@ export class SupplyWizardViewService {
             '',
             'Товары:',
             ...order.items.map((item) => `• ${item.article} × ${item.quantity}`),
-            '\n',
-            'Посмотреть поставку в ЛК Ozon 👇🏻',
-            `https://seller.ozon.ru/app/supply/orders/${order.orderId}`
+            ...lkLines,
         ].filter((value): value is string => Boolean(value));
         return lines.join('\n');
     }

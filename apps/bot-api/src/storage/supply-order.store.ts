@@ -132,6 +132,10 @@ export class SupplyOrderStore {
     const now = Date.now();
     let entity = await this.repository.findOne({ where: { chatId, taskId: payload.taskId } });
 
+    if (entity?.status === 'supply') {
+      return entity;
+    }
+
     if (!entity) {
       entity = this.repository.create({
         id: payload.orderId ? String(payload.orderId) : payload.operationId ?? payload.taskId,
