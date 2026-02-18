@@ -26,6 +26,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
   private readonly orderIdPollAttempts = 5;
   private readonly orderIdPollDelayMs = 1_000;
   private readonly missingOrderIdGraceMs = 3 * 60 * 1000;
+  private readonly missingOrderIdUserNotifyMaxAgeMs = 2 * 60 * 60 * 1000;
   private readonly userLabelCache = new Map<string, { label: string; expiresAt: number }>();
   private readonly userLabelTtlMs = 60 * 60 * 1000;
 
@@ -536,17 +537,21 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       errorMessage: resolveResult.lastErrorMessage,
     });
 
-    await this.notifications.notifyUser(
-      record.chatId,
-      [
-        '❌ Не удалось завершить поставку: Ozon не вернул order_id.',
-        `Операция: ${operationId}`,
-        resolveResult.lastErrorMessage ? `Причина: ${resolveResult.lastErrorMessage}` : undefined,
-        'Создайте поставку заново после проверки ключей/прав.',
-      ]
-        .filter((line): line is string => Boolean(line))
-        .join('\n'),
-    );
+    if (this.shouldNotifyUserAboutMissingOrderId(record)) {
+      await this.notifications.notifyUser(
+        record.chatId,
+        [
+          '❌ Не удалось завершить поставку: Ozon не вернул order_id.',
+          `Операция: ${operationId}`,
+          resolveResult.lastErrorMessage ? `Причина: ${resolveResult.lastErrorMessage}` : undefined,
+          'Создайте поставку заново после проверки ключей/прав.',
+        ]
+          .filter((line): line is string => Boolean(line))
+          .join('\n'),
+      );
+    } else {
+      this.logger.debug(`Skip user notification for stale missing order_id operation=${operationId}`);
+    }
 
     await this.notifications.notifyWizard(WizardEvent.SupplyError, {
       lines: [
@@ -562,6 +567,14 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     this.logger.warn(
       `Supply record marked as ${failureStatus}: operation=${operationId}, chat=${record.chatId}, reason=${resolveResult.failureReason ?? 'unknown'}`,
     );
+  }
+
+  private shouldNotifyUserAboutMissingOrderId(record: SupplyOrderEntity): boolean {
+    const baseTs = record.completedAt ?? record.updatedAt ?? record.createdAt;
+    if (!Number.isFinite(baseTs)) {
+      return false;
+    }
+    return Date.now() - baseTs <= this.missingOrderIdUserNotifyMaxAgeMs;
   }
 
   private formatTaskName(name: string | undefined): string | undefined {

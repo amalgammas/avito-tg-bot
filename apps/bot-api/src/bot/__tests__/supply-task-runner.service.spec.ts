@@ -173,7 +173,7 @@ describe('SupplyTaskRunnerService', () => {
   });
 
   it('recoverMissingOrderIds marks stale saga-not-found records as failed_no_order_id', async () => {
-    const oldTs = Date.now() - 10 * 60 * 1000;
+    const oldTs = Date.now() - 3 * 60 * 60 * 1000;
     orderStore.listTasks.mockResolvedValueOnce([
       {
         id: 'op-404',
@@ -203,6 +203,7 @@ describe('SupplyTaskRunnerService', () => {
         errorCode: 404,
       }),
     );
+    expect(notifications.notifyUser).not.toHaveBeenCalled();
   });
 
   it('cleanupExpiredPendingTasks removes overdue task records', async () => {
