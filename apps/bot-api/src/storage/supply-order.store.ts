@@ -51,6 +51,8 @@ export interface SupplyOrderFailurePayload {
 
 @Injectable()
 export class SupplyOrderStore {
+  private schemaEnsurePromise?: Promise<void>;
+
   constructor(
     @InjectRepository(SupplyOrderEntity)
     private readonly repository: Repository<SupplyOrderEntity>,
@@ -59,6 +61,7 @@ export class SupplyOrderStore {
     private readonly searchWindowFallbackDays = 28;
 
     async list(chatId: string): Promise<SupplyWizardOrderSummary[]> {
+    await this.ensureSchemaCompatibility();
     const records = await this.repository.find({
       where: { chatId },
       order: { createdAt: 'ASC' },
@@ -70,6 +73,7 @@ export class SupplyOrderStore {
   }
 
   async listTasks(query: SupplyOrderQuery = {}): Promise<SupplyOrderEntity[]> {
+    await this.ensureSchemaCompatibility();
     const where: Partial<SupplyOrderEntity> = {};
     if (query.status) {
       where.status = query.status;
@@ -81,10 +85,12 @@ export class SupplyOrderStore {
   }
 
   async findTask(chatId: string, taskId: string): Promise<SupplyOrderEntity | null> {
+    await this.ensureSchemaCompatibility();
     return this.repository.findOne({ where: { chatId, taskId } });
   }
 
   async saveTask(chatId: string, payload: SupplyOrderTaskPayload): Promise<SupplyOrderEntity> {
+    await this.ensureSchemaCompatibility();
     const taskId = payload.task.taskId;
     if (!taskId) {
       throw new Error('taskId is required to persist supply task');
@@ -140,6 +146,7 @@ export class SupplyOrderStore {
   }
 
   async completeTask(chatId: string, payload: SupplyOrderCompletionPayload): Promise<SupplyOrderEntity> {
+    await this.ensureSchemaCompatibility();
     const now = Date.now();
     let entity = await this.repository.findOne({ where: { chatId, taskId: payload.taskId } });
 
@@ -190,18 +197,22 @@ export class SupplyOrderStore {
   }
 
   async deleteById(chatId: string, id: string): Promise<void> {
+    await this.ensureSchemaCompatibility();
     await this.repository.delete({ chatId, id });
   }
 
   async deleteByTaskId(chatId: string, taskId: string): Promise<void> {
+    await this.ensureSchemaCompatibility();
     await this.repository.delete({ chatId, taskId });
   }
 
   async deleteByOperationId(chatId: string, operationId: string): Promise<void> {
+    await this.ensureSchemaCompatibility();
     await this.repository.delete({ chatId, operationId });
   }
 
   async setOrderId(chatId: string, operationId: string | undefined, orderId: number): Promise<void> {
+    await this.ensureSchemaCompatibility();
     if (!operationId) return;
 
     let entity =
@@ -225,6 +236,7 @@ export class SupplyOrderStore {
     operationId: string | undefined,
     payload: SupplyOrderFailurePayload,
   ): Promise<void> {
+    await this.ensureSchemaCompatibility();
     if (!operationId) return;
 
     const entity =
@@ -249,6 +261,50 @@ export class SupplyOrderStore {
   async listTaskSummaries(chatId: string): Promise<SupplyWizardOrderSummary[]> {
     const tasks = await this.listTasks({ chatId, status: 'task' });
     return tasks.map((task) => this.mapEntityToSummary(task));
+  }
+
+  async ensureSchemaCompatibility(): Promise<void> {
+    if (this.schemaEnsurePromise) {
+      await this.schemaEnsurePromise;
+      return;
+    }
+
+    this.schemaEnsurePromise = this.ensureSchemaCompatibilityImpl().catch((error) => {
+      this.schemaEnsurePromise = undefined;
+      throw error;
+    });
+    await this.schemaEnsurePromise;
+  }
+
+  private async ensureSchemaCompatibilityImpl(): Promise<void> {
+    if (typeof this.repository.query !== 'function') {
+      return;
+    }
+
+    const columns = await this.repository.query('PRAGMA table_info("supply_orders")');
+    if (!Array.isArray(columns) || !columns.length) {
+      return;
+    }
+
+    const existing = new Set(
+      columns
+        .map((column: any) => (typeof column?.name === 'string' ? column.name : undefined))
+        .filter((value: string | undefined): value is string => Boolean(value)),
+    );
+
+    const required: Array<{ name: string; ddl: string }> = [
+      { name: 'failedAt', ddl: 'ALTER TABLE "supply_orders" ADD COLUMN "failedAt" integer' },
+      { name: 'failureReason', ddl: 'ALTER TABLE "supply_orders" ADD COLUMN "failureReason" text' },
+      { name: 'lastErrorCode', ddl: 'ALTER TABLE "supply_orders" ADD COLUMN "lastErrorCode" integer' },
+      { name: 'lastErrorMessage', ddl: 'ALTER TABLE "supply_orders" ADD COLUMN "lastErrorMessage" text' },
+    ];
+
+    for (const column of required) {
+      if (existing.has(column.name)) {
+        continue;
+      }
+      await this.repository.query(column.ddl);
+    }
   }
 
   private mapEntityToSummary(record: SupplyOrderEntity): SupplyWizardOrderSummary {

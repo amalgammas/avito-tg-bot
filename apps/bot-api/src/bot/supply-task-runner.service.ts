@@ -40,9 +40,14 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
   ) {}
 
   onApplicationBootstrap(): void {
-    void this.resumePendingTasks();
+    void this.bootstrapRunner();
     this.startSummaryLoop();
     this.startOrderIdRecoveryLoop();
+  }
+
+  private async bootstrapRunner(): Promise<void> {
+    await this.orderStore.ensureSchemaCompatibility();
+    await this.resumePendingTasks();
   }
 
   private async resumePendingTasks(): Promise<void> {
