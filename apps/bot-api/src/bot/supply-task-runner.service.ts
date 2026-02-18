@@ -25,6 +25,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
   private orderIdRecoveryRunning = false;
   private readonly orderIdPollAttempts = 5;
   private readonly orderIdPollDelayMs = 1_000;
+  private readonly missingOrderIdGraceMs = 3 * 60 * 1000;
   private readonly userLabelCache = new Map<string, { label: string; expiresAt: number }>();
   private readonly userLabelTtlMs = 60 * 60 * 1000;
 
@@ -46,6 +47,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
 
   private async resumePendingTasks(): Promise<void> {
     try {
+      await this.cleanupExpiredPendingTasks();
       const pending = await this.orderStore.listTasks({ status: 'task' });
       if (!pending.length) {
         this.logger.debug('No supply tasks waiting for resume');
@@ -94,6 +96,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
   }
 
   private async publishTasksSummary(): Promise<void> {
+    await this.cleanupExpiredPendingTasks();
     const tasks = await this.orderStore.listTasks({ status: 'task' });
     const lines: string[] = [];
 
@@ -128,6 +131,48 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     }
 
     await this.notifications.notifyWizard(WizardEvent.TaskSummary, { lines });
+  }
+
+  private async cleanupExpiredPendingTasks(): Promise<void> {
+    const tasks = await this.orderStore.listTasks({ status: 'task' });
+    if (!tasks.length) {
+      return;
+    }
+
+    const now = Date.now();
+    for (const task of tasks) {
+      const deadlineTs = this.parseTaskDeadlineTs(task);
+      if (!deadlineTs || now <= deadlineTs) {
+        continue;
+      }
+
+      const taskLabel = task.taskId ?? task.id;
+      await this.orderStore.deleteByTaskId(task.chatId, taskLabel);
+
+      const deadlineLabel = new Intl.DateTimeFormat('ru-RU', {
+        day: '2-digit',
+        month: '2-digit',
+      }).format(new Date(deadlineTs));
+
+      await this.notifications.notifyUser(
+        task.chatId,
+        [
+          `⛔️ Задача ${taskLabel} остановлена: окно поиска слотов истекло (${deadlineLabel}).`,
+          'Создайте новую задачу с актуальной датой готовности.',
+        ].join('\n'),
+      );
+
+      await this.notifications.notifyWizard(WizardEvent.WindowExpired, {
+        lines: [
+          `task: ${taskLabel}`,
+          `chat: ${task.chatId}`,
+          `deadline: ${task.taskPayload?.lastDay ?? 'n/a'}`,
+          'Stopped by runner cleanup (expired deadline)',
+        ],
+      });
+
+      this.logger.warn(`Task ${taskLabel} expired by deadline cleanup (chat=${task.chatId})`);
+    }
   }
 
   private async recoverMissingOrderIds(): Promise<void> {
@@ -165,12 +210,16 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       }
 
       try {
-        const orderId = await this.process.fetchOrderIdWithRetries(operationId, credentials, {
+        const resolveResult = await this.process.resolveOrderIdWithRetries(operationId, credentials, {
           attempts: this.orderIdPollAttempts,
           delayMs: this.orderIdPollDelayMs,
         });
+        const orderId = resolveResult.orderId;
 
         if (!orderId) {
+          if (this.shouldFinalizeWithoutOrderId(record, resolveResult.failureReason)) {
+            await this.finalizeWithoutOrderId(record, operationId, resolveResult);
+          }
           continue;
         }
 
@@ -260,6 +309,18 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     }).format(parsed);
   }
 
+  private parseTaskDeadlineTs(task: SupplyOrderEntity): number | undefined {
+    const deadlineIso = task.taskPayload?.lastDay;
+    if (!deadlineIso) {
+      return undefined;
+    }
+    const parsed = new Date(deadlineIso);
+    if (Number.isNaN(parsed.getTime())) {
+      return undefined;
+    }
+    return parsed.getTime();
+  }
+
   private formatSupplyType(type?: string): string | undefined {
     if (type === 'CREATE_TYPE_DIRECT') {
       return 'прямая';
@@ -326,14 +387,17 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
         let orderDetails: SupplyOrderDetails | undefined;
 
         if (operationId) {
-          orderId = await this.process.fetchOrderIdWithRetries(operationId, credentials, {
+          const resolveResult = await this.process.resolveOrderIdWithRetries(operationId, credentials, {
             attempts: this.orderIdPollAttempts,
             delayMs: this.orderIdPollDelayMs,
           });
+          orderId = resolveResult.orderId;
           if (orderId) {
             orderDetails = await this.process.fetchSupplyOrderDetails(orderId, credentials);
           } else {
-            this.logger.warn(`Failed to resolve order_id for ${operationId}: order id not returned`);
+            this.logger.warn(
+              `Failed to resolve order_id for ${operationId}: reason=${resolveResult.failureReason ?? 'unknown'}`,
+            );
           }
         }
 
@@ -430,12 +494,77 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     return String(error);
   }
 
-    private formatTaskName(name: string | undefined): string | undefined {
-        if (name) {
-            const names = name.split('-');
-            return names[1];
-        }
+  private shouldFinalizeWithoutOrderId(
+    record: SupplyOrderEntity,
+    failureReason?: 'not_found' | 'forbidden_role' | 'empty' | 'unknown',
+  ): boolean {
+    if (failureReason === 'forbidden_role') {
+      return true;
     }
+
+    if (failureReason !== 'not_found') {
+      return false;
+    }
+
+    const now = Date.now();
+    const baseTs = record.completedAt ?? record.updatedAt ?? record.createdAt;
+    if (!Number.isFinite(baseTs)) {
+      return false;
+    }
+    return now - baseTs >= this.missingOrderIdGraceMs;
+  }
+
+  private async finalizeWithoutOrderId(
+    record: SupplyOrderEntity,
+    operationId: string,
+    resolveResult: {
+      failureReason?: 'not_found' | 'forbidden_role' | 'empty' | 'unknown';
+      lastErrorMessage?: string;
+      lastStatusCode?: number;
+    },
+  ): Promise<void> {
+    const failureStatus = resolveResult.failureReason === 'forbidden_role' ? 'failed_auth_role' : 'failed_no_order_id';
+    await this.orderStore.markFailedWithoutOrderId(record.chatId, operationId, {
+      status: failureStatus,
+      failureReason: resolveResult.failureReason,
+      errorCode: resolveResult.lastStatusCode,
+      errorMessage: resolveResult.lastErrorMessage,
+    });
+
+    await this.notifications.notifyUser(
+      record.chatId,
+      [
+        '❌ Не удалось завершить поставку: Ozon не вернул order_id.',
+        `Операция: ${operationId}`,
+        resolveResult.lastErrorMessage ? `Причина: ${resolveResult.lastErrorMessage}` : undefined,
+        'Создайте поставку заново после проверки ключей/прав.',
+      ]
+        .filter((line): line is string => Boolean(line))
+        .join('\n'),
+    );
+
+    await this.notifications.notifyWizard(WizardEvent.SupplyError, {
+      lines: [
+        `task: ${record.taskId ?? record.id}`,
+        `chat: ${record.chatId}`,
+        `operation: ${operationId}`,
+        `status: ${failureStatus}`,
+        resolveResult.lastStatusCode ? `code: ${resolveResult.lastStatusCode}` : undefined,
+        resolveResult.lastErrorMessage ?? 'order_id не получен',
+      ].filter((line): line is string => Boolean(line)),
+    });
+
+    this.logger.warn(
+      `Supply record marked as ${failureStatus}: operation=${operationId}, chat=${record.chatId}, reason=${resolveResult.failureReason ?? 'unknown'}`,
+    );
+  }
+
+  private formatTaskName(name: string | undefined): string | undefined {
+    if (name) {
+      const names = name.split('-');
+      return names[1];
+    }
+  }
 
   private formatSupplyCreated(entity: SupplyOrderEntity): string {
     const timeslotLabel =

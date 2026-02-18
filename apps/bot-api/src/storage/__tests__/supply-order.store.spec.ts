@@ -83,4 +83,30 @@ describe('SupplyOrderStore', () => {
       expect.objectContaining({ id: '777', orderId: 777 }),
     );
   });
+
+  it('markFailedWithoutOrderId sets failure state and diagnostics', async () => {
+    repository.findOne
+      .mockResolvedValueOnce({
+        id: 'op-1',
+        chatId,
+        operationId: 'op-1',
+        status: 'supply',
+      });
+
+    await store.markFailedWithoutOrderId(chatId, 'op-1', {
+      status: 'failed_no_order_id',
+      failureReason: 'not_found',
+      errorCode: 404,
+      errorMessage: 'not found',
+    });
+
+    expect(repository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'failed_no_order_id',
+        failureReason: 'not_found',
+        lastErrorCode: 404,
+        lastErrorMessage: 'not found',
+      }),
+    );
+  });
 });

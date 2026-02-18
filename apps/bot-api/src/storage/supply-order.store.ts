@@ -42,6 +42,13 @@ export interface SupplyOrderQuery {
   chatId?: string;
 }
 
+export interface SupplyOrderFailurePayload {
+  status: Extract<SupplyOrderStatus, 'failed_no_order_id' | 'failed_auth_role'>;
+  failureReason?: string;
+  errorCode?: number;
+  errorMessage?: string;
+}
+
 @Injectable()
 export class SupplyOrderStore {
   constructor(
@@ -117,6 +124,10 @@ export class SupplyOrderStore {
     entity.timeslotTo = payload.task.selectedTimeslot?.to_in_timezone;
     entity.updatedAt = now;
     entity.completedAt = undefined;
+    entity.failedAt = undefined;
+    entity.failureReason = undefined;
+    entity.lastErrorCode = undefined;
+    entity.lastErrorMessage = undefined;
     entity.warehouseAutoSelect = payload.warehouseAutoSelect ?? false;
     entity.timeslotAutoSelect = payload.timeslotAutoSelect ?? true;
     entity.orderId = payload.orderId ?? entity.orderId;
@@ -160,6 +171,10 @@ export class SupplyOrderStore {
     entity.items = this.cloneSummaryItems(payload.items);
     entity.updatedAt = now;
     entity.completedAt = now;
+    entity.failedAt = undefined;
+    entity.failureReason = undefined;
+    entity.lastErrorCode = undefined;
+    entity.lastErrorMessage = undefined;
 
     if (payload.task) {
       entity.taskPayload = this.cloneTask(payload.task);
@@ -201,6 +216,32 @@ export class SupplyOrderStore {
     entity.id = String(orderId);
     entity.operationId = entity.operationId ?? operationId;
     entity.updatedAt = Date.now();
+
+    await this.repository.save(entity);
+  }
+
+  async markFailedWithoutOrderId(
+    chatId: string,
+    operationId: string | undefined,
+    payload: SupplyOrderFailurePayload,
+  ): Promise<void> {
+    if (!operationId) return;
+
+    const entity =
+      (await this.repository.findOne({ where: { chatId, operationId } })) ??
+      (await this.repository.findOne({ where: { chatId, id: operationId } }));
+
+    if (!entity) {
+      return;
+    }
+
+    const now = Date.now();
+    entity.status = payload.status;
+    entity.failureReason = payload.failureReason;
+    entity.lastErrorCode = payload.errorCode;
+    entity.lastErrorMessage = payload.errorMessage;
+    entity.failedAt = now;
+    entity.updatedAt = now;
 
     await this.repository.save(entity);
   }

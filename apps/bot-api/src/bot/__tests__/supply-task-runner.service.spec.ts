@@ -21,6 +21,8 @@ describe('SupplyTaskRunnerService', () => {
     findTask: jest.fn(),
     completeTask: jest.fn(),
     setOrderId: jest.fn(),
+    markFailedWithoutOrderId: jest.fn(),
+    deleteByTaskId: jest.fn(),
   } as any;
   const credentialsStore = {
     get: jest.fn(),
@@ -34,6 +36,7 @@ describe('SupplyTaskRunnerService', () => {
   } as any;
   const process = {
     fetchOrderIdWithRetries: jest.fn(),
+    resolveOrderIdWithRetries: jest.fn(),
     fetchSupplyOrderDetails: jest.fn(),
     describeTimeslot: jest.fn(() => 'timeslot'),
     mapTaskItems: jest.fn(() => []),
@@ -78,7 +81,7 @@ describe('SupplyTaskRunnerService', () => {
   } as any;
 
   it('handleTaskEvent completes task and notifies on SupplyCreated', async () => {
-    process.fetchOrderIdWithRetries.mockResolvedValueOnce(777);
+    process.resolveOrderIdWithRetries.mockResolvedValueOnce({ orderId: 777 });
     const result = {
       event: { type: OzonSupplyEventType.SupplyCreated },
       task: { taskId: 'task-1', items: [], selectedTimeslot: undefined },
@@ -150,11 +153,11 @@ describe('SupplyTaskRunnerService', () => {
       },
     ]);
     credentialsStore.get.mockResolvedValueOnce({ clientId: 'c', apiKey: 'k' });
-    process.fetchOrderIdWithRetries.mockResolvedValueOnce(999);
+    process.resolveOrderIdWithRetries.mockResolvedValueOnce({ orderId: 999 });
 
     await (service as any).recoverMissingOrderIds();
 
-    expect(process.fetchOrderIdWithRetries).toHaveBeenCalledWith(
+    expect(process.resolveOrderIdWithRetries).toHaveBeenCalledWith(
       'op-1',
       { clientId: 'c', apiKey: 'k' },
       expect.objectContaining({ attempts: 5, delayMs: 1000 }),
@@ -166,6 +169,58 @@ describe('SupplyTaskRunnerService', () => {
         'operation: op-1',
         'order_id: 999',
       ]),
+    });
+  });
+
+  it('recoverMissingOrderIds marks stale saga-not-found records as failed_no_order_id', async () => {
+    const oldTs = Date.now() - 10 * 60 * 1000;
+    orderStore.listTasks.mockResolvedValueOnce([
+      {
+        id: 'op-404',
+        chatId: 'chat-1',
+        status: 'supply',
+        operationId: 'op-404',
+        orderId: undefined,
+        createdAt: oldTs,
+        completedAt: oldTs,
+      },
+    ]);
+    credentialsStore.get.mockResolvedValueOnce({ clientId: 'c', apiKey: 'k' });
+    process.resolveOrderIdWithRetries.mockResolvedValueOnce({
+      failureReason: 'not_found',
+      lastStatusCode: 404,
+      lastErrorMessage: "Can't find CreateOrderForSingleCluster saga state",
+    });
+
+    await (service as any).recoverMissingOrderIds();
+
+    expect(orderStore.markFailedWithoutOrderId).toHaveBeenCalledWith(
+      'chat-1',
+      'op-404',
+      expect.objectContaining({
+        status: 'failed_no_order_id',
+        failureReason: 'not_found',
+        errorCode: 404,
+      }),
+    );
+  });
+
+  it('cleanupExpiredPendingTasks removes overdue task records', async () => {
+    orderStore.listTasks.mockResolvedValueOnce([
+      {
+        id: 'task-1',
+        taskId: 'task-1',
+        chatId: 'chat-1',
+        status: 'task',
+        taskPayload: { lastDay: '2026-01-01T00:00:00Z' },
+      },
+    ]);
+
+    await (service as any).cleanupExpiredPendingTasks();
+
+    expect(orderStore.deleteByTaskId).toHaveBeenCalledWith('chat-1', 'task-1');
+    expect(notifications.notifyWizard).toHaveBeenCalledWith(WizardEvent.WindowExpired, {
+      lines: expect.arrayContaining([expect.stringContaining('task: task-1')]),
     });
   });
 });

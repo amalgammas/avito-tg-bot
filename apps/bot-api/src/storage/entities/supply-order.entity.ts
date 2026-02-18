@@ -8,7 +8,7 @@ export interface SupplyOrderItem {
   sku?: number;
 }
 
-export type SupplyOrderStatus = 'task' | 'supply';
+export type SupplyOrderStatus = 'task' | 'supply' | 'failed_no_order_id' | 'failed_auth_role';
 
 @Entity({ name: 'supply_orders' })
 @Index('IDX_supply_orders_chat_created', ['chatId', 'createdAt'])
@@ -85,4 +85,16 @@ export class SupplyOrderEntity {
 
   @Column({ type: 'integer', nullable: true })
   completedAt?: number;
+
+  @Column({ type: 'integer', nullable: true })
+  failedAt?: number;
+
+  @Column({ type: 'text', nullable: true })
+  failureReason?: string;
+
+  @Column({ type: 'integer', nullable: true })
+  lastErrorCode?: number;
+
+  @Column({ type: 'text', nullable: true })
+  lastErrorMessage?: string;
 }

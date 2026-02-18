@@ -80,6 +80,28 @@ const flow = {
     expect(statusMock).toHaveBeenCalledTimes(2);
   });
 
+  it('resolveOrderIdWithRetries fast-fails on forbidden role', async () => {
+    const statusMock = flow.getSupplyCreateStatus as jest.MockedFunction<
+      (operationId: string, credentials: unknown) => Promise<OzonSupplyCreateStatus>
+    >;
+    statusMock.mockRejectedValueOnce({
+      response: {
+        status: 403,
+        data: { message: 'Api-Key is missing a required role for a method' },
+      },
+    } as any);
+
+    const result = await service.resolveOrderIdWithRetries('op-403', {} as any, {
+      attempts: 5,
+      delayMs: 0,
+    });
+
+    expect(result.orderId).toBeUndefined();
+    expect(result.failureReason).toBe('forbidden_role');
+    expect(result.attemptsMade).toBe(1);
+    expect(statusMock).toHaveBeenCalledTimes(1);
+  });
+
   it('isCancelSuccessful handles SUCCESS flag', () => {
     const status: OzonSupplyCancelStatus = { status: 'SUCCESS' } as any;
     expect(service.isCancelSuccessful(status)).toBe(true);

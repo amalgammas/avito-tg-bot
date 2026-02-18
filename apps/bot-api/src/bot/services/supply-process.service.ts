@@ -41,6 +41,16 @@ export interface RetryOptions {
   delayMs: number;
 }
 
+export type OrderIdResolveFailureReason = 'not_found' | 'forbidden_role' | 'empty' | 'unknown';
+
+export interface OrderIdResolveResult {
+  orderId?: number;
+  failureReason?: OrderIdResolveFailureReason;
+  lastErrorMessage?: string;
+  lastStatusCode?: number;
+  attemptsMade: number;
+}
+
 export interface CancelPollOptions {
   maxAttempts: number;
   delayMs: number;
@@ -179,18 +189,47 @@ export class SupplyProcessService {
     credentials: OzonCredentials,
     options: RetryOptions,
   ): Promise<number | undefined> {
+    const result = await this.resolveOrderIdWithRetries(operationId, credentials, options);
+    return result.orderId;
+  }
+
+  async resolveOrderIdWithRetries(
+    operationId: string,
+    credentials: OzonCredentials,
+    options: RetryOptions,
+  ): Promise<OrderIdResolveResult> {
     const attempts = Math.max(1, options.attempts);
+    let lastFailureReason: OrderIdResolveFailureReason | undefined;
+    let lastErrorMessage: string | undefined;
+    let lastStatusCode: number | undefined;
+
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         const status = await this.flow.getSupplyCreateStatus(operationId, credentials);
         const orderId = this.extractOrderIdsFromStatus(status)[0];
         if (orderId) {
-          return orderId;
+          return {
+            orderId,
+            attemptsMade: attempt + 1,
+          };
         }
+        lastFailureReason = 'empty';
       } catch (error) {
+        const normalized = this.normalizeOrderIdError(error);
+        lastFailureReason = normalized.failureReason;
+        lastErrorMessage = normalized.message;
+        lastStatusCode = normalized.statusCode;
         this.logger.warn(
           `Не удалось получить order_id для ${operationId} (попытка ${attempt + 1}/${attempts}): ${String(error)}`,
         );
+        if (normalized.failureReason === 'forbidden_role') {
+          return {
+            failureReason: normalized.failureReason,
+            lastErrorMessage,
+            lastStatusCode,
+            attemptsMade: attempt + 1,
+          };
+        }
       }
 
       if (attempt < attempts - 1) {
@@ -198,7 +237,12 @@ export class SupplyProcessService {
       }
     }
 
-    return undefined;
+    return {
+      failureReason: lastFailureReason ?? 'unknown',
+      lastErrorMessage,
+      lastStatusCode,
+      attemptsMade: attempts,
+    };
   }
 
   async waitForCancelStatus(
@@ -335,6 +379,44 @@ export class SupplyProcessService {
       }
     }
     return undefined;
+  }
+
+  private normalizeOrderIdError(error: unknown): {
+    failureReason: OrderIdResolveFailureReason;
+    message?: string;
+    statusCode?: number;
+  } {
+    const payload = this.extractAxiosErrorPayload(error);
+    const statusCode = payload.statusCode;
+    const message = payload.message;
+
+    if (statusCode === 403 && message?.toLowerCase().includes('missing a required role')) {
+      return { failureReason: 'forbidden_role', message, statusCode };
+    }
+
+    if (
+      statusCode === 404 &&
+      message?.toLowerCase().includes('createorderforsinglecluster saga state')
+    ) {
+      return { failureReason: 'not_found', message, statusCode };
+    }
+
+    return { failureReason: 'unknown', message, statusCode };
+  }
+
+  private extractAxiosErrorPayload(error: unknown): { statusCode?: number; message?: string } {
+    const source = error as any;
+    const statusCode = typeof source?.response?.status === 'number' ? source.response.status : undefined;
+    const data = source?.response?.data;
+
+    const message =
+      typeof data?.message === 'string'
+        ? data.message
+        : typeof source?.message === 'string'
+        ? source.message
+        : undefined;
+
+    return { statusCode, message };
   }
 
   private async sleep(ms: number): Promise<void> {
