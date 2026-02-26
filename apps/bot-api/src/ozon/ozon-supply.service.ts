@@ -197,7 +197,7 @@ export class OzonSupplyService {
                 }
                 continue;
               } catch (retryError) {
-                const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+                const retryMessage = this.describeProcessError(retryError);
                 this.logger.error(`[${taskId}] Ошибка обработки после обновления ключей: ${retryMessage}`);
                 await this.emitEvent(options.onEvent, {
                   task: state,
@@ -206,9 +206,11 @@ export class OzonSupplyService {
                 });
                 continue;
               }
+            } else {
+              this.logger.warn(`[${taskId}] Role error detected, but no new credentials were found for retry`);
             }
           }
-          const message = error instanceof Error ? error.message : String(error);
+          const message = this.describeProcessError(error);
           this.logger.error(`[${taskId}] Ошибка обработки: ${message}`);
           await this.emitEvent(options.onEvent, { task: state, event: { type: OzonSupplyEventType.Error }, message });
         }
@@ -268,6 +270,34 @@ export class OzonSupplyService {
       return false;
     }
     return left.clientId === right.clientId && left.apiKey === right.apiKey;
+  }
+
+  private describeProcessError(error: unknown): string {
+    const source = error as any;
+    const status = source?.response?.status;
+    const code = source?.response?.data?.code;
+    const responseMessage = source?.response?.data?.message;
+    const fallback =
+      typeof source?.message === 'string' && source.message.trim().length
+        ? source.message.trim()
+        : this.describeUnknownError(error);
+    const detailParts: string[] = [];
+
+    if (typeof status === 'number') {
+      detailParts.push(`status=${status}`);
+    }
+    if (typeof code === 'number') {
+      detailParts.push(`code=${code}`);
+    }
+    if (typeof responseMessage === 'string' && responseMessage.trim().length) {
+      detailParts.push(responseMessage.trim());
+    }
+
+    if (!detailParts.length) {
+      return fallback;
+    }
+
+    return `${fallback}; ${detailParts.join(', ')}`;
   }
 
   getPollIntervalMs(): number {

@@ -183,4 +183,52 @@ describe('OzonSupplyService', () => {
     expect(processSingleTask).toHaveBeenNthCalledWith(1, task, oldCredentials, undefined, undefined);
     expect(processSingleTask).toHaveBeenNthCalledWith(2, task, newCredentials, undefined, undefined);
   });
+
+  it('emits detailed error with status/code/message when role error cannot be recovered', async () => {
+    const task: OzonSupplyTask = {
+      ...baseTask,
+      supplyType: 'CREATE_TYPE_DIRECT',
+      orderFlag: 0,
+    };
+    const taskMap = new Map([[task.taskId, task]]);
+    const onEvent = jest.fn();
+    const abortError = Object.assign(new Error('aborted'), { name: 'AbortError' });
+
+    jest.spyOn(service as any, 'processSingleTask').mockRejectedValueOnce({
+      response: {
+        status: 403,
+        data: {
+          code: 7,
+          message: 'Api-Key is missing a required role for a method',
+        },
+      },
+      message: 'Request failed with status code 403',
+    } as AxiosError);
+    jest.spyOn(service as any, 'sleep').mockRejectedValueOnce(abortError);
+
+    await expect(
+      service.processTasks(taskMap, {
+        credentials: { clientId: 'old', apiKey: 'old-key' },
+        getCredentials: jest.fn().mockResolvedValue(undefined),
+        onEvent,
+      }),
+    ).rejects.toThrow('aborted');
+
+    expect(onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: { type: OzonSupplyEventType.Error },
+        message: expect.stringContaining('status=403'),
+      }),
+    );
+    expect(onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('code=7'),
+      }),
+    );
+    expect(onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('missing a required role'),
+      }),
+    );
+  });
 });
