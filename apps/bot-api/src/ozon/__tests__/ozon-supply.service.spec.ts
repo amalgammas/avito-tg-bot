@@ -143,4 +143,44 @@ describe('OzonSupplyService', () => {
     expect(ozonApi.getDraftTimeslots).toHaveBeenCalledTimes(1);
     expect(task.selectedTimeslot).toBeUndefined();
   });
+
+  it('refreshes credentials and retries task only on missing role error', async () => {
+    const task: OzonSupplyTask = {
+      ...baseTask,
+      supplyType: 'CREATE_TYPE_DIRECT',
+      orderFlag: 0,
+    };
+    const taskMap = new Map([[task.taskId, task]]);
+    const oldCredentials = { clientId: 'old', apiKey: 'old-key' };
+    const newCredentials = { clientId: 'new', apiKey: 'new-key' };
+
+    const processSingleTask = jest
+      .spyOn(service as any, 'processSingleTask')
+      .mockRejectedValueOnce({
+        response: {
+          status: 403,
+          data: {
+            code: 7,
+            message: 'Api-Key is missing a required role for a method',
+          },
+        },
+      } as AxiosError)
+      .mockImplementationOnce(async (state: any) => {
+        state.orderFlag = 1;
+        return {
+          task: state,
+          event: { type: OzonSupplyEventType.SupplyCreated },
+          operationId: 'op-2',
+        };
+      });
+
+    await service.processTasks(taskMap, {
+      credentials: oldCredentials,
+      getCredentials: jest.fn().mockResolvedValue(newCredentials),
+      onEvent: jest.fn(),
+    });
+
+    expect(processSingleTask).toHaveBeenNthCalledWith(1, task, oldCredentials, undefined, undefined);
+    expect(processSingleTask).toHaveBeenNthCalledWith(2, task, newCredentials, undefined, undefined);
+  });
 });

@@ -16,6 +16,7 @@ interface SupplyTaskOrchestratorCallbacks {
 interface SupplyTaskOrchestratorParams {
   task: OzonSupplyTask;
   credentials: OzonCredentials;
+  credentialsResolver?: () => OzonCredentials | undefined | Promise<OzonCredentials | undefined>;
   readyInDays: number;
   dropOffWarehouseId?: number;
   abortController: AbortController;
@@ -27,11 +28,12 @@ export class SupplyTaskOrchestratorService {
   constructor(private readonly runner: SupplyRunnerService) {}
 
   async run(params: SupplyTaskOrchestratorParams): Promise<void> {
-    const { task, credentials, readyInDays, dropOffWarehouseId, abortController, callbacks } = params;
+    const { task, credentials, credentialsResolver, readyInDays, dropOffWarehouseId, abortController, callbacks } = params;
 
     await this.runner.run({
       task,
       credentials,
+      credentialsResolver,
       readyInDays,
       dropOffWarehouseId,
       abortController,

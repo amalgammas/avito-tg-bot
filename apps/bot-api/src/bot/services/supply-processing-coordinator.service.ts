@@ -17,6 +17,7 @@ export interface SupplyProcessingCallbacks {
 export interface SupplyProcessingParams {
   task: OzonSupplyTask;
   credentials: OzonCredentials;
+  credentialsResolver?: () => OzonCredentials | undefined | Promise<OzonCredentials | undefined>;
   readyInDays: number;
   dropOffWarehouseId?: number;
   abortController: AbortController;
@@ -30,12 +31,13 @@ export class SupplyProcessingCoordinatorService {
   constructor(private readonly orchestrator: SupplyTaskOrchestratorService) {}
 
   async run(params: SupplyProcessingParams): Promise<void> {
-    const { task, credentials, readyInDays, dropOffWarehouseId, abortController, callbacks } = params;
+    const { task, credentials, credentialsResolver, readyInDays, dropOffWarehouseId, abortController, callbacks } = params;
 
     try {
       await this.orchestrator.run({
         task,
         credentials,
+        credentialsResolver,
         readyInDays,
         dropOffWarehouseId,
         abortController,

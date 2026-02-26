@@ -121,8 +121,8 @@ export class OzonSupplyService {
     }
 
     const delayBetweenCalls = options.delayBetweenCallsMs ?? this.pollIntervalMs;
-    const credentials = options.credentials;
     const abortSignal = options.abortSignal;
+    let runtimeCredentials = options.credentials;
 
     this.ensureNotAborted(abortSignal);
 
@@ -136,10 +136,37 @@ export class OzonSupplyService {
         throw new Error('Пункт сдачи (drop-off) не задан. Укажите его в мастере или через OZON_SUPPLY_DROP_OFF_ID.');
       }
       if (!options.skipDropOffValidation) {
-        await this.ensureDropOffWarehouseAvailable(dropOffWarehouseId, credentials, abortSignal);
+        await this.ensureDropOffWarehouseAvailable(dropOffWarehouseId, runtimeCredentials, abortSignal);
       }
     }
     const seenUnavailableWarehouses = new Set<number>();
+
+    const handleProcessResult = async (state: OzonSupplyTask, result: OzonSupplyProcessResult, credentials: OzonCredentials | undefined): Promise<boolean> => {
+      const eventType = result.event?.type ?? OzonSupplyEventType.Error;
+
+      if (eventType === OzonSupplyEventType.Error && /Склад отгрузки/.test(result.message ?? '')) {
+        const match = /Склад отгрузки (\d+)/.exec(result.message ?? '');
+        const warehouseId = match ? Number(match[1]) : undefined;
+        if (warehouseId && !seenUnavailableWarehouses.has(warehouseId)) {
+          seenUnavailableWarehouses.add(warehouseId);
+          await this.emitEvent(options.onEvent, {
+            task: state,
+            event: { type: OzonSupplyEventType.Error },
+            message: `⚠️ Склад ${warehouseId} недоступен по данным Ozon (drop-off ${dropOffWarehouseId}). Выберите склад из списка, предложенного черновиком.`,
+          });
+        }
+      }
+      await this.emitEvent(options.onEvent, result);
+
+      if (eventType === OzonSupplyEventType.SupplyCreated && result.operationId) {
+        await this.emitSupplyStatus(result.operationId, state, credentials, options.onEvent, abortSignal);
+      }
+
+      if (state.orderFlag === 1) {
+        return true;
+      }
+      return false;
+    };
 
     while (taskMap.size) {
       this.ensureNotAborted(abortSignal);
@@ -147,33 +174,40 @@ export class OzonSupplyService {
       for (const [taskId, state] of Array.from(taskMap.entries())) {
         this.ensureNotAborted(abortSignal);
         try {
-          const result = await this.processSingleTask(state, credentials, dropOffWarehouseId, abortSignal);
-          const eventType = result.event?.type ?? OzonSupplyEventType.Error;
-
-          if (eventType === OzonSupplyEventType.Error && /Склад отгрузки/.test(result.message ?? '')) {
-            const match = /Склад отгрузки (\d+)/.exec(result.message ?? '');
-            const warehouseId = match ? Number(match[1]) : undefined;
-            if (warehouseId && !seenUnavailableWarehouses.has(warehouseId)) {
-              seenUnavailableWarehouses.add(warehouseId);
-              await this.emitEvent(options.onEvent, {
-                task: state,
-                event: { type: OzonSupplyEventType.Error },
-                message: `⚠️ Склад ${warehouseId} недоступен по данным Ozon (drop-off ${dropOffWarehouseId}). Выберите склад из списка, предложенного черновиком.`,
-              });
-            }
-          }
-          await this.emitEvent(options.onEvent, result);
-
-          if (eventType === OzonSupplyEventType.SupplyCreated && result.operationId) {
-            await this.emitSupplyStatus(result.operationId, state, credentials, options.onEvent, abortSignal);
-          }
-
-          if (state.orderFlag === 1) {
+          const result = await this.processSingleTask(state, runtimeCredentials, dropOffWarehouseId, abortSignal);
+          const shouldRemoveTask = await handleProcessResult(state, result, runtimeCredentials);
+          if (shouldRemoveTask) {
             this.logger.log(`[${taskId}] Поставка создана, удаляем из очереди`);
             taskMap.delete(taskId);
             continue;
           }
         } catch (error) {
+          if (this.isMissingRoleError(error)) {
+            const refreshedCredentials = await this.resolveCredentialsOnRoleError(options.getCredentials, runtimeCredentials);
+            if (refreshedCredentials) {
+              runtimeCredentials = refreshedCredentials;
+              this.logger.warn(`[${taskId}] Обновили ключи после role error и повторяем попытку`);
+              try {
+                const retryResult = await this.processSingleTask(state, runtimeCredentials, dropOffWarehouseId, abortSignal);
+                const shouldRemoveTask = await handleProcessResult(state, retryResult, runtimeCredentials);
+                if (shouldRemoveTask) {
+                  this.logger.log(`[${taskId}] Поставка создана, удаляем из очереди`);
+                  taskMap.delete(taskId);
+                  continue;
+                }
+                continue;
+              } catch (retryError) {
+                const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+                this.logger.error(`[${taskId}] Ошибка обработки после обновления ключей: ${retryMessage}`);
+                await this.emitEvent(options.onEvent, {
+                  task: state,
+                  event: { type: OzonSupplyEventType.Error },
+                  message: retryMessage,
+                });
+                continue;
+              }
+            }
+          }
           const message = error instanceof Error ? error.message : String(error);
           this.logger.error(`[${taskId}] Ошибка обработки: ${message}`);
           await this.emitEvent(options.onEvent, { task: state, event: { type: OzonSupplyEventType.Error }, message });
@@ -190,6 +224,50 @@ export class OzonSupplyService {
         }
       }
     }
+  }
+
+  private isMissingRoleError(error: unknown): boolean {
+    const source = error as any;
+    const status = source?.response?.status;
+    const code = source?.response?.data?.code;
+    const responseMessage = source?.response?.data?.message;
+    const fallbackMessage = source?.message;
+    const normalized = (
+      (typeof responseMessage === 'string' ? responseMessage : undefined) ??
+      (typeof fallbackMessage === 'string' ? fallbackMessage : '')
+    ).toLowerCase();
+
+    return status === 403 && (code === 7 || normalized.includes('missing a required role'));
+  }
+
+  private async resolveCredentialsOnRoleError(
+    resolver: OzonSupplyProcessOptions['getCredentials'] | undefined,
+    current: OzonCredentials | undefined,
+  ): Promise<OzonCredentials | undefined> {
+    if (!resolver) {
+      return undefined;
+    }
+
+    try {
+      const fresh = await resolver();
+      if (fresh?.clientId && fresh?.apiKey && !this.isSameCredentials(current, fresh)) {
+        return fresh;
+      }
+    } catch (error) {
+      this.logger.warn(`getCredentials failed on role error: ${this.describeUnknownError(error)}`);
+    }
+
+    return undefined;
+  }
+
+  private isSameCredentials(
+    left: OzonCredentials | undefined,
+    right: OzonCredentials | undefined,
+  ): boolean {
+    if (!left || !right) {
+      return false;
+    }
+    return left.clientId === right.clientId && left.apiKey === right.apiKey;
   }
 
   getPollIntervalMs(): number {

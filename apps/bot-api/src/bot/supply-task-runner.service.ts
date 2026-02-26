@@ -276,6 +276,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     try {
       await this.supplyService.runSingleTask(clonedTask, {
         credentials,
+        getCredentials: () => this.credentialsStore.get(record.chatId),
         readyInDays,
         dropOffWarehouseId: requiresDropOff ? record.dropOffId : undefined,
         skipDropOffValidation: true,

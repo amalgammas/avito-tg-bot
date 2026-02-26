@@ -1552,6 +1552,7 @@ export class SupplyWizardHandler {
         void this.processing.run({
             task: effectiveTask,
             credentials,
+            credentialsResolver: () => this.resolveCredentials(chatId),
             readyInDays,
             dropOffWarehouseId: requiresDropOff ? updated.selectedDropOffId : undefined,
             abortController,

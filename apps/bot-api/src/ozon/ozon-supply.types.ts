@@ -70,6 +70,10 @@ export interface OzonSupplyProcessOptions {
     clientId: string;
     apiKey: string;
   };
+  getCredentials?: () =>
+    | { clientId: string; apiKey: string }
+    | undefined
+    | Promise<{ clientId: string; apiKey: string } | undefined>;
   delayBetweenCallsMs?: number;
   onEvent?: (result: OzonSupplyProcessResult) => void | Promise<void>;
   dropOffWarehouseId?: number;

@@ -19,6 +19,7 @@ interface SupplyRunnerCallbacks {
 interface SupplyRunnerParams {
   task: OzonSupplyTask;
   credentials: OzonCredentials;
+  credentialsResolver?: () => OzonCredentials | undefined | Promise<OzonCredentials | undefined>;
   readyInDays: number;
   dropOffWarehouseId?: number;
   abortController: AbortController;
@@ -32,7 +33,7 @@ export class SupplyRunnerService {
   constructor(private readonly supplyService: OzonSupplyService) {}
 
   async run(params: SupplyRunnerParams): Promise<void> {
-    const { task, credentials, readyInDays, dropOffWarehouseId, abortController, callbacks } = params;
+    const { task, credentials, credentialsResolver, readyInDays, dropOffWarehouseId, abortController, callbacks } = params;
 
     let supplyCreated: OzonSupplyProcessResult | undefined;
     let windowExpired: OzonSupplyProcessResult | undefined;
@@ -40,6 +41,7 @@ export class SupplyRunnerService {
     try {
       await this.supplyService.runSingleTask(task, {
         credentials,
+        getCredentials: credentialsResolver,
         readyInDays,
         dropOffWarehouseId,
         skipDropOffValidation: true,
@@ -90,4 +92,3 @@ export class SupplyRunnerService {
     return error instanceof Error && error.name === 'AbortError';
   }
 }
-

@@ -36,6 +36,7 @@ describe('SupplyProcessingCoordinatorService', () => {
     expect(orchestrator.run).toHaveBeenCalledWith({
       task: params.task,
       credentials: params.credentials,
+      credentialsResolver: undefined,
       readyInDays: params.readyInDays,
       dropOffWarehouseId: params.dropOffWarehouseId,
       abortController: params.abortController,
