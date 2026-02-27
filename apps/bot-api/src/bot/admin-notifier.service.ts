@@ -9,6 +9,8 @@ import { WizardEvent } from './services/wizard-event.types';
 @Injectable()
 export class AdminNotifierService {
   private readonly logger = new Logger(AdminNotifierService.name);
+  private readonly telegramMessageLimit = 4096;
+  private readonly telegramChunkSize = 3800;
   private readonly adminChatIds: string[];
   private readonly broadcastChatId?: string;
 
@@ -69,8 +71,16 @@ export class AdminNotifierService {
   }
 
   private async broadcast(text: string): Promise<void> {
+    const successfulTargets: string[] = [];
+    const failedTargets: Array<{ chatId: string; reason: string }> = [];
+
     if (this.broadcastChatId) {
-      await this.sendMessage(this.broadcastChatId, text);
+      const delivery = await this.sendMessage(this.broadcastChatId, text);
+      if (delivery.ok) {
+        successfulTargets.push(this.broadcastChatId);
+      } else {
+        failedTargets.push({ chatId: this.broadcastChatId, reason: delivery.reason });
+      }
     }
 
     for (const chatId of this.adminChatIds) {
@@ -80,20 +90,115 @@ export class AdminNotifierService {
       const personalText = this.broadcastChatId
         ? `${text}\n\n(Лог продублирован в канале ${this.broadcastChatId})`
         : text;
-      await this.sendMessage(chatId, personalText);
+      const delivery = await this.sendMessage(chatId, personalText);
+      if (delivery.ok) {
+        successfulTargets.push(chatId);
+      } else {
+        failedTargets.push({ chatId, reason: delivery.reason });
+      }
+    }
+
+    if (failedTargets.length) {
+      const diagnosticText = this.formatDeliveryFailureText(text, failedTargets);
+      for (const chatId of successfulTargets) {
+        await this.sendMessage(chatId, diagnosticText);
+      }
+
+      const failureSummary = failedTargets.map((item) => `${item.chatId}: ${item.reason}`).join(' | ');
+      this.logger.warn(`Admin notification delivery issues: ${failureSummary}`);
     }
   }
 
-  private async sendMessage(chatId: string, text: string): Promise<void> {
+  private async sendMessage(chatId: string, text: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const parts = this.splitMessage(text, this.telegramChunkSize);
+
     try {
-      await this.bot.telegram.sendMessage(chatId, text);
+      for (let index = 0; index < parts.length; index += 1) {
+        const part = parts[index];
+        const payload =
+          parts.length > 1
+            ? `(часть ${index + 1}/${parts.length})\n${part}`
+            : part;
+
+        await this.bot.telegram.sendMessage(chatId, payload.slice(0, this.telegramMessageLimit));
+      }
+      return { ok: true };
     } catch (error) {
       if (error instanceof TelegramError && error.code === 403) {
         this.logger.warn(`Unable to deliver admin notification to ${chatId}: ${error.message}`);
-        return;
+        return { ok: false, reason: `403: ${error.message}` };
       }
       this.logger.error(`Failed to deliver admin notification to ${chatId}: ${error}`);
+      return { ok: false, reason: this.describeError(error) };
     }
+  }
+
+  private formatDeliveryFailureText(
+    sourceText: string,
+    failedTargets: Array<{ chatId: string; reason: string }>,
+  ): string {
+    const eventLine = sourceText.split('\n')[0] ?? '#unknown';
+    const failedLines = failedTargets.map((item) => `• ${item.chatId}: ${item.reason}`);
+    return [
+      '⚠️ Не удалось доставить админ-уведомление во все чаты.',
+      `Событие: ${eventLine}`,
+      'Причины:',
+      ...failedLines,
+    ].join('\n');
+  }
+
+  private describeError(error: unknown): string {
+    if (error instanceof Error) {
+      return `${error.name}: ${error.message}`;
+    }
+    if (typeof error === 'object' && error !== null) {
+      const maybeCode = (error as any).code;
+      const maybeMessage = (error as any).message;
+      if (maybeCode || maybeMessage) {
+        return `${maybeCode ?? 'unknown'}: ${maybeMessage ?? String(error)}`;
+      }
+    }
+    return String(error);
+  }
+
+  private splitMessage(text: string, maxLength: number): string[] {
+    const input = text?.trim();
+    if (!input) {
+      return [''];
+    }
+    if (input.length <= maxLength) {
+      return [input];
+    }
+
+    const chunks: string[] = [];
+    let rest = input;
+
+    while (rest.length > maxLength) {
+      const slice = rest.slice(0, maxLength);
+      const breakAtNewline = slice.lastIndexOf('\n');
+      const breakAtSpace = slice.lastIndexOf(' ');
+      const minBreakIndex = Math.floor(maxLength * 0.6);
+
+      let breakIndex = -1;
+      if (breakAtNewline >= minBreakIndex) {
+        breakIndex = breakAtNewline;
+      } else if (breakAtSpace >= minBreakIndex) {
+        breakIndex = breakAtSpace;
+      }
+
+      if (breakIndex <= 0) {
+        breakIndex = maxLength;
+      }
+
+      chunks.push(rest.slice(0, breakIndex).trimEnd());
+      rest = rest.slice(breakIndex).trimStart();
+    }
+
+    if (rest.length) {
+      chunks.push(rest);
+    }
+
+    return chunks.length ? chunks : [input];
   }
 
   private extractChatId(ctx?: Context): string | undefined {

@@ -84,4 +84,37 @@ describe('AdminNotifierService', () => {
 
     expect(telegram.sendMessage).toHaveBeenCalled();
   });
+
+  it('sends delivery-failure reason to available admin chats', async () => {
+    const service = buildService({ adminIds: ['111', '222'] });
+    (telegram.sendMessage as jest.Mock)
+      .mockRejectedValueOnce({ code: 403, message: 'blocked by user' } as TelegramError)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+
+    await service.notifyWizardEvent({ event: WizardEvent.TaskSummary, lines: ['Активных задач нет.'] });
+
+    expect(telegram.sendMessage).toHaveBeenCalledTimes(3);
+    expect(telegram.sendMessage).toHaveBeenNthCalledWith(1, '111', expect.stringContaining('#tasks.summary'));
+    expect(telegram.sendMessage).toHaveBeenNthCalledWith(2, '222', expect.stringContaining('#tasks.summary'));
+    expect(telegram.sendMessage).toHaveBeenNthCalledWith(
+      3,
+      '222',
+      expect.stringContaining('Не удалось доставить админ-уведомление во все чаты'),
+    );
+    expect(telegram.sendMessage).toHaveBeenNthCalledWith(3, '222', expect.stringContaining('111'));
+    expect(telegram.sendMessage).toHaveBeenNthCalledWith(3, '222', expect.stringContaining('blocked by user'));
+  });
+
+  it('splits long notifications into multiple telegram messages', async () => {
+    const service = buildService({ adminIds: ['111'] });
+    const longLine = `line ${'x'.repeat(9000)}`;
+
+    await service.notifyWizardEvent({ event: WizardEvent.TaskSummary, lines: [longLine] });
+
+    expect(telegram.sendMessage).toHaveBeenCalledTimes(3);
+    expect(telegram.sendMessage).toHaveBeenNthCalledWith(1, '111', expect.stringContaining('(часть 1/3)'));
+    expect(telegram.sendMessage).toHaveBeenNthCalledWith(2, '111', expect.stringContaining('(часть 2/3)'));
+    expect(telegram.sendMessage).toHaveBeenNthCalledWith(3, '111', expect.stringContaining('(часть 3/3)'));
+  });
 });
