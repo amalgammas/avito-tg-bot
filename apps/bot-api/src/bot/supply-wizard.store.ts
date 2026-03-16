@@ -17,6 +17,7 @@ export interface SupplyWizardWarehousesOption {
 export interface SupplyWizardClusterOption {
   id: number;
   name: string;
+  macrolocalClusterId?: number;
   logistic_clusters: SupplyWizardWarehousesOption;
 }
 
@@ -391,6 +392,7 @@ export class SupplyWizardStore {
     return source.map((cluster) => ({
       id: cluster.id,
       name: cluster.name,
+      macrolocalClusterId: cluster.macrolocalClusterId,
       logistic_clusters: {
         warehouses: (cluster.logistic_clusters?.warehouses ?? []).map((item) => ({ ...item })),
       },

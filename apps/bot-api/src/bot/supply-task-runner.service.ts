@@ -125,7 +125,15 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
         if (supplyTypeLabel) parts.push(`тип: ${supplyTypeLabel}`);
         if (task.dropOffName) parts.push(`drop-off: ${task.dropOffName}`);
         if (task.clusterName) parts.push(`cluster: ${task.clusterName}`);
-        if (task.warehouseName) parts.push(`склад: ${task.warehouseName}`);
+        const autoWarehouse =
+          task.warehouseAutoSelect ||
+          task.taskPayload?.warehouseAutoSelect ||
+          task.warehouseName === 'Первый доступный склад';
+        if (autoWarehouse) {
+          parts.push('склад: Первый доступный склад');
+        } else if (task.warehouseName) {
+          parts.push(`склад: ${task.warehouseName}`);
+        }
         if (task.readyInDays !== undefined) parts.push(`готовность ${task.readyInDays}д`);
         const deadlineLabel = this.formatSearchDeadline(task);
         if (deadlineLabel) parts.push(`Крайняя дата: до ${deadlineLabel}`);

@@ -56,6 +56,16 @@ export class UserCredentialsStore {
     }, []);
   }
 
+  async listChatIds(): Promise<string[]> {
+    const records = await this.repository.find({
+      select: { chatId: true },
+      order: { chatId: 'ASC' },
+    });
+    return records
+      .map((record) => record.chatId?.toString().trim())
+      .filter((value): value is string => Boolean(value));
+  }
+
   private toCredentials(entity: UserCredentialsEntity | null | undefined): UserOzonCredentials | undefined {
     if (!entity) {
       return undefined;

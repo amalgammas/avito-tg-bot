@@ -566,6 +566,10 @@ export class SupplyWizardViewService {
             clusterOptions.push({
                 id: clusterId,
                 name: clusterName,
+                macrolocalClusterId:
+                    typeof cluster.macrolocal_cluster_id === 'number' && Number.isFinite(cluster.macrolocal_cluster_id)
+                        ? Math.trunc(cluster.macrolocal_cluster_id)
+                        : undefined,
                 logistic_clusters: {
                     warehouses: uniqueWarehouses.map((item) => ({ ...item })),
                 },
@@ -595,13 +599,13 @@ export class SupplyWizardViewService {
         const byWarehouse = new Map<number, SupplyWizardDraftWarehouseOption>();
 
         for (const cluster of info.clusters ?? []) {
-            const parsedClusterId = this.parseNumber(cluster?.cluster_id);
+            const parsedClusterId = this.parseNumber(cluster?.cluster_id ?? cluster?.macrolocal_cluster_id);
             const clusterId = parsedClusterId ? Math.round(parsedClusterId) : undefined;
             const clusterName = cluster?.cluster_name?.trim() || undefined;
 
             for (const warehouseInfo of cluster?.warehouses ?? []) {
                 if (!warehouseInfo) continue;
-                const supplyWarehouse = warehouseInfo.supply_warehouse;
+                const supplyWarehouse = warehouseInfo.supply_warehouse ?? warehouseInfo.storage_warehouse;
                 const rawId = supplyWarehouse?.warehouse_id;
                 const parsedId = this.parseNumber(rawId);
                 if (!parsedId || parsedId <= 0) continue;
@@ -612,6 +616,9 @@ export class SupplyWizardViewService {
                 const totalScore = this.parseNumber(warehouseInfo.total_score);
                 const travelTimeDays = this.parseNullableNumber(warehouseInfo.travel_time_days);
                 const bundle = warehouseInfo.bundle_ids?.[0];
+                const statusState = warehouseInfo.status?.state ?? warehouseInfo.availability_status?.state;
+                const statusReason =
+                    warehouseInfo.status?.invalid_reason ?? warehouseInfo.availability_status?.invalid_reason;
 
                 const option: SupplyWizardDraftWarehouseOption = {
                     warehouseId,
@@ -622,10 +629,10 @@ export class SupplyWizardViewService {
                     totalRank,
                     totalScore,
                     travelTimeDays: typeof travelTimeDays === 'number' ? travelTimeDays : null,
-                    isAvailable: warehouseInfo.status?.is_available,
-                    statusState: warehouseInfo.status?.state,
-                    statusReason: warehouseInfo.status?.invalid_reason,
-                    bundleId: bundle?.bundle_id || undefined,
+                    isAvailable: warehouseInfo.status?.is_available ?? (statusState === 'FULL_AVAILABLE'),
+                    statusState,
+                    statusReason,
+                    bundleId: warehouseInfo.bundle_id || bundle?.bundle_id || undefined,
                     restrictedBundleId: warehouseInfo.restricted_bundle_id || undefined,
                 };
 
@@ -797,8 +804,10 @@ export class SupplyWizardViewService {
         page: number;
         pageCount: number;
         searchQuery?: string;
+        supplyType?: 'CREATE_TYPE_CROSSDOCK' | 'CREATE_TYPE_DIRECT';
     }): string {
         const lines: string[] = [];
+        const isCrossdock = (params.supplyType ?? 'CREATE_TYPE_CROSSDOCK') === 'CREATE_TYPE_CROSSDOCK';
 
         if (params.clusterName) {
             lines.push(`Кластер: ${params.clusterName}.`);
@@ -817,11 +826,18 @@ export class SupplyWizardViewService {
                 '',
                 '<b>Выберите склад для поиска слотов.</b>',
                 '',
-                '<b>Если вы хотите отправить поставку в любой доступный склад в кластере, то выберите пункт “Первый доступный”.</b>',
-                '',
-                'Если вы хотите отправить поставку на <b>конкретный</b> склад в кластере, выберите его в списке ниже. Выберите склад кнопкой или введите часть названия / номера, чтобы отфильтровать список.',
+                isCrossdock
+                    ? '<b>В настоящее время Ozon не позволяет выбрать конкретный склад для поставки по модели кросс-докинг, поэтому выберите “Первый доступный”.</b>'
+                    : '<b>Если вы хотите отправить поставку в любой доступный склад в кластере, то выберите пункт “Первый доступный”.</b>',
                 ''
             );
+
+            if (!isCrossdock) {
+                lines.push(
+                    'Если вы хотите отправить поставку на <b>конкретный</b> склад в кластере, выберите его в списке ниже. Выберите склад кнопкой или введите часть названия / номера, чтобы отфильтровать список.',
+                    ''
+                );
+            }
 
             const totalInfo = params.total !== params.filteredTotal
                 ? `${params.filteredTotal} из ${params.total}`
@@ -846,27 +862,31 @@ export class SupplyWizardViewService {
         includeAuto: boolean;
         searchActive: boolean;
         includeBackToCluster?: boolean;
+        supplyType?: 'CREATE_TYPE_CROSSDOCK' | 'CREATE_TYPE_DIRECT';
     }): Array<Array<{ text: string; callback_data: string }>> {
         const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+        const isCrossdock = (params.supplyType ?? 'CREATE_TYPE_CROSSDOCK') === 'CREATE_TYPE_CROSSDOCK';
 
         if (params.includeAuto) {
             rows.push([{ text: 'Первый доступный 🥇', callback_data: 'wizard:warehouse:auto' }]);
         }
 
-        params.items.forEach((warehouse) => {
-            rows.push([
-                {
-                    text: `${warehouse.name} (${warehouse.warehouse_id})`,
-                    callback_data: `wizard:warehouse:${warehouse.warehouse_id}`,
-                },
-            ]);
-        });
+        if (!isCrossdock) {
+            params.items.forEach((warehouse) => {
+                rows.push([
+                    {
+                        text: `${warehouse.name} (${warehouse.warehouse_id})`,
+                        callback_data: `wizard:warehouse:${warehouse.warehouse_id}`,
+                    },
+                ]);
+            });
+        }
 
-        if (params.searchActive) {
+        if (!isCrossdock && params.searchActive) {
             rows.push([{ text: 'Сбросить поиск', callback_data: 'wizard:warehouse:search:clear' }]);
         }
 
-        if (params.pageCount > 1) {
+        if (!isCrossdock && params.pageCount > 1) {
             const navRow: Array<{ text: string; callback_data: string }> = [];
             navRow.push({
                 text: '⬅️',
@@ -1268,6 +1288,7 @@ export class SupplyWizardViewService {
 export interface OzonClusterLike {
     id?: number;
     name?: string;
+    macrolocal_cluster_id?: number;
     logistic_clusters?: Array<{
         warehouses?: Array<{
             warehouse_id?: number;
@@ -1280,10 +1301,17 @@ export interface OzonClusterLike {
 export interface DraftStatusLike {
     clusters?: Array<{
         cluster_id?: number | string;
+        macrolocal_cluster_id?: number | string;
         cluster_name?: string;
         warehouses?: Array<{
             bundle_ids?: Array<{ bundle_id?: string; is_docless?: boolean }>;
+            bundle_id?: string;
             supply_warehouse?: {
+                warehouse_id?: number | string;
+                name?: string;
+                address?: string;
+            };
+            storage_warehouse?: {
                 warehouse_id?: number | string;
                 name?: string;
                 address?: string;
@@ -1295,6 +1323,10 @@ export interface DraftStatusLike {
                 state?: string;
                 invalid_reason?: string;
                 is_available?: boolean;
+            };
+            availability_status?: {
+                state?: string;
+                invalid_reason?: string;
             };
             restricted_bundle_id?: string;
         }>;

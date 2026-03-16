@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 
 import type {
   OzonAvailableWarehouse,
+  OzonDraftSupplyType,
   OzonDraftStatus,
   OzonDraftTimeslot,
   OzonFboWarehouseSearchItem,
@@ -45,6 +46,7 @@ export class WizardFlowService {
     draftId: number | string,
     warehouseIds: Array<number | string>,
     window: { dateFromIso: string; dateToIso: string },
+    supplyType: OzonDraftSupplyType,
     credentials: { clientId: string; apiKey: string },
   ): Promise<OzonTimeslotResponse> {
     return this.ozonApi.getDraftTimeslots(
@@ -53,6 +55,7 @@ export class WizardFlowService {
         warehouseIds,
         dateFrom: window.dateFromIso,
         dateTo: window.dateToIso,
+        supplyType,
       },
       credentials,
     );
@@ -76,7 +79,7 @@ export class WizardFlowService {
       clusterIds: Array<string | number>;
       dropOffPointWarehouseId?: number | string;
       items: Array<{ sku: number; quantity: number }>;
-      type: 'CREATE_TYPE_DIRECT' | 'CREATE_TYPE_CROSSDOCK';
+      type: OzonDraftSupplyType;
     },
     credentials: { clientId: string; apiKey: string },
   ): Promise<string | undefined> {

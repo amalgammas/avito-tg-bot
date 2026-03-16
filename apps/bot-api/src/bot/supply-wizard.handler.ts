@@ -5,6 +5,7 @@ import { Context } from 'telegraf';
 
 import {
     OzonApiService,
+    OzonAccessDeniedError,
     OzonCluster,
     OzonCredentials,
     OzonFboWarehouseSearchItem,
@@ -542,6 +543,18 @@ export class SupplyWizardHandler {
         if (!apiKey) {
             await ctx.reply('Сначала введите API Key.');
             await this.showAuthApiKey(ctx, chatId, state);
+            return;
+        }
+
+        try {
+            await this.ozonApi.validateSupplyOrderAccess({ clientId, apiKey });
+        } catch (error) {
+            if (error instanceof OzonAccessDeniedError) {
+                await this.showAuthAccessDeniedPrompt(ctx, chatId, state, error.message);
+                return;
+            }
+            const message = error instanceof Error ? error.message : 'Не удалось проверить права Ozon API.';
+            await ctx.reply(`❌ Ключи не сохранены.\n${message}`);
             return;
         }
 
@@ -2059,6 +2072,35 @@ export class SupplyWizardHandler {
             state,
             this.view.renderAuthApiKeyPrompt(),
             this.view.buildAuthApiKeyKeyboard(),
+        );
+    }
+
+    private async showAuthAccessDeniedPrompt(
+        ctx: Context,
+        chatId: string,
+        fallback: SupplyWizardState,
+        reason: string,
+    ): Promise<void> {
+        const state =
+            this.updateWizardState(chatId, (current) => {
+                if (!current) return undefined;
+                return {
+                    ...current,
+                    stage: 'authWelcome',
+                    pendingApiKey: undefined,
+                    pendingClientId: undefined,
+                };
+            }) ?? fallback;
+
+        await this.view.updatePrompt(
+            ctx,
+            chatId,
+            state,
+            `❌ Ключи не сохранены, потому что у аккаунта нет нужных прав.\n${reason}`,
+            [
+                [{ text: 'Авторизоваться', callback_data: 'wizard:auth:login' }],
+                [{ text: 'Назад', callback_data: 'wizard:auth:back:welcome' }],
+            ],
         );
     }
 
@@ -4145,10 +4187,16 @@ export class SupplyWizardHandler {
             page: view.page,
             pageCount: view.pageCount,
             searchQuery: view.searchQuery,
+            supplyType: nextState.supplyType,
         });
+        const warehouseItems =
+            (nextState.supplyType ?? 'CREATE_TYPE_CROSSDOCK') === 'CREATE_TYPE_CROSSDOCK'
+                ? []
+                : view.items;
 
         const keyboard = this.view.buildClusterWarehouseKeyboard({
-            items: view.items,
+            // items: view.items,
+            items: warehouseItems,
             page: view.page,
             pageCount: view.pageCount,
             hasPrev: view.hasPrev,
@@ -4156,6 +4204,7 @@ export class SupplyWizardHandler {
             includeAuto: view.total > 0,
             searchActive: Boolean(view.searchQuery),
             includeBackToCluster: true,
+            supplyType: nextState.supplyType,
         });
 
         await this.view.updatePrompt(ctx, chatId, nextState, prompt, keyboard, { parseMode: 'HTML' });
@@ -4553,6 +4602,10 @@ export class SupplyWizardHandler {
                 warehouseIds,
                 dateFrom: from,
                 dateTo: to,
+                supplyType: state.supplyType === 'CREATE_TYPE_DIRECT' ? 'DIRECT' : 'CROSSDOCK',
+                ...(state.supplyType === 'CREATE_TYPE_DIRECT'
+                    ? {}
+                    : this.resolveSelectedClusterWarehouses(state, option)),
             },
             credentials,
         );
@@ -4586,6 +4639,34 @@ export class SupplyWizardHandler {
         }
 
         return options;
+    }
+
+    private resolveSelectedClusterWarehouses(
+        state: SupplyWizardState,
+        option: SupplyWizardDraftWarehouseOption,
+    ): {
+        selectedClusterWarehouses?: Array<{ macrolocal_cluster_id: number; storage_warehouse_id: number }>;
+    } {
+        const warehouseId = option?.warehouseId ?? state.selectedWarehouseId;
+        const clusterId = option?.clusterId ?? state.selectedClusterId;
+        if (!warehouseId || !clusterId) {
+            return {};
+        }
+
+        const cluster = state.clusters.find((item) => item.id === clusterId);
+        const macrolocalClusterId = cluster?.macrolocalClusterId;
+        if (!macrolocalClusterId) {
+            return {};
+        }
+
+        return {
+            selectedClusterWarehouses: [
+                {
+                    macrolocal_cluster_id: macrolocalClusterId,
+                    storage_warehouse_id: warehouseId,
+                },
+            ],
+        };
     }
 
     private async pollDraftStatus(
@@ -4832,14 +4913,20 @@ export class SupplyWizardHandler {
 
         if (current.stage === 'warehouseSelect') {
             const view = this.computeWarehouseView(chatId, current);
+            const warehouseItems =
+                (current.supplyType ?? 'CREATE_TYPE_CROSSDOCK') === 'CREATE_TYPE_CROSSDOCK'
+                    ? []
+                    : view.items;
             const keyboard = this.view.buildClusterWarehouseKeyboard({
-                items: view.items,
+                // items: view.items,
+                items: warehouseItems,
                 page: view.page,
                 pageCount: view.pageCount,
                 hasPrev: view.hasPrev,
                 hasNext: view.hasNext,
                 includeAuto: view.filteredTotal > 0,
                 searchActive: Boolean(view.searchQuery),
+                supplyType: current.supplyType,
             });
             const prompt = this.view.renderWarehouseSelection({
                 clusterName: current.selectedClusterName,
@@ -4849,6 +4936,7 @@ export class SupplyWizardHandler {
                 page: view.page,
                 pageCount: view.pageCount,
                 searchQuery: view.searchQuery,
+                supplyType: current.supplyType,
             });
             await this.view.updatePrompt(ctx, chatId, view.state, prompt, keyboard);
             return;
@@ -5031,7 +5119,7 @@ export class SupplyWizardHandler {
                         clusterIds: [clusterId],
                         dropOffPointWarehouseId: dropOffId,
                         items,
-                        type: 'CREATE_TYPE_CROSSDOCK',
+                        type: 'CROSSDOCK',
                     },
                     credentials,
                     abortController.signal,

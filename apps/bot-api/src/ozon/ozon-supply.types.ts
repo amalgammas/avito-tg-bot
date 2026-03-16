@@ -18,6 +18,7 @@ export interface OzonSupplyTask {
   items: OzonSupplyItem[];
   readyInDays?: number;
   clusterId?: string | number;
+  macrolocalClusterId?: number;
   warehouseId?: number;
   selectedTimeslot?: OzonDraftTimeslot;
   warehouseAutoSelect?: boolean;

@@ -159,9 +159,17 @@ export class SupplyProcessService {
     }
 
     const collected: Array<number | string> = [];
+    const directSingle = (status as any)?.order_id;
+    if (typeof directSingle !== 'undefined' && directSingle !== null) {
+      collected.push(directSingle);
+    }
     const direct = (status as any)?.order_ids;
     if (Array.isArray(direct)) {
       collected.push(...direct);
+    }
+    const nestedSingle = status.result?.order_id;
+    if (typeof nestedSingle !== 'undefined' && nestedSingle !== null) {
+      collected.push(nestedSingle);
     }
     const nested = status.result?.order_ids;
     if (Array.isArray(nested)) {

@@ -84,6 +84,21 @@ export class SupplyOrderStore {
     return this.repository.find({ where, order: { createdAt: 'ASC' } });
   }
 
+  async listDistinctChatIds(): Promise<string[]> {
+    await this.ensureSchemaCompatibility();
+    const rows = await this.repository
+      .createQueryBuilder('supply_orders')
+      .select('DISTINCT supply_orders.chatId', 'chatId')
+      .where('supply_orders.chatId IS NOT NULL')
+      .andWhere("TRIM(supply_orders.chatId) <> ''")
+      .orderBy('supply_orders.chatId', 'ASC')
+      .getRawMany<{ chatId: string }>();
+
+    return rows
+      .map((row) => row.chatId?.toString().trim())
+      .filter((value): value is string => Boolean(value));
+  }
+
   async findTask(chatId: string, taskId: string): Promise<SupplyOrderEntity | null> {
     await this.ensureSchemaCompatibility();
     return this.repository.findOne({ where: { chatId, taskId } });

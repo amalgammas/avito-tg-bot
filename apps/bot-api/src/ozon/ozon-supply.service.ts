@@ -558,10 +558,38 @@ export class OzonSupplyService {
     }
     this.ensureNotAborted(abortSignal);
 
-    if (info.status === 'CALCULATION_STATUS_SUCCESS') {
+    if (
+      info.status === 'CALCULATION_STATUS_SUCCESS' ||
+      info.status === 'CALCULATION_STATUS_SUCCEEDED' ||
+      info.status === 'SUCCESS'
+    ) {
+      const infoMacro = this.extractMacrolocalClusterId(info);
+      if (infoMacro) {
+        task.macrolocalClusterId = infoMacro;
+      }
       const warehouses = this.collectDraftWarehouses(info);
 
       if (!warehouses.length) {
+        if (task.supplyType !== 'CREATE_TYPE_DIRECT') {
+          const syntheticWarehouseId =
+            typeof task.warehouseId === 'number' && task.warehouseId > 0 ? task.warehouseId : 0;
+          const fallbackResult = await this.tryCreateSupplyOnWarehouse(
+            task,
+            credentials,
+            info,
+            {
+              warehouseId: syntheticWarehouseId,
+              name: task.warehouseName,
+              state: 'FULL_AVAILABLE',
+              isFullyAvailable: true,
+            },
+            abortSignal,
+          );
+          if (fallbackResult) {
+            return fallbackResult;
+          }
+          return { task, event: { type: OzonSupplyEventType.TimeslotMissing }, message: 'Свободных таймслотов нет' };
+        }
         return {
           task,
           event: { type: OzonSupplyEventType.DraftError },
@@ -570,7 +598,12 @@ export class OzonSupplyService {
       }
 
       if (strictWarehouse) {
-        const warehouseChoice = this.findWarehouseInCluster(info, task.warehouseId!, task.clusterId, task.warehouseName);
+        const warehouseChoice = this.findWarehouseInCluster(
+          info,
+          task.warehouseId!,
+          task.macrolocalClusterId ?? task.clusterId,
+          task.warehouseName,
+        );
 
         if (!warehouseChoice) {
           const message = task.warehouseSelectionPendingNotified
@@ -622,7 +655,7 @@ export class OzonSupplyService {
       return { task, event: { type: OzonSupplyEventType.DraftExpired }, message: 'Черновик устарел, создадим заново' };
     }
 
-    if (info.status === 'CALCULATION_STATUS_FAILED') {
+    if (info.status === 'CALCULATION_STATUS_FAILED' || info.status === 'FAILED') {
       task.draftOperationId = '';
       task.draftId = 0;
       return {
@@ -664,13 +697,13 @@ export class OzonSupplyService {
         message: 'Пункт сдачи не выбран для кросс-докинг поставки',
       };
     }
-
     const operationId = await this.ozonApi.createDraft(
       {
         clusterIds: [task.clusterId!],
+        macrolocalClusterId: this.resolveMacrolocalClusterId(task.clusterId),
         items: ozonItems,
         ...(supplyType === 'CREATE_TYPE_CROSSDOCK' ? { dropOffPointWarehouseId: dropOffWarehouseId! } : {}),
-        type: supplyType,
+        type: supplyType === 'CREATE_TYPE_DIRECT' ? 'DIRECT' : 'CROSSDOCK',
       },
       credentials,
       abortSignal,
@@ -681,7 +714,16 @@ export class OzonSupplyService {
       return { task, event: { type: OzonSupplyEventType.Error }, message: 'Черновик не создан: пустой operation_id' };
     }
 
+    const resolvedMacro = this.resolveMacrolocalClusterId(task.clusterId);
+    if (resolvedMacro) {
+      task.macrolocalClusterId = resolvedMacro;
+    }
+
     task.draftOperationId = operationId;
+    const draftIdFromOperation = this.parseLocalDraftOperationId(operationId);
+    if (draftIdFromOperation) {
+      task.draftId = draftIdFromOperation;
+    }
 
     return { task, event: { type: OzonSupplyEventType.DraftCreated }, message: `Создан черновик ${operationId}` };
   }
@@ -716,13 +758,19 @@ export class OzonSupplyService {
     }
 
     let response: ReturnType<OzonApiService['getDraftTimeslots']> extends Promise<infer R> ? R : never;
+    const requestDateFrom = this.toOzonDate(window.dateFromIso);
+    const requestDateTo = this.toOzonDate(window.dateToIso);
+    const requestWarehouseIds =
+      typeof task.warehouseId === 'number' && task.warehouseId > 0 ? [task.warehouseId] : [];
     try {
       response = await this.ozonApi.getDraftTimeslots(
         {
           draftId: task.draftId,
-          warehouseIds: [task.warehouseId!],
-          dateFrom: window.dateFromIso,
-          dateTo: window.dateToIso,
+          warehouseIds: requestWarehouseIds,
+          dateFrom: requestDateFrom,
+          dateTo: requestDateTo,
+          supplyType: task.supplyType === 'CREATE_TYPE_DIRECT' ? 'DIRECT' : 'CROSSDOCK',
+          ...this.buildSelectedClusterWarehouses(task),
         },
         credentials,
         abortSignal,
@@ -739,6 +787,7 @@ export class OzonSupplyService {
       throw error;
     }
     this.ensureNotAborted(abortSignal);
+    this.logTimeslotResponseSummary(task, response, requestDateFrom, requestDateTo);
 
     for (const warehouse of response.drop_off_warehouse_timeslots ?? []) {
       for (const day of warehouse.days ?? []) {
@@ -763,6 +812,45 @@ export class OzonSupplyService {
     return undefined;
   }
 
+  private logTimeslotResponseSummary(
+    task: OzonSupplyTask,
+    response: ReturnType<OzonApiService['getDraftTimeslots']> extends Promise<infer R> ? R : never,
+    dateFromIso: string,
+    dateToIso: string,
+  ): void {
+    let dayCount = 0;
+    let slotCount = 0;
+    let firstSlot: OzonDraftTimeslot | undefined;
+
+    for (const warehouse of response.drop_off_warehouse_timeslots ?? []) {
+      for (const day of warehouse.days ?? []) {
+        dayCount += 1;
+        for (const slot of day.timeslots ?? []) {
+          slotCount += 1;
+          if (!firstSlot && slot?.from_in_timezone && slot?.to_in_timezone) {
+            firstSlot = slot;
+          }
+        }
+      }
+    }
+
+    this.logger.debug(
+      `[timeslot] task=${task.taskId ?? 'n/a'} draftId=${task.draftId ?? 0} supplyType=${
+        task.supplyType === 'CREATE_TYPE_DIRECT' ? 'DIRECT' : 'CROSSDOCK'
+      } warehouse=${task.warehouseId ?? 'n/a'} range=${dateFromIso}..${dateToIso} days=${dayCount} slots=${slotCount} first=${
+        firstSlot ? `${firstSlot.from_in_timezone}..${firstSlot.to_in_timezone}` : 'none'
+      }`,
+    );
+  }
+
+  private toOzonDate(value: string): string {
+    const parsed = parseIsoDate(value);
+    if (!parsed) {
+      return value.split('T')[0] ?? value;
+    }
+    return parsed.toISOString().slice(0, 10);
+  }
+
   private createDraftExpiredError(): Error {
     const error = new Error('DraftExpired');
     error.name = 'DraftExpired';
@@ -775,7 +863,7 @@ export class OzonSupplyService {
 
   private createDraftInfoStub(task: OzonSupplyTask): OzonDraftStatus {
     return {
-      status: 'CALCULATION_STATUS_SUCCESS',
+      status: 'SUCCESS',
       draft_id: task.draftId,
       clusters: [],
     };
@@ -794,22 +882,29 @@ export class OzonSupplyService {
     const targetClusterId = this.parseClusterId(clusterId);
 
     for (const cluster of info.clusters ?? []) {
-      const currentClusterId = this.parseClusterId(cluster.cluster_id);
+      const currentClusterId = this.parseClusterId(cluster.cluster_id ?? (cluster as any).macrolocal_cluster_id);
       if (targetClusterId !== undefined && currentClusterId !== targetClusterId) {
         continue;
       }
 
       for (const warehouseInfo of cluster.warehouses ?? []) {
         const parsedId = this.parseWarehouseId(
-          warehouseInfo?.supply_warehouse?.warehouse_id ?? (warehouseInfo as any)?.warehouse_id,
+          warehouseInfo?.supply_warehouse?.warehouse_id ??
+            warehouseInfo?.storage_warehouse?.warehouse_id ??
+            (warehouseInfo as any)?.warehouse_id,
         );
         if (parsedId !== warehouseId) {
           continue;
         }
 
-        const name = warehouseInfo?.supply_warehouse?.name?.trim() || preferredName;
-        const state = warehouseInfo?.status?.state;
-        const isFullyAvailable = state === 'WAREHOUSE_SCORING_STATUS_FULL_AVAILABLE';
+        const name =
+          warehouseInfo?.supply_warehouse?.name?.trim() ??
+          warehouseInfo?.storage_warehouse?.name?.trim() ??
+          preferredName;
+        const state = warehouseInfo?.status?.state ?? warehouseInfo?.availability_status?.state;
+        const isFullyAvailable =
+          state === 'WAREHOUSE_SCORING_STATUS_FULL_AVAILABLE' ||
+          state === 'FULL_AVAILABLE';
         return { warehouseId: parsedId, name, state, isFullyAvailable };
       }
     }
@@ -887,7 +982,7 @@ export class OzonSupplyService {
       return {
         task,
         event: { type: OzonSupplyEventType.WarehousePending },
-        message: 'Черновик не содержит складов со статусом WAREHOUSE_SCORING_STATUS_FULL_AVAILABLE. Ждём обновления.',
+        message: 'Черновик не содержит складов со статусом FULL_AVAILABLE. Ждём обновления.',
       };
     }
 
@@ -913,7 +1008,7 @@ export class OzonSupplyService {
   ): Promise<OzonSupplyProcessResult | undefined> {
     if (entry.isFullyAvailable !== true) {
       const message = task.warehouseAutoSelect === false
-        ? `Ждём склад ${entry.warehouseId}. Ozon вернул статус ${entry.state ?? 'n/a'}, нужен WAREHOUSE_SCORING_STATUS_FULL_AVAILABLE.`
+        ? `Ждём склад ${entry.warehouseId}. Ozon вернул статус ${entry.state ?? 'n/a'}, нужен FULL_AVAILABLE.`
         : undefined;
       task.warehouseSelectionPendingNotified = true;
       return {
@@ -972,12 +1067,21 @@ export class OzonSupplyService {
 
     task.selectedTimeslot = timeslot;
     task.warehouseSelectionPendingNotified = false;
+    const createSupplySelection = this.buildSelectedClusterWarehouses(task).selectedClusterWarehouses;
+    if (!createSupplySelection?.length) {
+      return {
+        task,
+        event: { type: OzonSupplyEventType.Error },
+        message: 'Не удалось определить selected_cluster_warehouses для создания поставки',
+      };
+    }
 
     const operationId = await this.ozonApi.createSupply(
       {
         draftId: task.draftId,
-        warehouseId: task.warehouseId!,
+        selectedClusterWarehouses: createSupplySelection,
         timeslot,
+        supplyType: task.supplyType === 'CREATE_TYPE_DIRECT' ? 'DIRECT' : 'CROSSDOCK',
       },
       credentials,
       abortSignal,
@@ -1008,15 +1112,20 @@ export class OzonSupplyService {
       for (const warehouseInfo of cluster.warehouses ?? []) {
         const rawId =
           warehouseInfo?.supply_warehouse?.warehouse_id ??
+          warehouseInfo?.storage_warehouse?.warehouse_id ??
           (warehouseInfo as any)?.warehouse_id ??
           undefined;
         const warehouseId = this.parseWarehouseId(rawId);
         if (!warehouseId) {
           continue;
         }
-        const name = warehouseInfo?.supply_warehouse?.name?.trim();
-        const state = warehouseInfo?.status?.state;
-        const isFullyAvailable = state === 'WAREHOUSE_SCORING_STATUS_FULL_AVAILABLE';
+        const name =
+          warehouseInfo?.supply_warehouse?.name?.trim() ??
+          warehouseInfo?.storage_warehouse?.name?.trim();
+        const state = warehouseInfo?.status?.state ?? warehouseInfo?.availability_status?.state;
+        const isFullyAvailable =
+          state === 'WAREHOUSE_SCORING_STATUS_FULL_AVAILABLE' ||
+          state === 'FULL_AVAILABLE';
         result.push({ warehouseId, name, state, isFullyAvailable });
       }
     }
@@ -1349,5 +1458,73 @@ export class OzonSupplyService {
     }
 
     return result;
+  }
+
+  private resolveMacrolocalClusterId(clusterId: string | number | undefined): number | undefined {
+    if (typeof clusterId !== 'number' || !Number.isFinite(clusterId) || clusterId <= 0) {
+      return undefined;
+    }
+
+    const cluster = this.lastClusters.find((entry) => entry.id === clusterId);
+    const macrolocal = cluster?.macrolocal_cluster_id;
+    if (typeof macrolocal === 'number' && Number.isFinite(macrolocal) && macrolocal > 0) {
+      return Math.trunc(macrolocal);
+    }
+
+    return undefined;
+  }
+
+  private extractMacrolocalClusterId(info: OzonDraftStatus): number | undefined {
+    for (const cluster of info.clusters ?? []) {
+      const raw = (cluster as any)?.macrolocal_cluster_id;
+      if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+        return Math.trunc(raw);
+      }
+      if (typeof raw === 'string') {
+        const parsed = Number(raw.trim());
+        if (Number.isFinite(parsed) && parsed > 0) {
+          return Math.trunc(parsed);
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private parseLocalDraftOperationId(operationId: string | undefined): number | undefined {
+    if (!operationId) {
+      return undefined;
+    }
+    const match = /^draft-(\d+)$/.exec(operationId.trim());
+    if (!match) {
+      return undefined;
+    }
+    const parsed = Number(match[1]);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return undefined;
+    }
+    return Math.trunc(parsed);
+  }
+
+  private buildSelectedClusterWarehouses(task: OzonSupplyTask): { selectedClusterWarehouses?: Array<{ macrolocal_cluster_id: number; storage_warehouse_id: number }> } {
+    const macrolocalClusterId = task.macrolocalClusterId ?? this.resolveMacrolocalClusterId(task.clusterId);
+    const warehouseId =
+      typeof task.warehouseId === 'number' && task.warehouseId > 0
+        ? task.warehouseId
+        : task.supplyType === 'CREATE_TYPE_DIRECT'
+        ? undefined
+        : 0;
+
+    if (!macrolocalClusterId || typeof warehouseId !== 'number' || warehouseId < 0) {
+      return {};
+    }
+
+    return {
+      selectedClusterWarehouses: [
+        {
+          macrolocal_cluster_id: macrolocalClusterId,
+          storage_warehouse_id: warehouseId,
+        },
+      ],
+    };
   }
 }

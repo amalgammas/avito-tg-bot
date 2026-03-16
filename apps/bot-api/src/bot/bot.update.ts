@@ -1,12 +1,14 @@
 import { Command, Ctx, Help, Message, On, Start, Update } from 'nestjs-telegraf';
 import { Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Context } from 'telegraf';
 
 import { SupplyWizardHandler } from './supply-wizard.handler';
 import { UserCredentialsStore } from './user-credentials.store';
-import { OzonCredentials } from '../config/ozon-api.service';
+import { OzonAccessDeniedError, OzonApiService, OzonCredentials } from '../config/ozon-api.service';
 import { NotificationService } from './services/notification.service';
 import { WizardEvent } from './services/wizard-event.types';
+import { SupplyOrderStore } from '../storage/supply-order.store';
 
 @Update()
 export class BotUpdate {
@@ -19,13 +21,17 @@ export class BotUpdate {
     ' 3. /ozon_clear — удалить ключи из базы',
     '',
     'Дополнительно:',
-    ' /ping — проверить доступность бота'
+    ' /ping — проверить доступность бота',
+    ' /admin_broadcast <ALL|chatId> <текст> — рассылка (только админ)'
   ].join('\n');
 
   constructor(
     private readonly wizard: SupplyWizardHandler,
     private readonly credentialsStore: UserCredentialsStore,
+    private readonly orderStore: SupplyOrderStore,
+    private readonly ozonApi: OzonApiService,
     private readonly notifications: NotificationService,
+    private readonly config: ConfigService,
   ) {}
 
   @Start()
@@ -59,6 +65,28 @@ export class BotUpdate {
       return;
     } else {
         await ctx.reply(`client_id: ${ this.maskValue(clientId) }\napi_key: ${ this.maskValue(apiKey) }`);
+    }
+
+    try {
+      await this.ozonApi.validateSupplyOrderAccess({ clientId, apiKey });
+    } catch (error) {
+      if (error instanceof OzonAccessDeniedError) {
+        await ctx.reply(
+          `❌ Ключи не сохранены, потому что у аккаунта нет нужных прав.\n${error.message}`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: 'Авторизоваться', callback_data: 'wizard:auth:login' }],
+                [{ text: 'Назад', callback_data: 'wizard:auth:back:welcome' }],
+              ],
+            },
+          } as any,
+        );
+        return;
+      }
+      const message = error instanceof Error ? error.message : 'Не удалось проверить права Ozon API.';
+      await ctx.reply(`❌ Ключи не сохранены.\n${message}`);
+      return;
     }
 
     await this.credentialsStore.set(chatId, { clientId, apiKey });
@@ -122,6 +150,68 @@ export class BotUpdate {
     ];
 
     await ctx.reply(lines.join('\n'));
+  }
+
+  @Command('admin_broadcast')
+  async onAdminBroadcast(@Ctx() ctx: Context): Promise<void> {
+    const chatId = this.extractChatId(ctx);
+    if (!chatId) {
+      await ctx.reply('Не удалось определить чат.');
+      return;
+    }
+
+    if (!this.isAdmin(chatId)) {
+      await ctx.reply('Команда доступна только администратору.');
+      return;
+    }
+
+    const args = this.parseCommandArgs(ctx);
+    if (!args.length) {
+      await ctx.reply('Использование: /admin_broadcast <ALL|chatId> <текст сообщения>');
+      return;
+    }
+
+    let targets: string[] = [];
+    let text = '';
+    const [targetArg, ...rest] = args;
+    const normalizedTarget = (targetArg ?? '').trim();
+
+    if (normalizedTarget.toUpperCase() === 'ALL') {
+      text = rest.join(' ').trim();
+      targets = await this.collectBroadcastTargets();
+      if (!targets.length) {
+        await ctx.reply('В базе нет пользователей для рассылки.');
+        return;
+      }
+    } else if (/^-?\d+$/.test(normalizedTarget)) {
+      text = rest.join(' ').trim();
+      targets = [normalizedTarget];
+    } else {
+      // Backward-compat mode: old format "/admin_broadcast <text>" sends to ALL.
+      text = args.join(' ').trim();
+      targets = await this.collectBroadcastTargets();
+      if (!targets.length) {
+        await ctx.reply('В базе нет пользователей для рассылки.');
+        return;
+      }
+    }
+
+    if (!text) {
+      await ctx.reply('Укажите текст сообщения после target.');
+      return;
+    }
+
+    let attempted = 0;
+    for (const target of targets) {
+      await this.notifications.notifyUser(target, text);
+      attempted += 1;
+    }
+
+    await ctx.reply(`Рассылка завершена. Попыток отправки: ${attempted}`);
+    await this.notifications.notifyWizard(WizardEvent.SupplyStatus, {
+      ctx,
+      lines: [`admin_broadcast target=${normalizedTarget || 'ALL'} attempted=${attempted}`],
+    });
   }
 
   @On('document')
@@ -211,12 +301,48 @@ export class BotUpdate {
     return messageText.trim().split(/\s+/).slice(1);
   }
 
+  private parseCommandText(ctx: Context, command: string): string {
+    const messageText = ((ctx.message as any)?.text ?? '').trim();
+    if (!messageText) {
+      return '';
+    }
+
+    const [firstToken, ...restTokens] = messageText.split(/\s+/);
+    const normalized = firstToken.replace(/^\/+/, '');
+    const commandName = normalized.split('@')[0];
+    if (commandName !== command) {
+      return restTokens.join(' ').trim();
+    }
+    return restTokens.join(' ').trim();
+  }
+
   private extractChatId(ctx: Context): string | undefined {
     const chatId = (ctx.chat as any)?.id;
     if (typeof chatId === 'undefined' || chatId === null) {
       return undefined;
     }
     return String(chatId);
+  }
+
+  private isAdmin(chatId: string): boolean {
+    const ids = this.config.get<string[]>('telegram.adminIds') ?? [];
+    return ids.some((value) => value.trim() === chatId);
+  }
+
+  private async collectBroadcastTargets(): Promise<string[]> {
+    const [fromCredentials, fromOrders] = await Promise.all([
+      this.credentialsStore.listChatIds(),
+      this.orderStore.listDistinctChatIds(),
+    ]);
+
+    const set = new Set<string>();
+    for (const chatId of [...fromCredentials, ...fromOrders]) {
+      const normalized = chatId?.trim();
+      if (normalized) {
+        set.add(normalized);
+      }
+    }
+    return Array.from(set.values());
   }
 
   private maskValue(value: string): string {
