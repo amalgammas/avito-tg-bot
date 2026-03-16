@@ -160,7 +160,7 @@ export class BotUpdate {
       return;
     }
 
-    if (!this.isAdmin(chatId)) {
+    if (!this.isAdminContext(ctx)) {
       await ctx.reply('Команда доступна только администратору.');
       return;
     }
@@ -324,9 +324,24 @@ export class BotUpdate {
     return String(chatId);
   }
 
-  private isAdmin(chatId: string): boolean {
+  private isAdminContext(ctx: Context): boolean {
     const ids = this.config.get<string[]>('telegram.adminIds') ?? [];
-    return ids.some((value) => value.trim() === chatId);
+    const configured = new Set(ids.map((value) => value.trim()).filter(Boolean));
+    const broadcastChatId = this.config.get<string>('telegram.botAdminId')?.trim();
+
+    const chatId = this.extractChatId(ctx);
+    const fromId = this.extractFromId(ctx);
+
+    if (chatId && configured.has(chatId)) {
+      return true;
+    }
+    if (fromId && configured.has(fromId)) {
+      return true;
+    }
+    if (broadcastChatId && chatId === broadcastChatId) {
+      return true;
+    }
+    return false;
   }
 
   private async collectBroadcastTargets(): Promise<string[]> {
@@ -343,6 +358,14 @@ export class BotUpdate {
       }
     }
     return Array.from(set.values());
+  }
+
+  private extractFromId(ctx: Context): string | undefined {
+    const fromId = (ctx.from as any)?.id;
+    if (typeof fromId === 'undefined' || fromId === null) {
+      return undefined;
+    }
+    return String(fromId);
   }
 
   private maskValue(value: string): string {
