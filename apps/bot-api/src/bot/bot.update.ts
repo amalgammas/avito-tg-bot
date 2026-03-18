@@ -21,8 +21,7 @@ export class BotUpdate {
     ' 3. /ozon_clear — удалить ключи из базы',
     '',
     'Дополнительно:',
-    ' /ping — проверить доступность бота',
-    ' /admin_broadcast <ALL|chatId> <текст> — рассылка (только админ)'
+    ' /ping — проверить доступность бота'
   ].join('\n');
 
   constructor(
