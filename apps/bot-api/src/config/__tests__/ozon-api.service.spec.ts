@@ -97,7 +97,7 @@ describe('OzonApiService.createDraft', () => {
           items: [{ sku: 1927956902, quantity: 20 }],
           macrolocal_cluster_id: 154,
         },
-        deletion_sku_mode: 'FULL',
+        deletion_sku_mode: 'PARTIAL',
         delivery_info: {
           drop_off_warehouse: {
             warehouse_id: 1020000902510000,
@@ -135,7 +135,7 @@ describe('OzonApiService.createDraft', () => {
           items: [{ sku: 111, quantity: 5 }],
           macrolocal_cluster_id: 200,
         },
-        deletion_sku_mode: 'FULL',
+        deletion_sku_mode: 'PARTIAL',
       },
       undefined,
       credentials,

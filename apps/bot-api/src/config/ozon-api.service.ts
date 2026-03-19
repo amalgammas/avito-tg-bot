@@ -115,7 +115,7 @@ export interface OzonDirectCreateRequest {
     items: OzonDraftCreateItem[];
     macrolocal_cluster_id: number;
   };
-  deletion_sku_mode: 'FULL';
+  deletion_sku_mode: 'PARTIAL' | 'FULL';
 }
 
 export interface OzonCrossdockCreateRequest {
@@ -123,7 +123,7 @@ export interface OzonCrossdockCreateRequest {
     items: OzonDraftCreateItem[];
     macrolocal_cluster_id: number;
   };
-  deletion_sku_mode: 'FULL';
+  deletion_sku_mode: 'PARTIAL' | 'FULL';
   delivery_info: {
     drop_off_warehouse: {
       warehouse_id: number;
@@ -995,7 +995,7 @@ export class OzonApiService {
         items: payload.items,
         macrolocal_cluster_id: macrolocalClusterId,
       },
-      deletion_sku_mode: 'FULL',
+      deletion_sku_mode: 'PARTIAL',
     };
   }
 
@@ -1010,7 +1010,7 @@ export class OzonApiService {
         items: payload.items,
         macrolocal_cluster_id: macrolocalClusterId,
       },
-      deletion_sku_mode: 'FULL',
+      deletion_sku_mode: 'PARTIAL',
       delivery_info: {
         drop_off_warehouse: {
           warehouse_id: dropOffWarehouseId,
