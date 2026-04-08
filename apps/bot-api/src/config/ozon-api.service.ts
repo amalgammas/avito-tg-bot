@@ -482,12 +482,6 @@ export class OzonApiService {
     return this.request<T>({ method: 'GET', url, ...(cfg ?? {}) }, credentials, abortSignal, options);
   }
 
-  /** Проверка ключей: запрашиваем информацию о продавце. */
-  async validateCredentials(credentials: OzonCredentials): Promise<{ account: unknown }> {
-    const response = await this.post('/v1/seller/info', {}, undefined, credentials);
-    return { account: response.data };
-  }
-
   async getRoles(credentials: OzonCredentials): Promise<OzonRolesResponse> {
     const response = await this.post<OzonRolesResponse>('/v1/roles', {}, undefined, credentials);
     return response.data ?? {};
@@ -495,12 +489,8 @@ export class OzonApiService {
 
   async validateSupplyOrderAccess(
     credentials: OzonCredentials,
-  ): Promise<{ account: unknown; roles: OzonRoleItem[] }> {
-    const [validated, rolesResponse] = await Promise.all([
-      this.validateCredentials(credentials),
-      this.getRoles(credentials),
-    ]);
-
+  ): Promise<{ roles: OzonRoleItem[] }> {
+    const rolesResponse = await this.getRoles(credentials);
     const roles = Array.isArray(rolesResponse.roles) ? rolesResponse.roles : [];
 
     const supplyRole = roles.find((role) => role?.name?.trim() === this.supplyOrderRoleName);
@@ -518,12 +508,7 @@ export class OzonApiService {
       );
     }
 
-    return { account: validated.account, roles };
-  }
-
-  async getSellerInfo(credentials?: OzonCredentials): Promise<unknown> {
-    const response = await this.post('/v1/seller/info', {}, undefined, credentials);
-    return response.data;
+    return { roles };
   }
 
   /** Получить список кластеров и складов. */

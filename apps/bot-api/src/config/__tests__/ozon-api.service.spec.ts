@@ -15,7 +15,6 @@ describe('OzonApiService.validateSupplyOrderAccess', () => {
   it('accepts credentials when role Supply order has all required methods', async () => {
     const requiredMethods = [...((service as any).requiredSupplyMethods as string[])];
 
-    jest.spyOn(service, 'validateCredentials').mockResolvedValue({ account: { seller_id: 1 } });
     jest.spyOn(service, 'getRoles').mockResolvedValue({
       roles: [
         { name: 'Supply order ReadOnly', methods: ['/v1/supply-order/list'] },
@@ -24,7 +23,6 @@ describe('OzonApiService.validateSupplyOrderAccess', () => {
     });
 
     await expect(service.validateSupplyOrderAccess(credentials)).resolves.toEqual({
-      account: { seller_id: 1 },
       roles: [
         { name: 'Supply order ReadOnly', methods: ['/v1/supply-order/list'] },
         { name: 'Supply order', methods: requiredMethods },
@@ -33,7 +31,6 @@ describe('OzonApiService.validateSupplyOrderAccess', () => {
   });
 
   it('throws when role Supply order is missing', async () => {
-    jest.spyOn(service, 'validateCredentials').mockResolvedValue({ account: {} });
     jest.spyOn(service, 'getRoles').mockResolvedValue({
       roles: [{ name: 'Supply order ReadOnly', methods: [] }],
     });
@@ -48,7 +45,6 @@ describe('OzonApiService.validateSupplyOrderAccess', () => {
     const requiredMethods = [...((service as any).requiredSupplyMethods as string[])];
     const missingMethod = requiredMethods[0];
 
-    jest.spyOn(service, 'validateCredentials').mockResolvedValue({ account: {} });
     jest.spyOn(service, 'getRoles').mockResolvedValue({
       roles: [{ name: 'Supply order', methods: requiredMethods.slice(1) }],
     });
