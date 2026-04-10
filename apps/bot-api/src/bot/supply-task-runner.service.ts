@@ -13,6 +13,7 @@ import { WizardEvent } from './services/wizard-event.types';
 import { OzonCredentials } from '@bot/config/ozon-api.service';
 import { SupplyProcessService, SupplyOrderDetails } from './services/supply-process.service';
 import { SupplyTaskAbortService } from './services/supply-task-abort.service';
+import { endOfMoscowDay } from '@bot/utils/time.utils';
 
 @Injectable()
 export class SupplyTaskRunnerService implements OnApplicationBootstrap {
@@ -103,6 +104,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
 
   private async publishTasksSummary(): Promise<void> {
     await this.cleanupExpiredPendingTasks();
+    await this.cleanupExpiredAccessTasks();
     const tasks = await this.orderStore.listTasks({ status: 'task' });
     const lines: string[] = [];
 
@@ -119,6 +121,9 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
         parts.push(`chat: ${task.chatId}`);
         const userLabel = await this.resolveUserLabel(task.chatId);
         if (userLabel) parts.push(`user: ${userLabel}`);
+        const access = await this.credentialsStore.getAccessStatus(task.chatId);
+        if (access.clientId) parts.push(`client_id: ${access.clientId}`);
+        if (access.accessExpiresAt) parts.push(`доступ до: ${this.formatAccessDate(access.accessExpiresAt)}`);
         const taskLabel = this.formatTaskName(task.taskId ?? task.id);
         if (taskLabel) parts.push(`task: ${taskLabel}`);
         const supplyTypeLabel = this.formatSupplyType(task.taskPayload?.supplyType);
@@ -186,6 +191,30 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       });
 
       this.logger.warn(`Task ${taskLabel} expired by deadline cleanup (chat=${task.chatId})`);
+    }
+  }
+
+  private async cleanupExpiredAccessTasks(): Promise<void> {
+    const tasks = await this.orderStore.listTasks({ status: 'task' });
+    if (!tasks.length) {
+      return;
+    }
+
+    const processed = new Set<string>();
+    for (const task of tasks) {
+      const taskLabel = task.taskId ?? task.id;
+      const key = `${task.chatId}:${taskLabel}`;
+      if (processed.has(key)) {
+        continue;
+      }
+
+      const access = await this.credentialsStore.getAccessStatus(task.chatId);
+      if (!access.expired) {
+        continue;
+      }
+
+      processed.add(key);
+      await this.stopTaskDueToExpiredAccess(task.chatId, taskLabel, access.clientId, access.accessExpiresAt);
     }
   }
 
@@ -270,6 +299,15 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       this.logger.warn(`Skip task ${record.taskId ?? record.id}: credentials missing for chat ${record.chatId}`);
       return;
     }
+    if (this.isAccessExpired(credentials.accessExpiresAt)) {
+      await this.stopTaskDueToExpiredAccess(
+        record.chatId,
+        record.taskId ?? record.id,
+        credentials.clientId,
+        credentials.accessExpiresAt,
+      );
+      return;
+    }
 
     const clonedTask = this.cloneTask(record.taskPayload);
     const readyInDays = record.readyInDays ?? 1;
@@ -344,6 +382,53 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       return 'кросс-докинг';
     }
     return undefined;
+  }
+
+  private formatAccessDate(value: Date): string {
+    return new Intl.DateTimeFormat('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      timeZone: 'Europe/Moscow',
+    }).format(value);
+  }
+
+  private isAccessExpired(accessExpiresAt?: Date): boolean {
+    if (!accessExpiresAt) {
+      return false;
+    }
+    return Date.now() > endOfMoscowDay(accessExpiresAt).getTime();
+  }
+
+  private async stopTaskDueToExpiredAccess(
+    chatId: string,
+    taskId: string,
+    clientId?: string,
+    accessExpiresAt?: Date,
+  ): Promise<void> {
+    this.taskAbortService.abort(chatId, taskId);
+    await this.orderStore.deleteByTaskId(chatId, taskId);
+
+    await this.notifications.notifyUser(
+      chatId,
+      [
+        `⛔️ Задача ${taskId} остановлена.`,
+        accessExpiresAt
+          ? `Срок доступа истёк ${this.formatAccessDate(accessExpiresAt)} по МСК.`
+          : 'Срок доступа истёк.',
+        'Продлите доступ и запустите задачу заново.',
+      ].join('\n'),
+    );
+
+    await this.notifications.notifyWizard(WizardEvent.AccessExpired, {
+      lines: [
+        `chat: ${chatId}`,
+        `task: ${taskId}`,
+        clientId ? `client_id: ${clientId}` : undefined,
+        accessExpiresAt ? `access_expires_at: ${accessExpiresAt.toISOString()}` : undefined,
+        'Stopped by access policy',
+      ].filter((value): value is string => Boolean(value)),
+    });
   }
 
   private async resolveUserLabel(chatId: string): Promise<string | undefined> {

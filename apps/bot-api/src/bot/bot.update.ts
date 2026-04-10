@@ -18,7 +18,7 @@ export class BotUpdate {
     'Привет! Я помогу оформить поставку на Ozon:',
     ' 1. /start — запустить мастер',
     ' 2. /ozon_keys — посмотреть сохранённые ключи',
-    ' 3. /ozon_clear — удалить ключи из базы',
+    ' 3. /ozon_clear — удалить сохранённые ключи',
     '',
     'Дополнительно:',
     ' /ping — проверить доступность бота'
@@ -112,13 +112,12 @@ export class BotUpdate {
       return;
     }
 
-    const credentials = await this.credentialsStore.get(chatId);
-    if (!credentials) {
+    const cleared = await this.credentialsStore.clear(chatId);
+    if (!cleared) {
       await ctx.reply('Сохранённых ключей нет.');
       return;
     }
 
-    await this.credentialsStore.clear(chatId);
     await ctx.reply('✅ Ключи удалены из базы бота.');
     await this.wizard.start(ctx)
 
@@ -146,9 +145,65 @@ export class BotUpdate {
       `• api_key: ${this.maskValue(credentials.apiKey)}`,
       `• user: ${chatId}`,
       `• обновлено: ${updated}`,
+      `• доступ до: ${credentials.accessExpiresAt.toISOString()}`,
     ];
 
     await ctx.reply(lines.join('\n'));
+  }
+
+  @Command('admin_extend')
+  async onAdminExtend(@Ctx() ctx: Context): Promise<void> {
+    const chatId = this.extractChatId(ctx);
+    if (!chatId) {
+      await ctx.reply('Не удалось определить чат.');
+      return;
+    }
+
+    if (!this.isAdminContext(ctx)) {
+      await ctx.reply('Команда доступна только администратору.');
+      return;
+    }
+
+    const [clientId, daysRaw] = this.parseCommandArgs(ctx);
+    const days = Number(daysRaw);
+
+    if (!clientId || !Number.isFinite(days)) {
+      await ctx.reply('Использование: /admin_extend <clientId> <days>');
+      return;
+    }
+
+    const updated = await this.credentialsStore.extendAccessByClientId(clientId, days);
+    if (!updated) {
+      await ctx.reply(`Пользователи с client_id ${clientId} не найдены.`);
+      return;
+    }
+
+    await ctx.reply(
+      `Продление выполнено. Обновлено записей: ${updated}. client_id: ${clientId}, days: ${Math.max(0, Math.floor(days))}`,
+    );
+  }
+
+  @Command('admin_users')
+  async onAdminUsers(@Ctx() ctx: Context): Promise<void> {
+    const chatId = this.extractChatId(ctx);
+    if (!chatId) {
+      await ctx.reply('Не удалось определить чат.');
+      return;
+    }
+
+    if (!this.isAdminContext(ctx)) {
+      await ctx.reply('Команда доступна только администратору.');
+      return;
+    }
+
+    const rows = await this.credentialsStore.listAccessEntries();
+    const csv = this.buildAdminUsersCsv(rows);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+    await (ctx as any).replyWithDocument({
+      source: Buffer.from(csv, 'utf8'),
+      filename: `admin-users-${stamp}.csv`,
+    });
   }
 
   @Command('admin_broadcast')
@@ -377,6 +432,23 @@ export class BotUpdate {
 
   private wizardState(chatId: string) {
     return this.wizard.getState(chatId);
+  }
+
+  private buildAdminUsersCsv(
+    rows: Array<{ chatId: string; clientId?: string; accessExpiresAt?: Date }>,
+  ): string {
+    const header = ['chatId', 'clientId', 'accessExpiresAt'];
+    const lines = rows.map((row) =>
+      [row.chatId, row.clientId ?? '', row.accessExpiresAt?.toISOString() ?? ''].map((value) => this.escapeCsvValue(value)).join(','),
+    );
+    return [header.join(','), ...lines].join('\n');
+  }
+
+  private escapeCsvValue(value: string): string {
+    if (/[",\n]/.test(value)) {
+      return `"${value.replace(/"/g, '""')}"`;
+    }
+    return value;
   }
 
   private async wizardWarmup(ctx: Context, credentials: OzonCredentials): Promise<void> {

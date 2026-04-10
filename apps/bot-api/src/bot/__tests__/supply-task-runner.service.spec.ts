@@ -26,6 +26,7 @@ describe('SupplyTaskRunnerService', () => {
   } as any;
   const credentialsStore = {
     get: jest.fn(),
+    getAccessStatus: jest.fn(),
   } as any;
   const supplyService = {
     runSingleTask: jest.fn(),
@@ -44,6 +45,7 @@ describe('SupplyTaskRunnerService', () => {
   const taskAbortService = {
     register: jest.fn(),
     clear: jest.fn(),
+    abort: jest.fn(),
   } as any;
   const bot = {
     telegram: {
@@ -64,6 +66,7 @@ describe('SupplyTaskRunnerService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     orderStore.findTask.mockResolvedValue(null);
+    credentialsStore.getAccessStatus.mockResolvedValue({ chatId: 'chat-1', expired: false });
   });
 
   const sampleTask = {
@@ -222,6 +225,31 @@ describe('SupplyTaskRunnerService', () => {
     expect(orderStore.deleteByTaskId).toHaveBeenCalledWith('chat-1', 'task-1');
     expect(notifications.notifyWizard).toHaveBeenCalledWith(WizardEvent.WindowExpired, {
       lines: expect.arrayContaining([expect.stringContaining('task: task-1')]),
+    });
+  });
+
+  it('cleanupExpiredAccessTasks aborts and removes expired access tasks', async () => {
+    orderStore.listTasks.mockResolvedValueOnce([
+      {
+        id: 'task-1',
+        taskId: 'task-1',
+        chatId: 'chat-1',
+        status: 'task',
+      },
+    ]);
+    credentialsStore.getAccessStatus.mockResolvedValueOnce({
+      chatId: 'chat-1',
+      clientId: 'client-1',
+      accessExpiresAt: new Date('2026-01-01T00:00:00Z'),
+      expired: true,
+    });
+
+    await (service as any).cleanupExpiredAccessTasks();
+
+    expect(taskAbortService.abort).toHaveBeenCalledWith('chat-1', 'task-1');
+    expect(orderStore.deleteByTaskId).toHaveBeenCalledWith('chat-1', 'task-1');
+    expect(notifications.notifyWizard).toHaveBeenCalledWith(WizardEvent.AccessExpired, {
+      lines: expect.arrayContaining([expect.stringContaining('client_id: client-1')]),
     });
   });
 });

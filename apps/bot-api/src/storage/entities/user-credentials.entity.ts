@@ -13,4 +13,7 @@ export class UserCredentialsEntity {
 
   @Column({ type: 'datetime', nullable: true })
   verifiedAt: Date | null = null;
+
+  @Column({ type: 'datetime', nullable: true })
+  accessExpiresAt: Date | null = null;
 }

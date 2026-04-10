@@ -35,6 +35,7 @@ export enum WizardEvent {
   TaskOrderIdRecovered = 'task.orderIdRecovered',
   AuthSaved = 'auth.saved',
   AuthCleared = 'auth.cleared',
+  AccessExpired = 'access.expired',
 }
 
 export type WizardEventPayload = {
