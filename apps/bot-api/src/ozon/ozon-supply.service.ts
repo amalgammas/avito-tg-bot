@@ -571,24 +571,15 @@ export class OzonSupplyService {
 
       if (!warehouses.length) {
         if (task.supplyType !== 'CREATE_TYPE_DIRECT') {
-          const syntheticWarehouseId =
-            typeof task.warehouseId === 'number' && task.warehouseId > 0 ? task.warehouseId : 0;
-          const fallbackResult = await this.tryCreateSupplyOnWarehouse(
+          const message = task.warehouseSelectionPendingNotified
+            ? undefined
+            : 'Черновик пока не содержит доступных складов. Ждём появления маршрута и обновления расчёта.';
+          task.warehouseSelectionPendingNotified = true;
+          return {
             task,
-            credentials,
-            info,
-            {
-              warehouseId: syntheticWarehouseId,
-              name: task.warehouseName,
-              state: 'FULL_AVAILABLE',
-              isFullyAvailable: true,
-            },
-            abortSignal,
-          );
-          if (fallbackResult) {
-            return fallbackResult;
-          }
-          return { task, event: { type: OzonSupplyEventType.TimeslotMissing }, message: 'Свободных таймслотов нет' };
+            event: { type: OzonSupplyEventType.WarehousePending },
+            message,
+          };
         }
         return {
           task,
