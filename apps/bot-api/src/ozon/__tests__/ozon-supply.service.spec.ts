@@ -89,44 +89,6 @@ describe('OzonSupplyService', () => {
     expect(result.event.type).toBe(OzonSupplyEventType.DraftExpired);
   });
 
-  it('handleExistingDraft keeps waiting when crossdock draft has no available warehouses yet', async () => {
-    const credentials = { clientId: 'id', apiKey: 'key' };
-    ozonApi.getDraftInfo.mockResolvedValueOnce({
-      status: 'SUCCESS',
-      draft_id: 123,
-      clusters: [
-        {
-          macrolocal_cluster_id: 4007,
-          warehouses: [
-            {
-              availability_status: {
-                invalid_reason: 'NOT_AVAILABLE_ROUTE',
-                state: 'NOT_AVAILABLE',
-              },
-              storage_warehouse: null,
-              total_score: 0,
-            },
-          ],
-          supply_type: 'CROSSDOCK',
-        },
-      ],
-    });
-
-    const result = await (service as any).handleExistingDraft(
-      {
-        ...baseTask,
-        supplyType: 'CREATE_TYPE_CROSSDOCK',
-        warehouseAutoSelect: true,
-        warehouseId: undefined,
-      },
-      credentials,
-    );
-
-    expect(result.event.type).toBe(OzonSupplyEventType.WarehousePending);
-    expect(ozonApi.getDraftTimeslots).not.toHaveBeenCalled();
-    expect(result.task.draftOperationId).toBe(baseTask.draftOperationId);
-  });
-
   it('createDraft requests operation and returns DraftCreated', async () => {
     const credentials = { clientId: 'id', apiKey: 'key' };
     ozonApi.createDraft.mockResolvedValue('operation-123');
