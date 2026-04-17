@@ -14,6 +14,7 @@ import { OzonCredentials } from '@bot/config/ozon-api.service';
 import { SupplyProcessService, SupplyOrderDetails } from './services/supply-process.service';
 import { SupplyTaskAbortService } from './services/supply-task-abort.service';
 import { endOfMoscowDay } from '@bot/utils/time.utils';
+import { WebTaskEmailService } from '../web/services/web-task-email.service';
 
 @Injectable()
 export class SupplyTaskRunnerService implements OnApplicationBootstrap {
@@ -38,6 +39,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
     private readonly notifications: NotificationService,
     private readonly process: SupplyProcessService,
     private readonly taskAbortService: SupplyTaskAbortService,
+    private readonly webTaskEmail: WebTaskEmailService,
     @InjectBot() private readonly bot: Telegraf<Context>,
   ) {}
 
@@ -534,6 +536,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
         });
 
         await this.notifications.notifyUser(record.chatId, this.formatSupplyCreated(entity), { parseMode: 'HTML' });
+        await this.webTaskEmail.sendSupplyCreated(record.chatId, entity);
 
         const notifyLines = [
           `task: ${taskLabel}`,

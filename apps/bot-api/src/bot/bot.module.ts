@@ -5,6 +5,7 @@ import { OzonModule } from '../config/ozon.module';
 import { SupplyOrderEntity } from '../storage/entities/supply-order.entity';
 import { WizardSessionEntity } from '../storage/entities/wizard-session.entity';
 import { UserCredentialsEntity } from '../storage/entities/user-credentials.entity';
+import { WebUserEntity } from '../storage/entities/web-user.entity';
 import { SupplyOrderStore } from '../storage/supply-order.store';
 import { BotUpdate } from './bot.update';
 import { UserCredentialsStore } from './user-credentials.store';
@@ -22,11 +23,13 @@ import { SupplyProcessingCoordinatorService } from './services/supply-processing
 import { WizardNotifierService } from './services/wizard-notifier.service';
 import { NotificationService } from './services/notification.service';
 import { SupplyTaskAbortService } from './services/supply-task-abort.service';
+import { WebMailerService } from '../web/services/web-mailer.service';
+import { WebTaskEmailService } from '../web/services/web-task-email.service';
 
 @Module({
   imports: [
     OzonModule,
-    TypeOrmModule.forFeature([UserCredentialsEntity, SupplyOrderEntity, WizardSessionEntity]),
+    TypeOrmModule.forFeature([UserCredentialsEntity, SupplyOrderEntity, WizardSessionEntity, WebUserEntity]),
   ],
   providers: [
     BotUpdate,
@@ -46,6 +49,8 @@ import { SupplyTaskAbortService } from './services/supply-task-abort.service';
     UserSessionService,
     NotificationService,
     SupplyTaskAbortService,
+    WebMailerService,
+    WebTaskEmailService,
   ],
   exports: [
     UserCredentialsStore,
@@ -54,6 +59,7 @@ import { SupplyTaskAbortService } from './services/supply-task-abort.service';
     SupplyProcessService,
     SupplyTaskAbortService,
     SupplyProcessingCoordinatorService,
+    WebTaskEmailService,
   ],
 })
 export class BotModule {}

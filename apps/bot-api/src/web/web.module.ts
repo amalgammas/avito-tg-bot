@@ -17,6 +17,7 @@ import { WebMailerService } from './services/web-mailer.service';
 import { WebAccountService } from './services/web-account.service';
 import { WebSupplyService } from './services/web-supply.service';
 import { WebWizardService } from './services/web-wizard.service';
+import { WebTaskEmailService } from './services/web-task-email.service';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { WebWizardService } from './services/web-wizard.service';
     WebAuthService,
     WebSessionGuard,
     WebMailerService,
+    WebTaskEmailService,
     WebAccountService,
     WebSupplyService,
     WebWizardService,

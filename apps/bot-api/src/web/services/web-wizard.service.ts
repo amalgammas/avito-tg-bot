@@ -19,6 +19,7 @@ import type {
   WebWizardDropOffOption,
   WebWizardWarehouseOption,
 } from '../drafts/web-wizard-draft.types';
+import { WebTaskEmailService } from './web-task-email.service';
 
 @Injectable()
 export class WebWizardService {
@@ -36,6 +37,7 @@ export class WebWizardService {
     private readonly orderStore: SupplyOrderStore,
     private readonly processing: SupplyProcessingCoordinatorService,
     private readonly taskAbortService: SupplyTaskAbortService,
+    private readonly webTaskEmail: WebTaskEmailService,
   ) {}
 
   async parseSpreadsheet(
@@ -836,7 +838,7 @@ export class WebWizardService {
     const orderId = resolveResult.orderId;
     const orderDetails = orderId ? await this.process.fetchSupplyOrderDetails(orderId, credentials) : undefined;
 
-    await this.orderStore.completeTask(actorId, {
+    const entity = await this.orderStore.completeTask(actorId, {
       taskId,
       operationId: resolvedOperationId,
       orderId,
@@ -851,5 +853,7 @@ export class WebWizardService {
       items: this.process.mapTaskItems(task.items),
       task,
     });
+
+    await this.webTaskEmail.sendSupplyCreated(actorId, entity);
   }
 }
