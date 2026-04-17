@@ -13,6 +13,10 @@ import { HealthController } from './health/health.controller';
 import { UserCredentialsEntity } from './storage/entities/user-credentials.entity';
 import { SupplyOrderEntity } from './storage/entities/supply-order.entity';
 import { WizardSessionEntity } from './storage/entities/wizard-session.entity';
+import { WebAuthTokenEntity } from './storage/entities/web-auth-token.entity';
+import { WebSessionEntity } from './storage/entities/web-session.entity';
+import { WebUserEntity } from './storage/entities/web-user.entity';
+import { WebModule } from './web/web.module';
 
 @Module({
     imports: [
@@ -37,7 +41,14 @@ import { WizardSessionEntity } from './storage/entities/wizard-session.entity';
                 return {
                     type: 'sqlite' as const,
                     database: databasePath,
-                    entities: [UserCredentialsEntity, SupplyOrderEntity, WizardSessionEntity],
+                    entities: [
+                        UserCredentialsEntity,
+                        SupplyOrderEntity,
+                        WizardSessionEntity,
+                        WebUserEntity,
+                        WebAuthTokenEntity,
+                        WebSessionEntity,
+                    ],
                     synchronize: nodeEnv !== 'production',
                     autoLoadEntities: false,
                     logging,
@@ -91,6 +102,7 @@ import { WizardSessionEntity } from './storage/entities/wizard-session.entity';
         }),
         BotModule,
         OzonModule,
+        WebModule,
     ],
     controllers: [HealthController],
 })

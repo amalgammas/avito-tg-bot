@@ -47,6 +47,7 @@ export class WizardFlowService {
     warehouseIds: Array<number | string>,
     window: { dateFromIso: string; dateToIso: string },
     supplyType: OzonDraftSupplyType,
+    selectedClusterWarehouses: Array<{ macrolocal_cluster_id: number; storage_warehouse_id: number }> | undefined,
     credentials: { clientId: string; apiKey: string },
   ): Promise<OzonTimeslotResponse> {
     return this.ozonApi.getDraftTimeslots(
@@ -56,6 +57,7 @@ export class WizardFlowService {
         dateFrom: window.dateFromIso,
         dateTo: window.dateToIso,
         supplyType,
+        selectedClusterWarehouses,
       },
       credentials,
     );

@@ -42,13 +42,18 @@ export class AdminNotifierService {
     ctx?: Context;
     event: WizardEvent;
     lines?: string[];
+    source?: 'telegram' | 'web';
   }): Promise<void> {
     if (!this.isEnabled()) {
       return;
     }
 
-    const { ctx, event, lines = [] } = params;
+    const { ctx, event, lines = [], source } = params;
     const meta: string[] = [];
+
+    if (source) {
+      meta.push(`source: ${source}`);
+    }
 
     const chatId = this.extractChatId(ctx);
     if (chatId) {

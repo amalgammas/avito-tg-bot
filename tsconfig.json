@@ -19,6 +19,6 @@
       "@bot/*": ["apps/bot-api/src/*"]
     }
   },
-  "include": ["apps/**/*.ts", "libs/**/*.ts"],
+  "include": ["apps/bot-api/src/**/*.ts", "libs/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

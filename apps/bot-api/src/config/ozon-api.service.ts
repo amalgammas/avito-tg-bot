@@ -757,8 +757,8 @@ export class OzonApiService {
 
     const requestBody: OzonDraftTimeslotsRequest = {
       draft_id: payload.draftId,
-      date_from: payload.dateFrom,
-      date_to: payload.dateTo,
+      date_from: this.normalizeOzonDate(payload.dateFrom),
+      date_to: this.normalizeOzonDate(payload.dateTo),
       supply_type: normalizedSupplyType,
       ...(normalizedSupplyType === 'DIRECT' ? { warehouse_ids: payload.warehouseIds.map(String) } : {}),
       ...(selectedClusterWarehouses.length
@@ -779,6 +779,25 @@ export class OzonApiService {
     );
 
     return this.normalizeTimeslotResponse(response.data);
+  }
+
+  private normalizeOzonDate(value: string): string {
+    const trimmed = value?.trim();
+    if (!trimmed) {
+      return value;
+    }
+
+    const dateOnlyMatch = /^(\d{4}-\d{2}-\d{2})/.exec(trimmed);
+    if (dateOnlyMatch) {
+      return dateOnlyMatch[1];
+    }
+
+    const parsed = new Date(trimmed);
+    if (Number.isNaN(parsed.getTime())) {
+      return trimmed;
+    }
+
+    return parsed.toISOString().slice(0, 10);
   }
 
   async createSupply(

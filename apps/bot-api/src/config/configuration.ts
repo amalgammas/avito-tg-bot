@@ -3,6 +3,14 @@ export interface AppConfig {
 
   http: {
     port: number;
+    webOrigin?: string;
+  };
+
+  web: {
+    appUrl: string;
+    sessionCookieName: string;
+    sessionTtlDays: number;
+    magicLinkTtlMinutes: number;
   };
 
   telegram: {
@@ -30,12 +38,24 @@ export interface AppConfig {
     path: string;
     logging: boolean;
   };
+
+  email: {
+    resendApiKey?: string;
+    from: string;
+  };
 }
 
 export const configuration = (): AppConfig => ({
   nodeEnv: process.env.NODE_ENV ?? 'development',
   http: {
     port: Number(process.env.PORT ?? 3000),
+    webOrigin: process.env.WEB_ORIGIN ?? 'http://localhost:4200',
+  },
+  web: {
+    appUrl: process.env.WEB_APP_URL ?? 'http://localhost:4200',
+    sessionCookieName: process.env.WEB_SESSION_COOKIE ?? 'ozon_web_session',
+    sessionTtlDays: Number(process.env.WEB_SESSION_TTL_DAYS ?? 30),
+    magicLinkTtlMinutes: Number(process.env.WEB_MAGIC_LINK_TTL_MINUTES ?? 20),
   },
   telegram: {
     token: process.env.TELEGRAM_BOT_TOKEN ?? '',
@@ -64,5 +84,9 @@ export const configuration = (): AppConfig => ({
   database: {
     path: process.env.DATABASE_PATH ?? 'data/bot.sqlite',
     logging: /^true$/i.test(process.env.DATABASE_LOGGING ?? ''),
+  },
+  email: {
+    resendApiKey: process.env.RESEND_API_KEY || undefined,
+    from: process.env.EMAIL_FROM ?? 'no-reply@example.com',
   },
 });

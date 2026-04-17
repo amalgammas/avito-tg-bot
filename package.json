@@ -5,13 +5,22 @@
   "type": "commonjs",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:web": "ng build web",
     "start": "NODE_ENV=production node dist/bootstrap.js",
     "start:dev": "NODE_ENV=development ts-node -r tsconfig-paths/register apps/bot-api/src/main.ts",
+    "start:web": "ng serve web",
+    "start:web:host": "ng serve web --host 0.0.0.0",
     "inst-deps": "yarn install",
     "test": "jest",
     "test:watch": "jest --watch"
   },
   "dependencies": {
+    "@angular/common": "^20.3.0",
+    "@angular/compiler": "^20.3.0",
+    "@angular/core": "^20.3.0",
+    "@angular/forms": "^20.3.0",
+    "@angular/platform-browser": "^20.3.0",
+    "@angular/router": "^20.3.0",
     "@nestjs/axios": "^3.0.1",
     "@nestjs/common": "^10.2.7",
     "@nestjs/config": "^3.0.1",
@@ -19,15 +28,21 @@
     "@nestjs/platform-express": "^10.2.7",
     "@nestjs/typeorm": "^11.0.0",
     "axios": "^1.12.2",
+    "lru-cache": "5.1.1",
     "nestjs-telegraf": "^2.9.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "sqlite3": "^5.1.7",
     "telegraf": "^4.12.2",
+    "tslib": "^2.8.1",
     "typeorm": "^0.3.27",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "zone.js": "^0.15.1"
   },
   "devDependencies": {
+    "@angular/build": "^20.3.0",
+    "@angular/cli": "^20.3.0",
+    "@angular/compiler-cli": "^20.3.0",
     "@types/node": "^20.11.30",
     "@types/jest": "^29.5.12",
     "jest": "^29.7.0",
@@ -35,7 +50,7 @@
     "tsconfig-paths": "^4.2.0",
     "ts-jest": "^29.2.5",
 
-    "typescript": "^5.4.5"
+    "typescript": "5.8.3"
   },
   "packageManager": "yarn@1.22.22"
 }

@@ -47,5 +47,13 @@ import { SupplyTaskAbortService } from './services/supply-task-abort.service';
     NotificationService,
     SupplyTaskAbortService,
   ],
+  exports: [
+    UserCredentialsStore,
+    SupplyOrderStore,
+    WizardFlowService,
+    SupplyProcessService,
+    SupplyTaskAbortService,
+    SupplyProcessingCoordinatorService,
+  ],
 })
 export class BotModule {}

@@ -13,6 +13,12 @@ async function bootstrap(): Promise<void> {
   const configService = app.get(ConfigService);
   const port = configService.get<number>('http.port') ?? 3000;
   const nodeEnv = configService.get<string>('nodeEnv') ?? 'development';
+  const webOrigin = configService.get<string>('http.webOrigin');
+
+  app.enableCors({
+    origin: webOrigin ? [webOrigin] : true,
+    credentials: true,
+  });
 
   await app.listen(port);
   logger.log(`Application is running on port ${port} in ${nodeEnv} mode`);

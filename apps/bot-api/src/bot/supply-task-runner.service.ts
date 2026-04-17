@@ -188,6 +188,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
           `deadline: ${task.taskPayload?.lastDay ?? 'n/a'}`,
           'Stopped by runner cleanup (expired deadline)',
         ],
+        source: this.resolveNotificationSource(task.chatId),
       });
 
       this.logger.warn(`Task ${taskLabel} expired by deadline cleanup (chat=${task.chatId})`);
@@ -274,6 +275,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
             `operation: ${operationId}`,
             `order_id: ${orderId}`,
           ],
+          source: this.resolveNotificationSource(record.chatId),
         });
         this.logger.log(`Recovered order_id=${orderId} for operation ${operationId}`);
       } catch (error) {
@@ -340,6 +342,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
             `chat: ${record.chatId}`,
             this.describeError(error),
           ],
+          source: this.resolveNotificationSource(record.chatId),
         });
       }
     } finally {
@@ -428,6 +431,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
         accessExpiresAt ? `access_expires_at: ${accessExpiresAt.toISOString()}` : undefined,
         'Stopped by access policy',
       ].filter((value): value is string => Boolean(value)),
+      source: this.resolveNotificationSource(chatId),
     });
   }
 
@@ -538,7 +542,10 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
           `chat: ${record.chatId}`,
         ].filter((value): value is string => Boolean(value));
 
-        await this.notifications.notifyWizard(WizardEvent.TaskResumedSupplyCreated, { lines: notifyLines });
+        await this.notifications.notifyWizard(WizardEvent.TaskResumedSupplyCreated, {
+          lines: notifyLines,
+          source: this.resolveNotificationSource(record.chatId),
+        });
         break;
       }
       case OzonSupplyEventType.Error:
@@ -551,6 +558,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
             `chat: ${record.chatId}`,
             result.message ?? 'unknown error',
           ],
+          source: this.resolveNotificationSource(record.chatId),
         });
         break;
       case OzonSupplyEventType.WindowExpired: {
@@ -571,6 +579,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
         await this.notifications.notifyUser(record.chatId, lines.join('\n'));
         await this.notifications.notifyWizard(WizardEvent.WindowExpired, {
           lines: [`task: ${taskLabel}`, `chat: ${record.chatId}`, result.message ?? 'window expired'],
+          source: this.resolveNotificationSource(record.chatId),
         });
         break;
       }
@@ -656,6 +665,7 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
         resolveResult.lastStatusCode ? `code: ${resolveResult.lastStatusCode}` : undefined,
         resolveResult.lastErrorMessage ?? 'order_id не получен',
       ].filter((line): line is string => Boolean(line)),
+      source: this.resolveNotificationSource(record.chatId),
     });
 
     this.logger.warn(
@@ -676,6 +686,10 @@ export class SupplyTaskRunnerService implements OnApplicationBootstrap {
       const names = name.split('-');
       return names[1];
     }
+  }
+
+  private resolveNotificationSource(chatId: string): 'telegram' | 'web' {
+    return chatId.startsWith('web:') ? 'web' : 'telegram';
   }
 
   private formatSupplyCreated(entity: SupplyOrderEntity): string {

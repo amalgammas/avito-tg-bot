@@ -21,12 +21,14 @@ export class WizardNotifierService {
 
     const filtered = (options.lines ?? []).filter((value): value is string => Boolean(value && value.trim().length));
     const withTask = this.ensureTaskLine(filtered);
+    const source = options.source ?? (options.ctx ? 'telegram' : undefined);
 
     try {
       await this.adminNotifier.notifyWizardEvent({
         ctx: options.ctx,
         event,
         lines: withTask,
+        source,
       });
     } catch (error) {
       this.logger.debug(`Admin notification failed (${event}): ${String(error)}`);

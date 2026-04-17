@@ -104,6 +104,24 @@ export class SupplyOrderStore {
     return this.repository.findOne({ where: { chatId, taskId } });
   }
 
+  async findById(chatId: string, id: string): Promise<SupplyOrderEntity | null> {
+    await this.ensureSchemaCompatibility();
+    return this.repository.findOne({ where: { chatId, id } });
+  }
+
+  async findByAnyIdentifier(chatId: string, id: string): Promise<SupplyOrderEntity | null> {
+    await this.ensureSchemaCompatibility();
+    const parsedOrderId = Number(id);
+    return (
+      (await this.repository.findOne({ where: { chatId, id } })) ??
+      (await this.repository.findOne({ where: { chatId, taskId: id } })) ??
+      (await this.repository.findOne({ where: { chatId, operationId: id } })) ??
+      (Number.isFinite(parsedOrderId)
+        ? await this.repository.findOne({ where: { chatId, orderId: Math.trunc(parsedOrderId) } })
+        : null)
+    );
+  }
+
   async saveTask(chatId: string, payload: SupplyOrderTaskPayload): Promise<SupplyOrderEntity> {
     await this.ensureSchemaCompatibility();
     const taskId = payload.task.taskId;

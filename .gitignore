@@ -130,6 +130,7 @@ dist
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+.angular
 
 # Vite logs files
 vite.config.js.timestamp-*
@@ -138,6 +139,7 @@ vite.config.ts.timestamp-*
 
 #database
 data
+data/bot.sqlite
 
 #idea
 .idea

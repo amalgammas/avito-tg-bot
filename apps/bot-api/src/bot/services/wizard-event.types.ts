@@ -40,4 +40,5 @@ export enum WizardEvent {
 
 export type WizardEventPayload = {
   lines?: Array<string | undefined>;
+  source?: 'telegram' | 'web';
 };
