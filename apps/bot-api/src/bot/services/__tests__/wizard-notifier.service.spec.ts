@@ -34,6 +34,7 @@ describe('WizardNotifierService', () => {
       ctx,
       event: WizardEvent.SupplyProcessing,
       lines: ['line'],
+      source: 'telegram',
     });
   });
 

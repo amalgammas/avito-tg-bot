@@ -480,6 +480,7 @@ export class SupplyWizardHandler {
             await this.notifications.notifyWizard(WizardEvent.DocumentUploaded, {
                 ctx,
                 lines: [
+                    this.buildCurrentTaskLine(chatId),
                     `file: ${document.file_name ?? 'unknown'}`,
                     document.file_size ? `size: ${document.file_size} bytes` : undefined,
                 ],
@@ -622,7 +623,10 @@ export class SupplyWizardHandler {
             if (!processed) {
                 return;
             }
-            await this.notifications.notifyWizard(WizardEvent.SpreadsheetLink, { ctx, lines: [`link: ${trimmed}`] });
+            await this.notifications.notifyWizard(WizardEvent.SpreadsheetLink, {
+                ctx,
+                lines: [this.buildCurrentTaskLine(chatId), `link: ${trimmed}`],
+            });
         } catch (error) {
             this.logger.error(`handleSpreadsheetLink failed: ${this.describeError(error)}`);
             await ctx.reply(`❌ Не удалось обработать таблицу: ${this.describeError(error)}`);
@@ -1682,7 +1686,16 @@ export class SupplyWizardHandler {
         if (selected) {
             return selected;
         }
+        return undefined;
+    }
 
+    private buildCurrentTaskLine(chatId: string): string | undefined {
+        const state = this.wizardStore.get(chatId);
+        if (!state) {
+            return undefined;
+        }
+        const taskId = this.resolveActiveTaskId(chatId, state);
+        return taskId ? `task: ${taskId}` : undefined;
     }
 
     private updateTaskContext(
@@ -5468,6 +5481,10 @@ export class SupplyWizardHandler {
         if (eventType === OzonSupplyEventType.TimeslotMissing) {
             return;
         }
+        // DraftInvalid is a retry signal: bot drops the current draft and recreates it
+        if (eventType === OzonSupplyEventType.DraftInvalid) {
+            return;
+        }
         // WarehousePending without message becomes spammy; skip silent notifications
         if (eventType === OzonSupplyEventType.WarehousePending && !result.message) {
             return;
@@ -5497,9 +5514,6 @@ export class SupplyWizardHandler {
         });
 
         const lines: string[] = [];
-        if (result.task.taskId) {
-            lines.push(`task: ${result.task.taskId}`);
-        }
         if (text) {
             lines.push(text);
         }
