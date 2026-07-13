@@ -228,28 +228,25 @@ describe('SupplyTaskRunnerService', () => {
     });
   });
 
-  it('cleanupExpiredAccessTasks aborts and removes expired access tasks', async () => {
-    orderStore.listTasks.mockResolvedValueOnce([
-      {
-        id: 'task-1',
-        taskId: 'task-1',
-        chatId: 'chat-1',
-        status: 'task',
-      },
-    ]);
-    credentialsStore.getAccessStatus.mockResolvedValueOnce({
-      chatId: 'chat-1',
+  it('resumes a pending task even when the recorded access date has passed', async () => {
+    credentialsStore.get.mockResolvedValueOnce({
       clientId: 'client-1',
-      accessExpiresAt: new Date('2026-01-01T00:00:00Z'),
-      expired: true,
+      apiKey: 'api-key',
+      verifiedAt: new Date('2025-01-01T00:00:00Z'),
+      accessExpiresAt: new Date('2025-01-31T00:00:00Z'),
     });
+    supplyService.runSingleTask.mockResolvedValueOnce(undefined);
 
-    await (service as any).cleanupExpiredAccessTasks();
+    await (service as any).resumeSingleTask(sampleTask);
 
-    expect(taskAbortService.abort).toHaveBeenCalledWith('chat-1', 'task-1');
-    expect(orderStore.deleteByTaskId).toHaveBeenCalledWith('chat-1', 'task-1');
-    expect(notifications.notifyWizard).toHaveBeenCalledWith(WizardEvent.AccessExpired, {
-      lines: expect.arrayContaining([expect.stringContaining('client_id: client-1')]),
-    });
+    expect(supplyService.runSingleTask).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 'task-1' }),
+      expect.objectContaining({
+        credentials: expect.objectContaining({ clientId: 'client-1' }),
+      }),
+    );
+    expect(orderStore.deleteByTaskId).not.toHaveBeenCalled();
+    expect(taskAbortService.abort).not.toHaveBeenCalled();
   });
+
 });

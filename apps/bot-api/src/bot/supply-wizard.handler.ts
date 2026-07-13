@@ -1381,10 +1381,6 @@ export class SupplyWizardHandler {
             await ctx.reply('🔐 Сначала сохраните ключи через /start.');
             return;
         }
-        if (!(await this.ensureActiveAccess(ctx, chatId, credentials.clientId))) {
-            return;
-        }
-
         const abortController = this.registerAbortController(chatId, task.taskId);
 
         const wasAutoWarehouseSelection = typeof state.selectedWarehouseId !== 'number';
@@ -5053,10 +5049,6 @@ export class SupplyWizardHandler {
             await ctx.reply('🔐 Сначала сохраните ключи через /start <CLIENT_ID> <API_KEY>.');
             return;
         }
-        if (!(await this.ensureActiveAccess(ctx, chatId, credentials.clientId))) {
-            return;
-        }
-
         if (!task.taskId) {
             this.logger.warn(`[${chatId}] ensureDraftCreated: taskId не задан`);
             return;
@@ -5555,44 +5547,6 @@ export class SupplyWizardHandler {
         }
 
         return undefined;
-    }
-
-    private async ensureActiveAccess(ctx: Context, chatId: string, clientId?: string): Promise<boolean> {
-        const access = await this.credentialsStore.getAccessStatus(chatId);
-        if (!access.expired) {
-            return true;
-        }
-
-        const accessDate = access.accessExpiresAt
-            ? new Intl.DateTimeFormat('ru-RU', {
-                day: '2-digit',
-                month: '2-digit',
-                year: 'numeric',
-                timeZone: MOSCOW_TIMEZONE,
-            }).format(access.accessExpiresAt)
-            : undefined;
-
-        await ctx.reply(
-            [
-                '⛔️ Срок доступа к боту истёк.',
-                accessDate ? `Доступ был активен до конца дня ${accessDate} по МСК.` : undefined,
-                clientId ? `client_id: ${clientId}` : access.clientId ? `client_id: ${access.clientId}` : undefined,
-                'Продлите доступ у администратора и повторите запуск.',
-            ]
-                .filter((line): line is string => Boolean(line))
-                .join('\n'),
-        );
-
-        await this.notifications.notifyWizard(WizardEvent.AccessExpired, {
-            ctx,
-            lines: [
-                `chat: ${chatId}`,
-                clientId ? `client_id: ${clientId}` : access.clientId ? `client_id: ${access.clientId}` : undefined,
-                access.accessExpiresAt ? `access_expires_at: ${access.accessExpiresAt.toISOString()}` : undefined,
-                'Blocked before task start',
-            ],
-        });
-        return false;
     }
 
     private registerAbortController(chatId: string, taskId: string): AbortController {
