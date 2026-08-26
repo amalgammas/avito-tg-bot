@@ -61,6 +61,7 @@ cp .env.example .env
 ```
 Обязательные переменные:
 - `TELEGRAM_BOT_TOKEN` — токен бота.
+- `TELEGRAM_PROXY_URL` — опциональный HTTP(S)/SOCKS-прокси только для Telegram API и скачивания файлов, например `socks5h://user:password@host:port`.
 - `OZON_CLIENT_ID`, `OZON_API_KEY` — дефолтные ключи (используются, если пользователь не авторизовался). Можно оставить пустыми.
 - `WEBHOOK_DOMAIN`, `WEBHOOK_PATH` — нужны только в production (webhook).
 - `DATABASE_PATH` / `OZON_SUPPLY_*` — при необходимости переопределяют SQLite и параметры работы мастера (drop-off, интервал поллинга).

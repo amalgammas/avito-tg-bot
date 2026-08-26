@@ -7,6 +7,7 @@ export interface AppConfig {
 
   telegram: {
     token: string;
+    proxyUrl?: string;
     webhookDomain?: string;
     webhookPath?: string;
     adminIds: string[];
@@ -39,6 +40,7 @@ export const configuration = (): AppConfig => ({
   },
   telegram: {
     token: process.env.TELEGRAM_BOT_TOKEN ?? '',
+    proxyUrl: process.env.TELEGRAM_PROXY_URL?.trim() || undefined,
     webhookDomain: process.env.WEBHOOK_DOMAIN,
     webhookPath: process.env.WEBHOOK_PATH,
     adminIds: (process.env.TELEGRAM_ADMIN_IDS ?? '')

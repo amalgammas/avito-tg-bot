@@ -1,6 +1,8 @@
 import axios from 'axios';
 import type { AxiosError } from 'axios';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import type { Agent } from 'http';
 import { Context } from 'telegraf';
 
 import {
@@ -38,6 +40,7 @@ import { SupplyProcessingCoordinatorService } from './services/supply-processing
 import { WizardEvent } from './services/wizard-event.types';
 import { SupplyWizardViewService } from './supply-wizard/view.service';
 import { SupplyTaskAbortService } from './services/supply-task-abort.service';
+import { createTelegramProxyAgent } from '../config/telegram-proxy';
 import {
     addMoscowDays,
     endOfMoscowDay,
@@ -66,6 +69,7 @@ export class SupplyWizardHandler {
     private latestDraftWarehouses: SupplyWizardDraftWarehouseOption[] = [];
     private latestDraftId?: number;
     private latestDraftOperationId?: string;
+    private readonly telegramProxyAgent?: Agent;
     constructor(
         private readonly credentialsStore: UserCredentialsStore,
         private readonly sheetService: OzonSheetService,
@@ -79,7 +83,12 @@ export class SupplyWizardHandler {
         private readonly view: SupplyWizardViewService,
         private readonly orderStore: SupplyOrderStore,
         private readonly taskAbortService: SupplyTaskAbortService,
-    ) {}
+        @Optional() config?: ConfigService,
+    ) {
+        this.telegramProxyAgent = createTelegramProxyAgent(
+            config?.get<string>('telegram.proxyUrl'),
+        );
+    }
 
     getState(chatId: string): SupplyWizardState | undefined {
         return this.wizardStore.get(chatId);
@@ -5576,6 +5585,8 @@ export class SupplyWizardHandler {
         const response = await axios.get<ArrayBuffer>(url, {
             responseType: 'arraybuffer',
             timeout: 60_000,
+            httpsAgent: this.telegramProxyAgent,
+            proxy: this.telegramProxyAgent ? false : undefined,
         });
         return Buffer.from(response.data);
     }

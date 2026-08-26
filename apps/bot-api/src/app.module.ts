@@ -1,5 +1,5 @@
 // apps/bot-api/src/app.module.ts
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { existsSync, mkdirSync } from 'fs';
@@ -9,6 +9,7 @@ import { TelegrafModule, TelegrafModuleOptions } from 'nestjs-telegraf';
 import { BotModule } from './bot/bot.module';
 import { OzonModule } from './config/ozon.module';
 import { configuration } from './config/configuration';
+import { createTelegramProxyAgent } from './config/telegram-proxy';
 import { HealthController } from './health/health.controller';
 import { UserCredentialsEntity } from './storage/entities/user-credentials.entity';
 import { SupplyOrderEntity } from './storage/entities/supply-order.entity';
@@ -54,6 +55,15 @@ import { WizardSessionEntity } from './storage/entities/wizard-session.entity';
                 }
 
                 const nodeEnv = config.get<string>('nodeEnv') ?? 'development';
+                const telegramAgent = createTelegramProxyAgent(
+                    config.get<string>('telegram.proxyUrl'),
+                );
+                if (telegramAgent) {
+                    new Logger('TelegramProxy').log('Telegram proxy is enabled');
+                }
+                const options = telegramAgent
+                    ? { telegram: { agent: telegramAgent } }
+                    : undefined;
 
                 const useWebhook = config.get<boolean>('telegram.useWebhook');
 
@@ -73,6 +83,7 @@ import { WizardSessionEntity } from './storage/entities/wizard-session.entity';
 
                     return {
                         token,
+                        options,
                         launchOptions: {
                             webhook: {
                                 domain: webhookDomain.replace(/\/$/, ''),
@@ -86,6 +97,7 @@ import { WizardSessionEntity } from './storage/entities/wizard-session.entity';
                 // dev-режим
                 return {
                     token,
+                    options,
                 };
             },
         }),
